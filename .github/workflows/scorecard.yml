@@ -39,10 +39,6 @@ jobs:
       issues: read
       pull-requests: read
       checks: read
-      # Needed to upload the SARIF results to the code-scanning dashboard.
-      security-events: write
-      # Needed to publish results and obtain a badge (uses OIDC, no secrets).
-      id-token: write
 
     steps:
       - name: Checkout
@@ -56,9 +52,7 @@ jobs:
           results_file: scorecard.sarif
           results_format: sarif
           # Publishes results to the OpenSSF REST API for the public badge and
-          # trend tracking. Set to false if maintainers prefer to keep the
-          # score private (the SARIF upload below still works either way).
-          # Keep private-repository score data inside GitHub.
+          # trend tracking. Keep private-repository score data inside GitHub.
           publish_results: false
 
       # Retain the raw SARIF as a build artifact for offline inspection.
@@ -68,8 +62,3 @@ jobs:
           name: scorecard-sarif
           path: scorecard.sarif
           retention-days: 5
-
-      - name: Upload SARIF to code-scanning
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
-        with:
-          sarif_file: scorecard.sarif

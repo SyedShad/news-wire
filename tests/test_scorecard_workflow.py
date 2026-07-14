@@ -13,11 +13,12 @@ def test_scorecard_workflow_exists() -> None:
     assert WORKFLOW.is_file()
 
 
-def test_scorecard_runs_ossf_action_and_uploads_sarif() -> None:
+def test_scorecard_runs_ossf_action_and_retains_sarif_artifact() -> None:
     text = _workflow_text()
 
     assert "ossf/scorecard-action" in text
-    assert "github/codeql-action/upload-sarif" in text
+    assert "actions/upload-artifact" in text
+    assert "github/codeql-action/upload-sarif" not in text
     assert "results_format: sarif" in text
 
 
@@ -42,8 +43,11 @@ def test_scorecard_requests_minimal_permissions() -> None:
     # to none and every run fails.
     assert "contents: read" in text
     assert "actions: read" in text
-    assert "security-events: write" in text
-    assert "id-token: write" in text
+    assert "issues: read" in text
+    assert "pull-requests: read" in text
+    assert "checks: read" in text
+    assert "security-events: write" not in text
+    assert "id-token: write" not in text
 
 
 def test_scorecard_documents_advisory_policy() -> None:
