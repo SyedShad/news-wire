@@ -147,6 +147,28 @@ def test_launchagent_rejects_missing_launcher_and_reports_launchctl_errors(tmp_p
     assert manager._run("print", "gui/1/test", check=False).returncode == 1
 
 
+def test_launchagent_preserves_stable_launcher_symlink(tmp_path: Path) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    release_launcher = tmp_path / "releases" / "v1" / "launcher"
+    release_launcher.parent.mkdir(parents=True)
+    release_launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    release_launcher.chmod(0o700)
+    stable_launcher = tmp_path / "bin" / "open-source-ai-news-wire"
+    stable_launcher.parent.mkdir()
+    stable_launcher.symlink_to(release_launcher)
+
+    manager = LaunchAgentManager(database, launcher=stable_launcher)
+
+    assert manager.launcher == stable_launcher.absolute()
+    assert manager._plist()["ProgramArguments"] == [
+        str(stable_launcher.absolute()),
+        "scan",
+        "--trigger",
+        "scheduled",
+    ]
+
+
 def test_worker_maintains_promoted_expired_and_active_watches(tmp_path: Path) -> None:
     database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
     database.initialize()

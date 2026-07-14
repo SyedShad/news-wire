@@ -32,7 +32,8 @@ class SchedulerStatus:
 class LaunchAgentManager:
     def __init__(self, database: Database, *, launcher: Path | None = None):
         self.database = database
-        self.launcher = (launcher or Path(sys.argv[0])).expanduser().resolve()
+        selected_launcher = (launcher or Path(sys.argv[0])).expanduser()
+        self.launcher = Path(os.path.abspath(selected_launcher))
         self.plist_path = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
         self.domain = f"gui/{os.getuid()}"
 
