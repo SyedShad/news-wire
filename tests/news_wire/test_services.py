@@ -220,7 +220,7 @@ def test_filters_missing_records_and_guarded_actions(service: DashboardService) 
         service.save_draft(1, "", "Meta", "", "")
     with pytest.raises(LookupError, match="Source not found"):
         service.toggle_source("missing")
-    with pytest.raises(ValueError, match="Unsupported schedule"):
+    with pytest.raises(ValueError, match="scheduler controls are unavailable"):
         service.schedule_action("install")
 
 
@@ -265,7 +265,7 @@ def test_settings_alerts_and_evidence_failure_paths(service: DashboardService) -
     assert settings["counts"]["stories"] == 5
     assert settings["counts"]["registered sources"] == 12
     assert settings["counts"]["source items"] == 9
-    assert settings["app_version"] == "0.1.0"
+    assert settings["app_version"] == "0.2.0"
     assert settings["purge_preview"]["operations_count"] == 1
     assert settings["demo_mode"] is True
     assert service.mark_alerts_read() == 6

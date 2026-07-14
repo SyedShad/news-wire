@@ -14,13 +14,21 @@
       <div><dt>Catch-up</dt><dd>72 hours automatic · extended on request</dd></div>
     </dl>
     <div class="schedule-actions">
-      <form action="{{ url_for('schedule_action', action='run_now') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button button-primary" type="submit">Queue run</button></form>
+      <form action="{{ url_for('schedule_action', action='run_now') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button button-primary" type="submit">Run now</button></form>
       {% if data.status == 'active' %}
       <form action="{{ url_for('schedule_action', action='pause') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button button-secondary" type="submit">Pause</button></form>
       {% elif data.installed %}
       <form action="{{ url_for('schedule_action', action='resume') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button button-secondary" type="submit">Resume</button></form>
       {% else %}
-      <button class="button button-secondary" type="button" disabled title="Scheduler installation belongs to the later scheduler phase">Install in scheduler phase</button>
+      {% if data.controls_available %}
+        {% if data.installed %}
+        <form action="{{ url_for('schedule_action', action='uninstall') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button button-secondary" type="submit">Uninstall schedule</button></form>
+        {% else %}
+        <form action="{{ url_for('schedule_action', action='install') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button button-secondary" type="submit">Install schedule</button></form>
+        {% endif %}
+      {% else %}
+      <button class="button button-secondary" type="button" disabled>Scheduler controls unavailable</button>
+      {% endif %}
       {% endif %}
     </div>
   </section>

@@ -456,7 +456,7 @@ The worker creates a fresh isolated directory containing only the packet and out
 
 ```text
 codex exec --ephemeral --ignore-user-config --sandbox read-only \
-  --ask-for-approval never --output-schema <schema> --json -
+  -c approval_policy="never" --output-schema <schema> --json -
 ```
 
 Read-only mode alone may not prove that unrelated readable files are invisible. Before scheduled assistance is enabled, implementation must run an adversarial canary test showing that the process cannot read the repository, runtime root, home-directory test secrets, or private network resources. Use a restricted outer macOS execution profile or equivalent isolation around the temporary task directory if required.

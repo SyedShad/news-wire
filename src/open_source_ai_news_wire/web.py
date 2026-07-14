@@ -6,6 +6,7 @@ import html
 import json
 import re
 import secrets
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,8 @@ from flask import (
 
 from .config import resolve_runtime_paths
 from .services import DashboardService
+from .runner import Worker
+from .scheduler import LaunchAgentManager
 from .storage import Database
 
 
@@ -83,12 +86,33 @@ def create_app(
     data_root: str | Path | None = None,
     auth_token: str | None = None,
     auth_required: bool = True,
+    operational_controls: bool = False,
     test_config: dict[str, Any] | None = None,
 ) -> Flask:
     paths = resolve_runtime_paths(data_root)
     database = Database(paths)
     database.initialize()
-    service = DashboardService(database)
+    scheduler = (
+        LaunchAgentManager(
+            database,
+            launcher=Path.home() / ".local" / "bin" / "open-source-ai-news-wire",
+        )
+        if operational_controls
+        else None
+    )
+
+    def run_in_background() -> None:
+        threading.Thread(
+            target=lambda: Worker(database).run(trigger="manual"),
+            name="wire-manual-scan",
+            daemon=True,
+        ).start()
+
+    service = DashboardService(
+        database,
+        scheduler=scheduler,
+        run_callback=run_in_background if operational_controls else None,
+    )
 
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.config.update(
@@ -183,6 +207,9 @@ def create_app(
         touch = app.config.get("TOUCH_CALLBACK")
         if touch:
             touch()
+        next_path = request.args.get("next", "")
+        if re.fullmatch(r"/stories/[A-Za-z0-9_-]+", next_path):
+            return redirect(next_path, code=303)
         return redirect(url_for("overview"), code=303)
 
     @app.get("/locked")

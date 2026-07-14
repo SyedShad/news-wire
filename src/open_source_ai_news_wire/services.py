@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, Callable
 
 from . import __version__
 from .storage import Database, database_size
+from .source_registry import set_source_enabled
 
 
 def utc_now() -> str:
@@ -24,8 +25,16 @@ def human_bytes(value: int) -> str:
 
 
 class DashboardService:
-    def __init__(self, database: Database):
+    def __init__(
+        self,
+        database: Database,
+        *,
+        scheduler: Any | None = None,
+        run_callback: Callable[[], None] | None = None,
+    ):
         self.database = database
+        self.scheduler = scheduler
+        self.run_callback = run_callback
 
     def overview(self) -> dict[str, Any]:
         counts = self.database.one(
@@ -400,10 +409,13 @@ class DashboardService:
         if not source:
             raise LookupError("Source not found")
         enabled = not bool(source["enabled"])
-        self.database.execute(
-            "UPDATE source_registry SET enabled = ? WHERE id = ?",
-            (1 if enabled else 0, source_id),
-        )
+        if self.database.one("SELECT 1 AS present FROM source_state WHERE source_id = ?", (source_id,)):
+            set_source_enabled(self.database, source_id, enabled)
+        else:
+            self.database.execute(
+                "UPDATE source_registry SET enabled = ? WHERE id = ?",
+                (1 if enabled else 0, source_id),
+            )
         return enabled
 
     def schedule_status(self) -> dict[str, Any]:
@@ -436,6 +448,7 @@ class DashboardService:
             "extended_start_suggestion": (today - timedelta(days=7)).isoformat(),
             "recent_scans": recent,
             "queue": queued,
+            "controls_available": self.scheduler is not None,
         }
 
     def queue_extended_catchup(self, start_value: str, end_value: str) -> str:
@@ -482,15 +495,33 @@ class DashboardService:
         return "queued"
 
     def schedule_action(self, action: str) -> str:
-        if action not in {"pause", "resume", "run_now"}:
+        if action not in {"install", "pause", "resume", "run_now", "uninstall"}:
             raise ValueError("Unsupported schedule action")
         now = utc_now()
+        if action in {"install", "uninstall"}:
+            if self.scheduler is None:
+                raise ValueError("Operational scheduler controls are unavailable in this process")
+            try:
+                status = self.scheduler.install() if action == "install" else self.scheduler.uninstall()
+            except Exception as error:
+                raise ValueError(str(error)) from error
+            return str(status.state)
         if action == "pause":
+            if self.scheduler is not None:
+                try:
+                    return str(self.scheduler.pause().state)
+                except Exception as error:
+                    raise ValueError(str(error)) from error
             self.database.set_state("schedule_status", "paused", now)
             return "paused"
         if action == "resume":
             if self.database.get_state("schedule_installed", "false") != "true":
                 raise ValueError("The local schedule is not installed yet")
+            if self.scheduler is not None:
+                try:
+                    return str(self.scheduler.resume().state)
+                except Exception as error:
+                    raise ValueError(str(error)) from error
             self.database.set_state("schedule_status", "active", now)
             return "active"
         existing = self.database.one(
@@ -516,6 +547,8 @@ class DashboardService:
             """,
             (now,),
         )
+        if self.run_callback:
+            self.run_callback()
         return "queued"
 
     def settings(self) -> dict[str, Any]:

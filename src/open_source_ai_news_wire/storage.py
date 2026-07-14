@@ -3,19 +3,30 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .config import RuntimePaths, ensure_runtime_layout
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
-SCHEMA = """
+class MigrationRequired(RuntimeError):
+    """Raised when an existing store needs an explicit migration."""
+
+
+class IncompatibleSchema(RuntimeError):
+    """Raised when the database is newer than this application."""
+
+
+SCHEMA_V1 = """
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS meta (
@@ -184,20 +195,314 @@ CREATE INDEX IF NOT EXISTS idx_usage_time ON usage_ledger(created_at DESC);
 """
 
 
+MIGRATIONS: dict[int, tuple[str, ...]] = {
+    2: (
+        "ALTER TABLE source_registry ADD COLUMN adapter TEXT NOT NULL DEFAULT 'feed'",
+        "ALTER TABLE source_registry ADD COLUMN base_hosts_json TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE source_registry ADD COLUMN parser_version INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE source_registry ADD COLUMN minimum_interval_minutes INTEGER NOT NULL DEFAULT 30",
+        "ALTER TABLE source_registry ADD COLUMN checked_date TEXT",
+        "ALTER TABLE source_registry ADD COLUMN definition_json TEXT NOT NULL DEFAULT '{}'",
+        "ALTER TABLE scan_run ADD COLUMN interval_start TEXT",
+        "ALTER TABLE scan_run ADD COLUMN interval_end TEXT",
+        "ALTER TABLE scan_run ADD COLUMN degraded INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE scan_run ADD COLUMN offline INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE scan_run ADD COLUMN queue_remaining INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE source_item ADD COLUMN canonical_url TEXT",
+        "ALTER TABLE source_item ADD COLUMN source_registry_id TEXT",
+        "ALTER TABLE source_item ADD COLUMN fingerprint TEXT",
+        "ALTER TABLE source_item ADD COLUMN content_hash TEXT",
+        "ALTER TABLE source_item ADD COLUMN first_seen_at TEXT",
+        "ALTER TABLE source_item ADD COLUMN citation_parent_url TEXT",
+        "ALTER TABLE review_action ADD COLUMN approval_snapshot_json TEXT NOT NULL DEFAULT '{}'",
+        "ALTER TABLE draft ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{}'",
+        "ALTER TABLE draft ADD COLUMN approval_snapshot_json TEXT NOT NULL DEFAULT '{}'",
+        "ALTER TABLE work_item ADD COLUMN idempotency_key TEXT",
+        "ALTER TABLE work_item ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE work_item ADD COLUMN available_at TEXT",
+        "ALTER TABLE work_item ADD COLUMN last_error_class TEXT",
+        "ALTER TABLE usage_ledger ADD COLUMN prompt_version TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE usage_ledger ADD COLUMN input_size INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE usage_ledger ADD COLUMN output_size INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE usage_ledger ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE diagnostic_event ADD COLUMN detail_json TEXT NOT NULL DEFAULT '{}'",
+        """
+        CREATE TABLE source_state (
+            source_id TEXT PRIMARY KEY REFERENCES source_registry(id) ON DELETE CASCADE,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            cursor TEXT,
+            etag TEXT,
+            last_modified TEXT,
+            health TEXT NOT NULL DEFAULT 'pending',
+            failure_streak INTEGER NOT NULL DEFAULT 0,
+            lag_minutes INTEGER NOT NULL DEFAULT 0,
+            last_checked_at TEXT,
+            last_success_at TEXT,
+            retry_after_at TEXT,
+            last_error_class TEXT,
+            last_error_detail TEXT NOT NULL DEFAULT ''
+        )
+        """,
+        """
+        INSERT INTO source_state(
+            source_id, enabled, cursor, health, failure_streak, lag_minutes,
+            last_checked_at, last_success_at
+        )
+        SELECT id, enabled, cursor, health, failure_streak, lag_minutes,
+               last_checked_at, last_success_at
+        FROM source_registry
+        """,
+        """
+        CREATE TABLE source_transaction (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_run_id INTEGER REFERENCES scan_run(id) ON DELETE SET NULL,
+            source_id TEXT NOT NULL REFERENCES source_registry(id) ON DELETE CASCADE,
+            interval_start TEXT,
+            interval_end TEXT,
+            status TEXT NOT NULL,
+            item_count INTEGER NOT NULL DEFAULT 0,
+            cursor_before TEXT,
+            cursor_after TEXT,
+            error_class TEXT,
+            started_at TEXT NOT NULL,
+            finished_at TEXT
+        )
+        """,
+        """
+        CREATE TABLE raw_observation (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL REFERENCES source_registry(id) ON DELETE CASCADE,
+            external_id TEXT NOT NULL,
+            canonical_url TEXT NOT NULL,
+            title TEXT NOT NULL,
+            published_at TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            language TEXT NOT NULL DEFAULT 'und',
+            fingerprint TEXT NOT NULL,
+            content_hash TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            UNIQUE(source_id, external_id),
+            UNIQUE(source_id, fingerprint)
+        )
+        """,
+        """
+        CREATE TABLE story_membership (
+            story_id TEXT NOT NULL REFERENCES story_cluster(id) ON DELETE CASCADE,
+            source_item_id INTEGER NOT NULL REFERENCES source_item(id) ON DELETE CASCADE,
+            relationship TEXT NOT NULL DEFAULT 'same-development',
+            language TEXT NOT NULL DEFAULT 'und',
+            PRIMARY KEY(story_id, source_item_id)
+        )
+        """,
+        """
+        CREATE TABLE candidate (
+            story_id TEXT PRIMARY KEY REFERENCES story_cluster(id) ON DELETE CASCADE,
+            evidence_gate INTEGER NOT NULL DEFAULT 0,
+            importance_gate INTEGER NOT NULL DEFAULT 0,
+            score INTEGER NOT NULL DEFAULT 0 CHECK(score BETWEEN 0 AND 100),
+            score_json TEXT NOT NULL DEFAULT '{}',
+            qualified_at TEXT
+        )
+        """,
+        """
+        CREATE TABLE watch_notice (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            story_id TEXT NOT NULL REFERENCES story_cluster(id) ON DELETE CASCADE,
+            reason TEXT NOT NULL,
+            trace_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL,
+            next_check_at TEXT,
+            expires_at TEXT NOT NULL,
+            outcome TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE content_opportunity (
+            story_id TEXT PRIMARY KEY REFERENCES story_cluster(id) ON DELETE CASCADE,
+            strength TEXT NOT NULL,
+            relevance_bridge TEXT NOT NULL,
+            mechanism TEXT NOT NULL,
+            counterargument TEXT NOT NULL,
+            assessment_json TEXT NOT NULL DEFAULT '{}',
+            assessed_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE retained_content (
+            digest TEXT PRIMARY KEY,
+            category TEXT NOT NULL,
+            byte_count INTEGER NOT NULL,
+            media_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+            source_url TEXT,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE assistance_result (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            work_item_id INTEGER REFERENCES work_item(id) ON DELETE SET NULL,
+            operation TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            prompt_version TEXT NOT NULL,
+            model TEXT NOT NULL,
+            status TEXT NOT NULL,
+            result_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE purge_plan (
+            id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            categories_json TEXT NOT NULL,
+            effects_json TEXT NOT NULL,
+            estimated_bytes INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            confirmed_at TEXT,
+            executed_at TEXT
+        )
+        """,
+        """
+        CREATE TABLE notification_delivery (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            alert_id INTEGER REFERENCES alert(id) ON DELETE CASCADE,
+            group_key TEXT,
+            status TEXT NOT NULL,
+            delivered_at TEXT,
+            error_class TEXT,
+            UNIQUE(alert_id)
+        )
+        """,
+        "CREATE UNIQUE INDEX idx_work_idempotency ON work_item(idempotency_key) WHERE idempotency_key IS NOT NULL",
+        "CREATE INDEX idx_observation_published ON raw_observation(published_at DESC)",
+        "CREATE INDEX idx_source_transaction_source ON source_transaction(source_id, started_at DESC)",
+        "CREATE INDEX idx_watch_due ON watch_notice(status, next_check_at)",
+    ),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class StoragePressure:
+    level: str
+    free_bytes: int
+    warning_bytes: int
+    critical_bytes: int
+
+
 class Database:
     def __init__(self, paths: RuntimePaths):
         self.paths = paths
 
     def initialize(self) -> None:
         ensure_runtime_layout(self.paths)
-        with self.connect() as connection:
-            connection.executescript(SCHEMA)
-            connection.execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
-                (str(SCHEMA_VERSION),),
-            )
-            connection.commit()
+        database_exists = self.paths.database.exists()
+        if not database_exists:
+            with self.connect() as connection:
+                connection.executescript(SCHEMA_V1)
+                connection.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', '1')"
+                )
+                connection.commit()
+            self.migrate()
+        else:
+            version = self.schema_version()
+            if version > SCHEMA_VERSION:
+                raise IncompatibleSchema(
+                    f"Database schema {version} is newer than supported schema {SCHEMA_VERSION}"
+                )
+            if version < SCHEMA_VERSION:
+                raise MigrationRequired(
+                    f"Database schema {version} requires explicit migration to {SCHEMA_VERSION}"
+                )
         self.paths.database.chmod(0o600)
+
+    def schema_version(self) -> int:
+        if not self.paths.database.exists():
+            return 0
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM meta WHERE key = 'schema_version'"
+            ).fetchone()
+        return int(row["value"]) if row else 1
+
+    def migrate(self) -> int:
+        ensure_runtime_layout(self.paths)
+        if not self.paths.database.exists():
+            with self.connect() as connection:
+                connection.executescript(SCHEMA_V1)
+                connection.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', '1')"
+                )
+                connection.commit()
+        version = self.schema_version()
+        if version > SCHEMA_VERSION:
+            raise IncompatibleSchema(
+                f"Database schema {version} is newer than supported schema {SCHEMA_VERSION}"
+            )
+        while version < SCHEMA_VERSION:
+            target = version + 1
+            statements = MIGRATIONS.get(target)
+            if not statements:
+                raise RuntimeError(f"Missing migration for schema {target}")
+            connection = self.connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                for statement in statements:
+                    connection.execute(statement)
+                if version == 1:
+                    now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                    cancelled = connection.execute(
+                        """
+                        UPDATE work_item
+                        SET status = 'cancelled', updated_at = ?,
+                            last_error_class = 'pre_worker_staging_request'
+                        WHERE kind IN ('scout_scan', 'catch_up')
+                          AND status IN ('pending', 'queued')
+                        """,
+                        (now,),
+                    ).rowcount
+                    if cancelled:
+                        connection.execute(
+                            """
+                            INSERT INTO diagnostic_event(level, event_type, message, created_at, detail_json)
+                            VALUES('info', 'migration', ?, ?, ?)
+                            """,
+                            (
+                                "Cancelled pre-worker staged requests during schema migration.",
+                                now,
+                                self.json({"cancelled_work_items": cancelled}),
+                            ),
+                        )
+                connection.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
+                    (str(target),),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+            version = target
+        self.paths.database.chmod(0o600)
+        return version
+
+    def integrity_check(self) -> str:
+        with self.connect() as connection:
+            row = connection.execute("PRAGMA integrity_check").fetchone()
+        return str(row[0]) if row else "unknown"
+
+    def storage_pressure(
+        self,
+        *,
+        warning_bytes: int = 10 * 1024**3,
+        critical_bytes: int = 2 * 1024**3,
+    ) -> StoragePressure:
+        free = shutil.disk_usage(self.paths.root).free
+        level = "critical" if free < critical_bytes else "warning" if free < warning_bytes else "normal"
+        return StoragePressure(level, free, warning_bytes, critical_bytes)
 
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.paths.database, timeout=5.0)

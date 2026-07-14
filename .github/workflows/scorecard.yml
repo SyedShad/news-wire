@@ -53,7 +53,8 @@ jobs:
           # Publishes results to the OpenSSF REST API for the public badge and
           # trend tracking. Set to false if maintainers prefer to keep the
           # score private (the SARIF upload below still works either way).
-          publish_results: true
+          # Keep private-repository score data inside GitHub.
+          publish_results: false
 
       # Retain the raw SARIF as a build artifact for offline inspection.
       - name: Upload artifact

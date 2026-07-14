@@ -295,7 +295,7 @@ def test_extended_catchup_form_queues_and_coalesces_selected_range(app: Flask, c
     page = client.get("/schedule")
     assert b"Extended catch-up" in page.data
     assert b"Queue extended catch-up" in page.data
-    assert b"Install in scheduler phase" in page.data
+    assert b"Scheduler controls unavailable" in page.data
     assert b">Resume<" not in page.data
 
     token = csrf(client)

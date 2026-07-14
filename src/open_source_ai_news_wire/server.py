@@ -6,6 +6,7 @@ import threading
 import time
 import webbrowser
 from dataclasses import dataclass, field
+from urllib.parse import quote
 
 from werkzeug.serving import BaseWSGIServer, make_server
 
@@ -33,11 +34,13 @@ class DashboardServer:
         data_root: str | None = None,
         port: int = 0,
         inactivity_seconds: int = 1800,
+        start_path: str | None = None,
     ) -> None:
         self.clock = ActivityClock()
         self.inactivity_seconds = inactivity_seconds
         self._stopping = threading.Event()
-        self.app = create_app(data_root=data_root)
+        self.start_path = start_path if start_path and start_path.startswith("/stories/") else None
+        self.app = create_app(data_root=data_root, operational_controls=True)
         self.server: BaseWSGIServer = make_server("127.0.0.1", port, self.app, threaded=True)
         self.app.config["STOP_CALLBACK"] = self.request_stop
         self.app.config["TOUCH_CALLBACK"] = self.clock.touch
@@ -48,7 +51,8 @@ class DashboardServer:
 
     @property
     def auth_url(self) -> str:
-        return f"http://127.0.0.1:{self.port}/auth/{self.app.config['AUTH_TOKEN']}"
+        base = f"http://127.0.0.1:{self.port}/auth/{self.app.config['AUTH_TOKEN']}"
+        return f"{base}?next={quote(self.start_path, safe='/')}" if self.start_path else base
 
     def request_stop(self) -> None:
         if self._stopping.is_set():

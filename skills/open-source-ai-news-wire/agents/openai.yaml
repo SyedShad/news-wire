@@ -1,0 +1,4 @@
+interface:
+  display_name: "Open Source AI News Wire"
+  short_description: "Operate the local AI news monitoring wire"
+  default_prompt: "Use $open-source-ai-news-wire to check the local wire, review evidence, and manage approved news drafting."

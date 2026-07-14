@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.open-source-ai-news-wire/schemas/source-registry-v1.json",
+  "type": "object",
+  "required": ["schema_version", "checked_date", "sources"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "checked_date": {"type": "string", "format": "date"},
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "family", "monitoring_role", "adapter", "url", "base_hosts", "enabled_by_default", "parser_version", "minimum_interval_minutes"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$"},
+          "name": {"type": "string", "minLength": 1},
+          "family": {"type": "string", "minLength": 1},
+          "monitoring_role": {"enum": ["Event", "Reporting", "Discovery"]},
+          "adapter": {"enum": ["feed", "json", "html_listing", "sitemap", "github_release", "research_feed"]},
+          "url": {"type": "string", "format": "uri"},
+          "base_hosts": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+          "enabled_by_default": {"type": "boolean"},
+          "parser_version": {"type": "integer", "minimum": 1},
+          "minimum_interval_minutes": {"type": "integer", "minimum": 1},
+          "detail": {"type": "string"},
+          "include_terms": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+          "exclude_terms": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+          "validation_status": {"enum": ["live-validated", "disabled-access", "disabled-parser", "disabled-policy"]},
+          "evidence_use": {"enum": ["primary", "reporting", "discovery-only"]}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "schedule": {
+    "minutes": [0, 30],
+    "run_budget_minutes": 25,
+    "automatic_catch_up_hours": 72
+  },
+  "network": {
+    "maximum_concurrency": 4,
+    "maximum_per_host": 1,
+    "connect_timeout_seconds": 10,
+    "read_timeout_seconds": 20,
+    "maximum_response_bytes": 5000000,
+    "user_agent": "OpenSourceAINewsWire/0.2 (+local viability pilot)"
+  },
+  "storage": {
+    "warning_free_bytes": 10737418240,
+    "critical_free_bytes": 2147483648
+  },
+  "usage": {
+    "background_units": 8,
+    "urgent_reserve_units": 2,
+    "maximum_retries": 1
+  },
+  "editorial": {
+    "neutral_default": true,
+    "watch_lifetime_hours": 24,
+    "breaking_hours": 2,
+    "fresh_hours": 6
+  }
+}
