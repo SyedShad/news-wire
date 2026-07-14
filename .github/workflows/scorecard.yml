@@ -34,6 +34,11 @@ jobs:
       # workflow files for its Dangerous-Workflow / Token-Permissions checks.
       contents: read
       actions: read
+      # Scorecard's private-repository GraphQL and SAST discovery queries need
+      # these additional read scopes. They remain unavailable to other jobs.
+      issues: read
+      pull-requests: read
+      checks: read
       # Needed to upload the SARIF results to the code-scanning dashboard.
       security-events: write
       # Needed to publish results and obtain a badge (uses OIDC, no secrets).
