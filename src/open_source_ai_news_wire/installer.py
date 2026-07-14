@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -83,6 +84,13 @@ class LocalInstaller:
         destination = self.releases / release_id
         self.releases.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.binary_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        required = (
+            destination / "release.json",
+            destination / "venv" / "bin" / "python",
+            destination / "launcher",
+        )
+        if destination.exists() and not all(path.exists() for path in required):
+            shutil.rmtree(destination)
         if not destination.exists():
             staging = Path(tempfile.mkdtemp(prefix=f".{release_id}-", dir=self.releases))
             try:
@@ -112,11 +120,18 @@ class LocalInstaller:
                     json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
                 )
                 os.chmod(staging / "release.json", 0o600)
+                final_python = destination / "venv" / "bin" / "python"
+                (staging / "launcher").write_text(
+                    "#!/bin/sh\n"
+                    f"exec {shlex.quote(str(final_python))} -m open_source_ai_news_wire \"$@\"\n",
+                    encoding="utf-8",
+                )
+                os.chmod(staging / "launcher", 0o700)
                 os.replace(staging, destination)
             except Exception:
                 shutil.rmtree(staging, ignore_errors=True)
                 raise
-        installed_cli = destination / "venv" / "bin" / "open-source-ai-news-wire"
+        installed_cli = destination / "launcher"
         self._checked(
             [str(installed_cli), "--data-root", str(self.runtime_paths.root), "migrate"],
             self.source_root,
@@ -169,7 +184,7 @@ class LocalInstaller:
         os.replace(temporary_current, self.current)
         temporary_launcher = self.binary_root / ".open-source-ai-news-wire-next"
         temporary_launcher.unlink(missing_ok=True)
-        temporary_launcher.symlink_to(self.current / "venv" / "bin" / "open-source-ai-news-wire")
+        temporary_launcher.symlink_to(self.current / "launcher")
         os.replace(temporary_launcher, self.launcher)
 
     def _checked(self, arguments: list[str], cwd: Path) -> None:
