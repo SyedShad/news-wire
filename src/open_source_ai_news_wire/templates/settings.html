@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Settings & Data · Open Source AI News Wire{% endblock %}
+{% block content %}
+<header class="page-header"><div><p class="kicker">Local boundaries</p><h1>Settings & data</h1><p class="lede">Code can live in private source control. The runtime corpus stays on this Mac and outside every Git worktree.</p></div></header>
+
+{% if data.cloud_warning %}<div class="critical-banner"><strong>Storage warning</strong><span>{{ data.cloud_warning }}</span></div>{% endif %}
+
+<div class="settings-grid">
+  <section class="panel setting-card span-two">
+    <div class="panel-heading"><div><p class="section-index">01</p><h2>Runtime data root</h2></div><span class="status-chip status-healthy">Validated</span></div>
+    <div class="path-box"><code>{{ data.data_root }}</code><button type="button" data-copy-text="{{ data.data_root }}">Copy path</button></div>
+    <dl class="detail-list horizontal"><div><dt>Database</dt><dd>{{ data.database_size }}</dd></div><div><dt>Mode</dt><dd>{{ 'Fictional demo' if data.demo_mode else 'Live local data' }}</dd></div><div><dt>Version</dt><dd>{{ data.app_version }}</dd></div><div><dt>Encryption</dt><dd>Filesystem protection only</dd></div></dl>
+  </section>
+
+  <section class="panel setting-card danger-card">
+    <div class="panel-heading compact"><div><p class="section-index">02</p><h2>No backup in V1</h2></div></div>
+    <p>Disk loss or corruption may permanently remove collected evidence, decisions, and drafts. This product does not create snapshots, restore points, or synchronized copies.</p>
+    <span class="risk-label">Accepted pilot risk</span>
+  </section>
+
+  <section class="panel setting-card">
+    <div class="panel-heading compact"><div><p class="section-index">03</p><h2>Stored records</h2></div></div>
+    <dl class="count-list">{% for label, count in data.counts.items() %}<div><dt>{{ label|title }}</dt><dd>{{ count }}</dd></div>{% endfor %}</dl>
+  </section>
+
+  <section class="panel setting-card span-two">
+    <div class="panel-heading"><div><p class="section-index">04</p><h2>Local diagnostics</h2></div><a href="{{ url_for('diagnostics_export') }}">Export redacted JSON</a></div>
+    <div class="diagnostic-list">
+      {% for event in data.diagnostics %}<div><span class="status-chip status-{{ event.level }}">{{ event.level }}</span><strong>{{ event.event_type }}</strong><p>{{ event.message }}</p><small>{{ event.created_at|wire_time }}</small></div>{% else %}<div class="empty-state compact"><span>No diagnostic events stored.</span></div>{% endfor %}
+    </div>
+  </section>
+
+  <section class="panel setting-card purge-card span-two">
+    <div class="panel-heading compact"><div><p class="section-index">05</p><h2>Manual retention & purge preview</h2></div></div>
+    <p>Records are never deleted because of age. This preview selects nothing by default and currently supports operational diagnostics only; stories, evidence, decisions, ledgers, and drafts remain untouched.</p>
+    <div class="purge-preview" aria-label="Purge preview">
+      <div><strong>Operational diagnostics</strong><span>{{ data.purge_preview.operations_count }} event{{ '' if data.purge_preview.operations_count == 1 else 's' }} · {{ data.purge_preview.operations_payload }} text payload</span><small>Removes redacted local diagnostic events. SQLite file size may not shrink immediately.</small></div>
+    </div>
+    <form action="{{ url_for('purge_operations') }}" method="post" data-confirm-form>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label class="purge-selection"><input type="checkbox" name="category" value="operations" required> Select operational diagnostics</label>
+      <label>Type <strong>PURGE OPERATIONS</strong><input name="confirmation" autocomplete="off" required></label>
+      <button class="button button-danger" type="submit">Purge diagnostics</button>
+    </form>
+  </section>
+
+  <section class="panel setting-card session-card span-two">
+    <div><p class="section-index">06</p><h2>Review session</h2><p>Stopping the on-demand interface does not remove local data or change staged schedule settings.</p></div>
+    <form action="{{ url_for('stop') }}" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="button button-danger" type="submit">Stop this dashboard</button>
+    </form>
+  </section>
+</div>
+{% endblock %}

@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Drafts · Open Source AI News Wire{% endblock %}
+{% block content %}
+<header class="page-header"><div><p class="kicker">Human-approved editorial work</p><h1>Drafts & history</h1><p class="lede">Every revision is a new version. Corrections never silently replace earlier text.</p></div></header>
+<section class="panel">
+  <div class="table-list draft-list">
+  {% for draft in drafts %}
+    <a class="table-row" href="{{ url_for('draft_detail', draft_id=draft.id) }}">
+      <div><span class="tag tag-outline">v{{ draft.version }}</span><span class="status-chip draft-{{ draft.status|lower|replace(' ','-') }}">{{ draft.status }}</span></div>
+      <div class="table-main"><strong>{{ draft.headline }}</strong><small>{{ draft.mode }} · {{ draft.lane }}</small></div>
+      <div class="table-date">{{ draft.updated_at|wire_time }}<span>→</span></div>
+    </a>
+  {% else %}
+    <div class="empty-state"><strong>No drafts yet.</strong><span>Approve a verified candidate from the Review Inbox.</span></div>
+  {% endfor %}
+  </div>
+</section>
+{% endblock %}

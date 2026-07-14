@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Edit draft · Open Source AI News Wire{% endblock %}
+{% block content %}
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="{{ url_for('drafts') }}">Drafts</a><span>›</span><span>Version {{ draft.version }}</span></nav>
+<header class="page-header draft-header">
+  <div><p class="kicker">{{ draft.mode }}</p><h1>Edit version {{ draft.version }}</h1><p class="lede">Saving creates a new version and preserves this one in history.</p></div>
+  <div class="header-actions"><button class="button button-secondary" type="button" data-copy-text="{{ copy_text }}">Copy brief</button><a class="button button-secondary" href="{{ url_for('export_draft_html', draft_id=draft.id) }}">Export HTML</a><a class="button button-dark" href="{{ url_for('export_draft_markdown', draft_id=draft.id) }}">Export Markdown</a></div>
+</header>
+<div class="editor-layout">
+  <form class="panel editor" action="{{ url_for('save_draft', draft_id=draft.id) }}" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Headline<input name="headline" value="{{ draft.headline }}" required maxlength="240"></label>
+    <label>Metadata<input name="metadata" value="{{ draft.metadata }}" maxlength="500"></label>
+    <label>Factual brief<textarea name="body" rows="14" required>{{ draft.body }}</textarea></label>
+    {% if draft.mode == 'Open-Source Lens Brief' %}
+    <label>Open-source lens <span>approved analysis section</span><textarea name="lens" rows="6">{{ draft.lens }}</textarea></label>
+    {% else %}
+    <input type="hidden" name="lens" value="">
+    <div class="locked-lens"><strong>Neutral mode</strong><span>An open-source lens can be added only after a separate eligible lens approval.</span></div>
+    {% endif %}
+    <div class="editor-actions"><span>Current status: <strong>{{ draft.status }}</strong></span><button class="button button-primary" type="submit">Save as version {{ draft.version + 1 }}</button></div>
+  </form>
+  <aside class="editor-rail">
+    <section class="panel"><p class="section-index">Evidence snapshot</p><h2>{{ draft.story_headline }}</h2><dl class="detail-list"><div><dt>Lane</dt><dd>{{ draft.lane }}</dd></div><div><dt>Priority</dt><dd>{{ draft.priority }}</dd></div><div><dt>Freshness</dt><dd>{{ draft.freshness }}</dd></div><div><dt>Story state</dt><dd>{{ draft.story_status|replace('_',' ') }}</dd></div><div><dt>Correction status</dt><dd class="{{ 'correction-open' if draft.corrections else '' }}">{{ draft.corrections|length ~ ' needs review' if draft.corrections else 'Clear' }}</dd></div></dl>{% if draft.corrections %}<div class="correction-summary"><strong>{{ draft.corrections[0].title }}</strong><p>{{ draft.corrections[0].body }}</p><small>{{ draft.corrections[0].created_at|wire_time }}</small></div>{% endif %}</section>
+    <section class="panel"><p class="section-index">Version history</p><div class="version-list">{% for version in draft.history %}<a class="{{ 'current' if version.id == draft.id else '' }}" href="{{ url_for('draft_detail', draft_id=version.id) }}"><span>v{{ version.version }} · {{ version.status }}</span><small>{{ version.updated_at|wire_time }}</small></a>{% endfor %}</div></section>
+    <section class="panel comparison-card"><p class="section-index">Version comparison</p>
+      {% if draft.comparison %}
+      <h2>v{{ draft.version }} ↔ v{{ draft.comparison.version }}</h2>
+      <p class="comparison-note">{{ draft.comparison.direction }} version · {{ draft.comparison.updated_at|wire_time }}</p>
+      <div class="comparison-list">
+        {% for field, changed in draft.comparison.changes.items() %}<div><span>{{ field }}</span><strong class="{{ 'changed' if changed else 'unchanged' }}">{{ 'Changed' if changed else 'Unchanged' }}</strong></div>{% endfor %}
+      </div>
+      <a class="button button-secondary comparison-link" href="{{ url_for('draft_detail', draft_id=draft.comparison.id) }}">Open {{ draft.comparison.direction|lower }} version</a>
+      {% else %}
+      <h2>No adjacent version</h2><p class="comparison-note">Save a revision to compare field-level changes while preserving this version.</p>
+      {% endif %}
+    </section>
+    <section class="panel"><p class="section-index">Sources</p><ul class="plain-list">{% for source in draft.sources %}<li>{{ source }}</li>{% endfor %}</ul></section>
+  </aside>
+</div>
+{% endblock %}

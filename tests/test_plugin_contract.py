@@ -1,5 +1,4 @@
 import json
-import tomllib
 import unittest
 from pathlib import Path
 
@@ -68,10 +67,11 @@ class TestPluginContract(unittest.TestCase):
         )
 
     def test_versions_match_across_manifests(self) -> None:
-        pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-        version = pyproject["project"]["version"]
+        # The root package is now the independently versioned News Wire app.
+        # This contract still locks the preserved upstream skill manifests to
+        # their own canonical SKILL.md version.
+        version = _skill_version()
 
-        self.assertEqual(version, _skill_version())
         self.assertEqual(version, _json(ROOT / ".claude-plugin" / "plugin.json")["version"])
         self.assertEqual(version, _json(ROOT / ".codex-plugin" / "plugin.json")["version"])
         self.assertEqual(version, _json(ROOT / ".grok-plugin" / "plugin.json")["version"])

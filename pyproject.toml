@@ -1,12 +1,40 @@
 [project]
-name = "last30days-skill"
-version = "3.14.0"
-description = "Multi-source last-30-days research skill"
+name = "open-source-ai-news-wire"
+version = "0.1.0"
+description = "Local-first AI news monitoring and editorial review dashboard"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+  "Flask>=3.1.1,<4",
+]
+
+[project.scripts]
+open-source-ai-news-wire = "open_source_ai_news_wire.cli:main"
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["open_source_ai_news_wire*"]
+
+[tool.setuptools.package-data]
+open_source_ai_news_wire = [
+  "templates/*.html",
+  "templates/partials/*.html",
+  "static/*.css",
+  "static/*.js",
+  "static/*.svg",
+]
 
 [dependency-groups]
+dev = [
+  "pytest>=9.1.0,<10",
+  "pytest-cov>=7,<8",
+]
+
+[project.optional-dependencies]
 dev = [
   "pytest>=9.1.0,<10",
   "pytest-cov>=7,<8",
@@ -22,7 +50,7 @@ addopts = [
 
 [tool.coverage.run]
 branch = true
-source = ["skills/last30days/scripts", "tests"]
+source = ["src/open_source_ai_news_wire", "skills/last30days/scripts", "tests"]
 omit = [
   "skills/last30days/scripts/lib/vendor/*",
   "dist/*",

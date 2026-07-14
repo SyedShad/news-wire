@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}Overview · Open Source AI News Wire{% endblock %}
+{% block content %}
+<header class="page-header">
+  <div>
+    <p class="kicker">Local intelligence desk</p>
+    <h1>What changed in AI?</h1>
+    <p class="lede">Verified developments first. High-potential signals stay visibly separate until the evidence catches up.</p>
+  </div>
+  <div class="header-actions">
+    <a class="button button-secondary" href="{{ url_for('inbox') }}">Open review inbox</a>
+    <form action="{{ url_for('schedule_action', action='run_now') }}" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="button button-primary" type="submit">Queue scout run</button>
+    </form>
+  </div>
+</header>
+
+<section class="stat-grid" aria-label="Current workload">
+  <article class="stat-card stat-accent">
+    <span class="stat-label">Urgent</span><strong>{{ data.counts.urgent }}</strong>
+    <small>High impact + immediate relevance</small>
+  </article>
+  <article class="stat-card">
+    <span class="stat-label">Candidates</span><strong>{{ data.counts.candidates }}</strong>
+    <small>Evidence and importance gates passed</small>
+  </article>
+  <article class="stat-card">
+    <span class="stat-label">Watch notices</span><strong>{{ data.counts.watches }}</strong>
+    <small>Credible trace, not yet verified</small>
+  </article>
+  <article class="stat-card">
+    <span class="stat-label">Draft ready</span><strong>{{ data.counts.draft_ready }}</strong>
+    <small>Human-approved and versioned</small>
+  </article>
+</section>
+
+<div class="dashboard-grid">
+  <section class="panel priority-panel">
+    <div class="panel-heading">
+      <div><p class="section-index">01</p><h2>Priority wire</h2></div>
+      <a href="{{ url_for('inbox') }}">See all {{ data.counts.candidates + data.counts.watches + data.counts.draft_ready }} items</a>
+    </div>
+    <div class="story-list">
+      {% for story in data.top_stories %}
+        {% include "partials/story_card.html" %}
+      {% else %}
+        <div class="empty-state"><strong>No qualified stories yet.</strong><span>The next scout will add new signals here.</span></div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <aside class="dashboard-rail">
+    <section class="panel health-card">
+      <div class="panel-heading compact"><div><p class="section-index">02</p><h2>Coverage health</h2></div><a href="{{ url_for('sources') }}">Details</a></div>
+      <div class="health-orbit" aria-label="{{ data.sources.healthy }} of {{ data.sources.total }} enabled sources healthy">
+        <div class="orbit-value"><strong>{{ data.sources.healthy }}</strong><span>of {{ data.sources.total }}</span></div>
+      </div>
+      <div class="health-legend">
+        <span><i class="dot dot-good"></i>{{ data.sources.healthy }} healthy</span>
+        <span><i class="dot dot-warn"></i>{{ data.sources.degraded }} degraded</span>
+        <span><i class="dot dot-muted"></i>{{ data.sources.paused }} paused</span>
+      </div>
+    </section>
+
+    <section class="panel schedule-card">
+      <div class="panel-heading compact"><div><p class="section-index">03</p><h2>Next pass</h2></div><a href="{{ url_for('schedule') }}">Manage</a></div>
+      <p class="big-time">{{ data.schedule.next_scan_at|wire_time }}</p>
+      <div class="schedule-line"><span class="status-chip status-{{ data.schedule.status }}">{{ data.schedule.status|replace('_', ' ') }}</span><span>00 + 30 each hour · shadow {{ 'on' if data.schedule.shadow_mode else 'off' }}</span></div>
+      <dl class="mini-stats">
+        <div><dt>Queue</dt><dd data-live-queue>{{ data.queue_count }}</dd></div>
+        <div><dt>Queue lag</dt><dd>{{ data.queue_lag }}</dd></div>
+        <div><dt>Last scan</dt><dd>{{ data.schedule.last_scan_at|wire_time }}</dd></div>
+        <div><dt>Background</dt><dd>{{ data.schedule.background_units }}/{{ data.schedule.background_limit }}</dd></div>
+      </dl>
+    </section>
+  </aside>
+</div>
+
+<section class="panel alert-panel">
+  <div class="panel-heading">
+    <div><p class="section-index">04</p><h2>Latest notices</h2></div>
+    {% if unread_alerts %}
+    <form action="{{ url_for('read_alerts') }}" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="text-button" type="submit">Mark all read</button>
+    </form>
+    {% endif %}
+  </div>
+  <div class="notice-grid">
+    {% for alert in data.alerts %}
+    <article class="notice notice-{{ alert.severity }}">
+      <span class="notice-kind">{{ alert.kind }}</span>
+      <h3>{{ alert.title }}</h3><p>{{ alert.body }}</p>
+      <small>{{ alert.created_at|wire_time }}</small>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

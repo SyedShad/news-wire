@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Review Inbox · Open Source AI News Wire{% endblock %}
+{% block content %}
+<header class="page-header">
+  <div><p class="kicker">Human decision queue</p><h1>Review inbox</h1><p class="lede">Verification is visible. Viewing an item never approves a draft.</p></div>
+  <form action="{{ url_for('read_alerts') }}" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="button button-secondary" type="submit">Mark notices read</button>
+  </form>
+</header>
+
+<form class="filter-bar" method="get" action="{{ url_for('inbox') }}">
+  <label>Queue type
+    <select name="kind">
+      {% for value, label in [('all','All review work'),('candidate','Candidates'),('watch','Watch notices'),('correction','Corrections'),('catch_up','Catch-up'),('health','Health notices')] %}
+      <option value="{{ value }}" {{ 'selected' if selected_kind == value else '' }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Status
+    <select name="status">
+      {% for value, label in [('all','All states'),('candidate','Candidate'),('watch','Watch'),('approved','Approved'),('draft_ready','Draft ready'),('archived','Archived'),('withdrawn','Withdrawn')] %}
+      <option value="{{ value }}" {{ 'selected' if selected_status == value else '' }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Coverage lane
+    <select name="lane">
+      {% for value in ['all','Open Ecosystem News','AGI Development','Open-Source Lens Opportunity'] %}
+      <option value="{{ value }}" {{ 'selected' if selected_lane == value else '' }}>{{ 'All coverage lanes' if value == 'all' else value }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button class="button button-dark" type="submit">Apply filters</button>
+  {% set result_total = stories|length + notices|length %}
+  <span class="result-count">{{ result_total }} result{{ '' if result_total == 1 else 's' }}</span>
+</form>
+
+{% if notices %}
+<section class="panel inbox-notices">
+  <div class="panel-heading"><div><p class="section-index">Notices</p><h2>Operational review</h2></div><span>{{ notices|length }} item{{ '' if notices|length == 1 else 's' }}</span></div>
+  <div class="notice-grid">
+    {% for alert in notices %}
+    <article class="notice notice-{{ alert.severity }}">
+      <span class="notice-kind">{{ alert.kind|replace('_',' ') }}</span>
+      <h3>{{ alert.title }}</h3><p>{{ alert.body }}</p>
+      <small>{{ alert.created_at|wire_time }}</small>
+      {% if alert.story_id %}<a href="{{ url_for('story_detail', story_id=alert.story_id) }}">Open related story →</a>{% endif %}
+    </article>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<section class="panel inbox-panel">
+  <div class="story-list spacious">
+  {% for story in stories %}
+    {% include "partials/story_card.html" %}
+  {% else %}
+    <div class="empty-state"><strong>No stories match these filters.</strong><span>Try a broader status or coverage lane.</span></div>
+  {% endfor %}
+  </div>
+</section>
+{% endblock %}

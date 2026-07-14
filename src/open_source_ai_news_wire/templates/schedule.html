@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Schedule & Usage · Open Source AI News Wire{% endblock %}
+{% block content %}
+<header class="page-header"><div><p class="kicker">Short-lived local work</p><h1>Schedule & usage</h1><p class="lede">The scout runs at minute 00 and 30 while the Mac is awake. Sleep creates a catch-up gap; it never changes freshness.</p></div></header>
+
+<div class="schedule-grid">
+  <section class="panel schedule-control-card">
+    <div class="panel-heading"><div><p class="section-index">01</p><h2>Local scheduler</h2></div><span class="status-chip status-{{ data.status }}">{{ data.status|replace('_',' ') }}</span></div>
+    <div class="clock-face"><span class="clock-hand hand-one"></span><span class="clock-hand hand-two"></span><strong>00</strong><small>30</small></div>
+    <dl class="detail-list schedule-details">
+      <div><dt>Installed</dt><dd>{{ 'Yes' if data.installed else 'No — dashboard controls are staged only' }}</dd></div>
+      <div><dt>Last scan</dt><dd>{{ data.last_scan_at|wire_time('full') }}</dd></div>
+      <div><dt>Next scan</dt><dd>{{ data.next_scan_at|wire_time('full') }}</dd></div>
+      <div><dt>Catch-up</dt><dd>72 hours automatic · extended on request</dd></div>
+    </dl>
+    <div class="schedule-actions">
+      <form action="{{ url_for('schedule_action', action='run_now') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button button-primary" type="submit">Queue run</button></form>
+      {% if data.status == 'active' %}
+      <form action="{{ url_for('schedule_action', action='pause') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button button-secondary" type="submit">Pause</button></form>
+      {% elif data.installed %}
+      <form action="{{ url_for('schedule_action', action='resume') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button button-secondary" type="submit">Resume</button></form>
+      {% else %}
+      <button class="button button-secondary" type="button" disabled title="Scheduler installation belongs to the later scheduler phase">Install in scheduler phase</button>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="panel usage-card">
+    <div class="panel-heading"><div><p class="section-index">02</p><h2>ChatGPT allowance</h2></div><span>Rolling 24 hours</span></div>
+    {% set usage_percent = [100, (data.background_units / data.background_limit * 100 if data.background_limit else 0)]|min %}
+    {% set usage_bucket = ((usage_percent / 10)|round(0, 'ceil')|int) * 10 %}
+    <div class="usage-meter usage-meter-{{ usage_bucket }}">
+      <div><strong>{{ data.background_units }}</strong><span>of {{ data.background_limit }} units</span></div>
+    </div>
+    <div class="usage-key"><span><i class="dot dot-accent"></i>Routine background</span><span><i class="dot dot-muted"></i>{{ data.reserve_limit }} urgent reserve</span></div>
+    <div class="usage-note"><strong>{{ data.draft_units }} draft units</strong><p>Drafting is tracked separately and does not consume the background proxy.</p></div>
+    <div class="privacy-row"><span class="status-chip {{ 'status-healthy' if data.assistance_enabled else 'status-paused' }}">Assistance {{ 'enabled' if data.assistance_enabled else 'disabled' }}</span><small>Packet-isolation gate required before scheduled use</small></div>
+  </section>
+</div>
+
+<section class="panel catchup-card">
+  <div class="panel-heading"><div><p class="section-index">03</p><h2>Extended catch-up</h2></div><span>Human-selected interval</span></div>
+  <div class="catchup-layout">
+    <div class="catchup-copy"><strong>Look farther back without rewriting freshness</strong><p>Automatic recovery remains capped at 72 hours. Use an explicit date range for an older gap; recovered stories keep their original First-Public Time.</p></div>
+    <form action="{{ url_for('extended_catchup') }}" method="post" class="catchup-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Start date<input type="date" name="start_date" value="{{ data.extended_start_suggestion }}" max="{{ data.today }}" required></label>
+      <label>End date<input type="date" name="end_date" value="{{ data.today }}" max="{{ data.today }}" required></label>
+      <button class="button button-dark" type="submit">Queue extended catch-up</button>
+    </form>
+  </div>
+</section>
+
+<section class="panel run-history">
+  <div class="panel-heading"><div><p class="section-index">04</p><h2>Run history</h2></div><span>{{ data.queue|length }} queued task{{ '' if data.queue|length == 1 else 's' }}</span></div>
+  <div class="run-table">
+    <div class="run-row run-head"><span>Started</span><span>Trigger</span><span>Sources</span><span>Found</span><span>Result</span></div>
+    {% for run in data.recent_scans %}
+    <div class="run-row"><span>{{ run.started_at|wire_time }}</span><span>{{ run.trigger_type|replace('_',' ') }}</span><span>{{ run.source_success_count }} ok · {{ run.source_failure_count }} failed</span><span>{{ run.discovered_count }}</span><span class="status-chip status-{{ run.result }}">{{ run.result }}</span></div>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}{{ story.headline }} · Open Source AI News Wire{% endblock %}
+{% block content %}
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="{{ url_for('inbox') }}">Review inbox</a><span>›</span><span>{{ story.id }}</span></nav>
+
+<header class="story-hero">
+  <div class="story-hero-copy">
+    <div class="eyebrow-row">
+      <span class="tag tag-{{ story.freshness|lower }}">{{ story.freshness }}</span>
+      <span class="tag tag-outline">{{ story.status|replace('_',' ') }}</span>
+      <span class="eyebrow">{{ story.lane }}</span>
+    </div>
+    <h1>{{ story.headline }}</h1>
+    <p>{{ story.summary }}</p>
+    <div class="story-meta detailed">
+      <span>First public <strong>{{ story.first_public_at|wire_time('full') }}</strong></span>
+      <span>Detected <strong>{{ story.detected_at|wire_time('full') }}</strong></span>
+      <span>Access <strong>{{ story.openness_class }}</strong></span>
+    </div>
+  </div>
+  <div class="priority-dial priority-{{ story.priority|lower|replace(' ', '-') }}">
+    <span>Priority</span><strong>{{ story.priority_score }}</strong><small>{{ story.priority }}</small>
+  </div>
+</header>
+
+<div class="story-layout">
+  <div class="story-main">
+    {% if story.status == 'watch' %}
+    <section class="watch-callout">
+      <div><span class="watch-signal"></span><strong>Watch notice · not verified</strong></div>
+      <p>{{ story.watch_status }} until {{ story.watch_expires_at|wire_time('full') }}. This item cannot be drafted unless it passes the evidence and importance gates.</p>
+    </section>
+    {% endif %}
+
+    <section class="panel timeline-panel">
+      <div class="panel-heading"><div><p class="section-index">01</p><h2>Cluster timeline</h2></div><span>{{ 'Material update recorded' if story.material_update else 'No material update' }}</span></div>
+      <ol class="cluster-timeline">
+        <li><span class="timeline-dot"></span><div><small>First public</small><strong>{{ story.first_public_at|wire_time('full') }}</strong><p>Original source time retained for freshness, including recovered items.</p></div></li>
+        <li><span class="timeline-dot"></span><div><small>Detected locally</small><strong>{{ story.detected_at|wire_time('full') }}</strong><p>The first time this cluster entered the local review corpus.</p></div></li>
+        {% if story.material_update %}
+        <li class="timeline-material"><span class="timeline-dot"></span><div><small>Material update</small><strong>{{ story.updated_at|wire_time('full') }}</strong><p>Claims or evidence changed enough to require renewed attention.</p></div></li>
+        {% else %}
+        <li><span class="timeline-dot"></span><div><small>Last evaluated</small><strong>{{ story.updated_at|wire_time('full') }}</strong><p>No material claim change is recorded after initial grouping.</p></div></li>
+        {% endif %}
+      </ol>
+    </section>
+
+    <section class="panel evidence-panel">
+      <div class="panel-heading"><div><p class="section-index">02</p><h2>Claim ledger</h2></div><a href="{{ url_for('export_evidence', story_id=story.id) }}">Export evidence JSON</a></div>
+      <div class="claim-list">
+      {% for claim in story.claims %}
+        <article class="claim-row">
+          <span class="claim-status claim-{{ claim.status }}">{{ claim.status }}</span>
+          <div><p>{{ claim.text }}</p><small><b>Citation chain</b> · {{ claim.evidence_relationships or 'No qualifying evidence' }} → {{ claim.evidence_sources or 'Awaiting source' }}</small></div>
+          <span class="volatility">{{ claim.volatility }}</span>
+        </article>
+      {% endfor %}
+      </div>
+    </section>
+
+    <section class="panel source-panel">
+      <div class="panel-heading"><div><p class="section-index">03</p><h2>Sources by role</h2></div><span>{{ story.sources|length }} source{{ '' if story.sources|length == 1 else 's' }}</span></div>
+      <div class="source-list">
+      {% for source in story.sources %}
+        <article class="source-row">
+          <div class="source-role role-{{ source.source_role|lower }}">{{ source.source_role }}</div>
+          <div class="source-copy"><h3><a href="{{ source.url|safe_external_url }}" rel="noreferrer noopener" target="_blank">{{ source.title }}</a></h3><p>{{ source.passage }}</p><small>{{ source.source_name }} · {{ source.published_at|wire_time }} · {{ source.language|upper }}</small></div>
+          <span class="verify-chip">{{ source.verification_status }}</span>
+        </article>
+      {% endfor %}
+      </div>
+      {% set translated_sources = story.sources|rejectattr('language', 'equalto', 'en')|list %}
+      <div class="translation-state">
+        <div><span class="translation-icon" aria-hidden="true">文</span><div><strong>Translation state</strong>
+        {% if translated_sources %}
+          <p>Original-language passages are preserved for {{ translated_sources|length }} source{{ '' if translated_sources|length == 1 else 's' }}. No machine-translated passage is stored in this cluster.</p>
+        {% else %}
+          <p>All stored passages are in English. No translation was required.</p>
+        {% endif %}
+        </div></div>
+        <small>{{ translated_sources|map(attribute='language')|unique|join(', ')|upper if translated_sources else 'EN' }}</small>
+      </div>
+    </section>
+
+    {% if story.relevance_bridge %}
+    <section class="panel lens-panel">
+      <div class="panel-heading"><div><p class="section-index">04</p><h2>Open-source opportunity</h2></div><span class="strength strength-{{ story.opportunity_strength|lower }}">{{ story.opportunity_strength }}</span></div>
+      <div class="lens-grid"><div><h3>Relevance bridge</h3><p>{{ story.relevance_bridge }}</p></div><div><h3>Limitation</h3><p>{{ story.counterargument }}</p></div></div>
+    </section>
+    {% endif %}
+  </div>
+
+  <aside class="review-panel panel">
+    <p class="section-index">Human checkpoint</p><h2>Choose the next state</h2>
+    {% if story.status == 'approved' %}
+    <div class="approval-pending" role="status">
+      <strong>Draft request queued</strong>
+      <p>Your approval snapshot and guidance are preserved. The system will not create another request while this one is pending.</p>
+    </div>
+    {% else %}
+    <p class="muted">No draft will be created until you approve one of the modes below.</p>
+    <form action="{{ url_for('review_story', story_id=story.id) }}" method="post" class="review-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Guidance or reason <span>optional</span><textarea name="reason" rows="3" placeholder="What should the next step preserve or investigate?"></textarea></label>
+      <button class="action-choice choice-neutral" name="action" value="approve_neutral" type="submit" {{ 'disabled' if story.status not in ['candidate','draft_ready'] else '' }}>
+        <span><strong>Approve neutral brief</strong><small>Facts first, no advocacy</small></span><b>→</b>
+      </button>
+      <button class="action-choice choice-lens" name="action" value="approve_lens" type="submit" {{ 'disabled' if story.status not in ['candidate','draft_ready'] or story.opportunity_strength not in ['Strong','Moderate'] else '' }}>
+        <span><strong>Approve open-source lens</strong><small>Neutral report + labelled analysis</small></span><b>→</b>
+      </button>
+      <div class="secondary-actions">
+        <button name="action" value="research" type="submit">Research more</button>
+        <button name="action" value="archive" type="submit">Archive</button>
+      </div>
+    </form>
+    {% endif %}
+    {% if story.actions %}
+    <div class="action-history"><h3>Decision history</h3>{% for action in story.actions[:4] %}<div><span>{{ action.action|replace('_',' ') }}</span><small>{{ action.created_at|wire_time }}</small></div>{% endfor %}</div>
+    {% endif %}
+  </aside>
+</div>
+{% endblock %}

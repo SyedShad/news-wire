@@ -6,7 +6,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIGURATION = ROOT / "CONFIGURATION.md"
-README = ROOT / "README.md"
 SKILL_MD = ROOT / "skills" / "last30days" / "SKILL.md"
 UI_PY = ROOT / "skills" / "last30days" / "scripts" / "lib" / "ui.py"
 
@@ -37,13 +36,11 @@ def test_codex_auth_not_advertised_as_openai_fallback():
 def test_preflight_permission_contract_is_documented():
     config = CONFIGURATION.read_text(encoding="utf-8")
     skill = SKILL_MD.read_text(encoding="utf-8")
-    readme = README.read_text(encoding="utf-8")
 
-    for text in (config, skill, readme):
+    for text in (config, skill):
         assert "--preflight" in text
     assert "without reading browser cookies, writing setup/config/report files, or running research" in config
     assert "does not read browser-cookie values" in skill
-    assert "without reading cookies, writing files, or running research" in readme
 
 
 def test_security_copy_avoids_stale_cookie_and_endpoint_claims():
@@ -60,7 +57,6 @@ def test_scrapecreators_copy_uses_canonical_free_call_count():
     text = "\n".join(
         [
             CONFIGURATION.read_text(encoding="utf-8"),
-            README.read_text(encoding="utf-8"),
             SKILL_MD.read_text(encoding="utf-8"),
             UI_PY.read_text(encoding="utf-8"),
         ]

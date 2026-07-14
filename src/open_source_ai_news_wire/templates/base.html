@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Open Source AI News Wire{% endblock %}</title>
+  <link rel="icon" href="{{ url_for('favicon') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Primary navigation">
+      <a class="brand" href="{{ url_for('overview') }}" aria-label="Open Source AI News Wire overview">
+        <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+        <span class="brand-copy"><strong>Open Source AI</strong><small>News Wire</small></span>
+      </a>
+
+      <nav class="nav-list">
+        <a class="nav-item {{ 'active' if page == 'overview' else '' }}" href="{{ url_for('overview') }}" aria-label="Overview">
+          <span class="nav-icon" aria-hidden="true">⌂</span><span>Overview</span>
+        </a>
+        <a class="nav-item {{ 'active' if page == 'inbox' else '' }}" href="{{ url_for('inbox') }}" aria-label="Review inbox{% if unread_alerts %}, {{ unread_alerts }} unread{% endif %}" data-live-inbox-link>
+          <span class="nav-icon" aria-hidden="true">≡</span><span>Review inbox</span>
+          <span class="nav-count" data-live-unread {{ 'hidden' if not unread_alerts else '' }}>{{ unread_alerts }}</span>
+        </a>
+        <a class="nav-item {{ 'active' if page == 'drafts' else '' }}" href="{{ url_for('drafts') }}" aria-label="Drafts">
+          <span class="nav-icon" aria-hidden="true">✎</span><span>Drafts</span>
+        </a>
+        <a class="nav-item {{ 'active' if page == 'sources' else '' }}" href="{{ url_for('sources') }}" aria-label="Sources and health">
+          <span class="nav-icon" aria-hidden="true">◉</span><span>Sources & health</span>
+        </a>
+        <a class="nav-item {{ 'active' if page == 'schedule' else '' }}" href="{{ url_for('schedule') }}" aria-label="Schedule and usage">
+          <span class="nav-icon" aria-hidden="true">◷</span><span>Schedule & usage</span>
+        </a>
+        <a class="nav-item {{ 'active' if page == 'settings' else '' }}" href="{{ url_for('settings') }}" aria-label="Settings and data">
+          <span class="nav-icon" aria-hidden="true">⌁</span><span>Settings & data</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="local-state">
+          <span class="pulse-dot {{ 'is-paused' if schedule_state != 'active' else '' }}"></span>
+          <span><strong>Local session</strong><small data-live-schedule>{{ schedule_state|replace('_', ' ')|title }}</small></span>
+        </div>
+        <form action="{{ url_for('stop') }}" method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="stop-button" type="submit">Stop dashboard</button>
+        </form>
+      </div>
+    </aside>
+
+    <main class="main" id="main-content">
+      {% if demo_mode %}
+      <div class="demo-banner" role="status">
+        <span class="demo-pill">Demo data</span>
+        Everything shown is fictional and exists only to exercise the local dashboard.
+      </div>
+      {% endif %}
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          <div class="flash-stack" aria-live="polite">
+          {% for category, message in messages %}
+            <div class="flash flash-{{ category }}"><span>{{ message }}</span><button type="button" data-dismiss aria-label="Dismiss">×</button></div>
+          {% endfor %}
+          </div>
+        {% endif %}
+      {% endwith %}
+
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</body>
+</html>

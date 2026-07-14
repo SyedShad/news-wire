@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Sources & Health · Open Source AI News Wire{% endblock %}
+{% block content %}
+<header class="page-header"><div><p class="kicker">Coverage, not completeness</p><h1>Sources & health</h1><p class="lede">Aggregators discover leads. Event and reporting sources establish what can be verified.</p></div><div class="header-note"><strong>{{ data.health_counts.healthy }}/{{ data.enabled_count }}</strong><span>enabled sources healthy</span></div></header>
+
+<div class="source-summary">
+  {% for health, label in [('healthy','Healthy'),('degraded','Degraded'),('paused','Paused')] %}
+  <div><span class="health-mark health-{{ health }}"></span><strong>{{ data.health_counts[health] }}</strong><small>{{ label }}</small></div>
+  {% endfor %}
+  <div><span class="health-mark health-disabled"></span><strong>{{ data.disabled_count }}</strong><small>Disabled</small></div>
+</div>
+
+<section class="source-families">
+{% for family, sources in data.families.items() %}
+  <details class="panel source-family" open>
+    <summary><span><small>{{ '%02d'|format(loop.index) }}</small><strong>{{ family }}</strong></span><span>{{ sources|length }} source{{ '' if sources|length == 1 else 's' }} <b>⌄</b></span></summary>
+    <div class="source-table">
+      {% for source in sources %}
+      <article class="source-health-row">
+        <div class="source-name"><span class="health-mark health-{{ source.health }}"></span><div><strong>{{ source.name }}</strong><small>{{ source.detail }}</small></div></div>
+        <div><span class="cell-label">Role</span><strong>{{ source.monitoring_role }}</strong></div>
+        <div><span class="cell-label">Lag</span><strong>{{ source.lag_minutes }} min</strong></div>
+        <div><span class="cell-label">Checked</span><strong>{{ source.last_checked_at|wire_time }}</strong></div>
+        <div class="source-controls">
+          <span class="status-chip status-{{ source.health if source.enabled else 'disabled' }}">{{ source.health if source.enabled else 'disabled' }}</span>
+          <form action="{{ url_for('toggle_source', source_id=source.id) }}" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="toggle {{ 'on' if source.enabled else '' }}" type="submit" aria-label="{{ 'Disable' if source.enabled else 'Enable' }} {{ source.name }}"><span></span></button>
+          </form>
+        </div>
+        <div class="source-operational">
+          <div><span>Cursor</span><code>{{ source.cursor or 'Not established' }}</code></div>
+          <div><span>Failure streak</span><strong>{{ source.failure_streak }}</strong></div>
+          <div><span>Last success</span><strong>{{ source.last_success_at|wire_time('full') }}</strong></div>
+          <div><span>Recovery</span><strong>{% if not source.enabled %}Monitoring disabled · cursor retained{% elif source.failure_streak %}Retry pending after {{ source.failure_streak }} failure{{ '' if source.failure_streak == 1 else 's' }}{% elif source.health == 'paused' %}Recovery suspended pending review{% else %}No open recovery gap{% endif %}</strong></div>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+  </details>
+{% endfor %}
+</section>
+{% endblock %}
