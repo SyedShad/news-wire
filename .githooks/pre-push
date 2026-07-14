@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+
+zero=0000000000000000000000000000000000000000
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [ "$remote_ref" != "refs/heads/main" ]; then
+    continue
+  fi
+  if [ "$local_sha" = "$zero" ]; then
+    echo "Blocked deletion of protected main branch." >&2
+    exit 1
+  fi
+  if [ "$remote_sha" != "$zero" ] && ! git merge-base --is-ancestor "$remote_sha" "$local_sha"; then
+    echo "Blocked non-fast-forward update to protected main branch." >&2
+    exit 1
+  fi
+done
+
+exit 0

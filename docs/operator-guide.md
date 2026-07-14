@@ -86,3 +86,16 @@ open-source-ai-news-wire app rollback --release-id RELEASE_ID
 ```
 
 Each install builds an immutable pinned environment and atomically switches the stable launcher. Rollback is allowed only when the installed release supports the current database schema.
+
+## Private GitHub safeguard
+
+GitHub Free does not provide server-side branch protection for private repositories.
+This checkout uses `.githooks/pre-push` as a local safeguard against deleting or
+force-pushing `main`. Activate it in each trusted clone with:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The local guard can be bypassed and does not protect GitHub web or API changes.
+Enable server-side branch protection if the repository later moves to an eligible plan.
