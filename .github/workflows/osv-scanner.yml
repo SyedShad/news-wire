@@ -22,13 +22,37 @@ permissions: {}
 
 jobs:
   scan-scheduled:
-    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read
-    with:
-      # Advisory-first: surface results in code scanning without blocking.
-      fail-on-vuln: false
-      # Private code scanning is a paid GitHub feature; keep the free SARIF
-      # artifact in Actions instead of attempting a Security-tab upload.
-      upload-sarif: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Scan locked dependencies
+        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        continue-on-error: true
+        with:
+          scan-args: |-
+            --output=results.json
+            --format=json
+            --recursive
+            ./
+
+      - name: Produce advisory report and annotations
+        uses: google/osv-scanner-action/osv-reporter-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        with:
+          scan-args: |-
+            --output=results.sarif
+            --new=results.json
+            --gh-annotations=true
+            --fail-on-vuln=false
+
+      - name: Retain OSV report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: osv-scanner-sarif
+          path: results.sarif
+          retention-days: 5

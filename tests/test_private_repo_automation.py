@@ -9,8 +9,13 @@ def test_osv_keeps_artifact_without_paid_code_scanning() -> None:
         encoding="utf-8"
     )
 
-    assert "upload-sarif: false" in text
+    assert "google/osv-scanner-action/osv-scanner-action@" in text
+    assert "google/osv-scanner-action/osv-reporter-action@" in text
+    assert "actions/upload-artifact@" in text
+    assert "--gh-annotations=true" in text
+    assert "--fail-on-vuln=false" in text
     assert "security-events: write" not in text
+    assert "github/codeql-action/upload-sarif" not in text
 
 
 def test_dependabot_groups_monthly_updates_to_conserve_ci_minutes() -> None:
