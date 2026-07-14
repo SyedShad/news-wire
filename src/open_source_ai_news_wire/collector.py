@@ -15,6 +15,7 @@ import httpx
 from .adapters import AdapterError, Observation, parse_source
 from .network import FetchResult, ResponseTooLarge, SafeHttpClient, UnsafeRequest
 from .qualification import Qualification, qualify
+from .evidence import publisher_key
 from .settings import load_settings
 from .source_registry import synchronize_sources
 from .storage import Database
@@ -564,16 +565,31 @@ class Collector:
             "SELECT MIN(published_at) AS value FROM source_item WHERE story_id = ?",
             (story_id,),
         ).fetchone()["value"]
-        evidence = connection.execute(
+        legacy_evidence = connection.execute(
+            "SELECT source_role, canonical_url, url FROM source_item WHERE story_id = ?",
+            (story_id,),
+        ).fetchall()
+        manual_evidence = connection.execute(
             """
-            SELECT
-              SUM(CASE WHEN source_role = 'Event' THEN 1 ELSE 0 END) AS event_count,
-              COUNT(DISTINCT CASE WHEN source_role = 'Reporting' THEN source_registry_id END) AS reporting_count
-            FROM source_item WHERE story_id = ?
+            SELECT confirmed_role, publisher_key FROM evidence_source
+            WHERE story_id = ? AND status = 'confirmed'
             """,
             (story_id,),
-        ).fetchone()
-        evidence_gate = int(evidence["event_count"] or 0) >= 1 or int(evidence["reporting_count"] or 0) >= 2
+        ).fetchall()
+        event_count = sum(row["source_role"] == "Event" for row in legacy_evidence) + sum(
+            row["confirmed_role"] == "Event" for row in manual_evidence
+        )
+        reporting_publishers = {
+            publisher_key(str(row["canonical_url"] or row["url"]))
+            for row in legacy_evidence
+            if row["source_role"] == "Reporting"
+        }
+        reporting_publishers.update(
+            str(row["publisher_key"])
+            for row in manual_evidence
+            if row["confirmed_role"] == "Reporting"
+        )
+        evidence_gate = event_count >= 1 or len(reporting_publishers) >= 2
         current = connection.execute("SELECT status, priority_score FROM story_cluster WHERE id = ?", (story_id,)).fetchone()
         new_status = current["status"]
         if evidence_gate and qualification.importance_gate and new_status in {"signal", "watch"}:

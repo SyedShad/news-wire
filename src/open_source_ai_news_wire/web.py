@@ -273,6 +273,69 @@ def create_app(
             abort(404)
         return render_template("story.html", page="inbox", story=story)
 
+    @app.post("/stories/<story_id>/evidence/inspect")
+    def inspect_story_evidence(story_id: str) -> Response:
+        try:
+            _, status = service.queue_evidence_inspection(
+                story_id,
+                request.form.get("url", ""),
+                request.form.get("acquisition_method", "manual"),
+            )
+        except (ValueError, LookupError) as error:
+            flash(str(error), "error")
+        else:
+            flash(
+                "Evidence inspection queued." if status == "queued" else "That source is already confirmed.",
+                "success",
+            )
+        return redirect(url_for("story_detail", story_id=story_id), code=303)
+
+    @app.post("/stories/<story_id>/evidence/<int:evidence_id>/confirm")
+    def confirm_story_evidence(story_id: str, evidence_id: int) -> Response:
+        relationships: dict[int, str] = {}
+        for key, value in request.form.items():
+            if not key.startswith("claim_") or not value:
+                continue
+            try:
+                claim_id = int(key.removeprefix("claim_"))
+            except ValueError:
+                continue
+            relationships[claim_id] = value
+        try:
+            service.confirm_evidence(
+                story_id,
+                evidence_id,
+                request.form.get("role", ""),
+                relationships,
+                first_party=request.form.get("first_party") == "yes",
+                reason=request.form.get("reason", ""),
+            )
+        except (ValueError, LookupError) as error:
+            flash(str(error), "error")
+        else:
+            flash("Evidence confirmed and qualification gates recalculated.", "success")
+        return redirect(url_for("story_detail", story_id=story_id), code=303)
+
+    @app.post("/stories/<story_id>/evidence/<int:evidence_id>/exclude")
+    def exclude_story_evidence(story_id: str, evidence_id: int) -> Response:
+        try:
+            service.exclude_evidence(story_id, evidence_id, request.form.get("reason", ""))
+        except (ValueError, LookupError) as error:
+            flash(str(error), "error")
+        else:
+            flash("Evidence excluded; its audit history was preserved.", "success")
+        return redirect(url_for("story_detail", story_id=story_id), code=303)
+
+    @app.post("/stories/<story_id>/qualify")
+    def qualify_story(story_id: str) -> Response:
+        try:
+            service.qualify_story(story_id, request.form.get("reason", ""))
+        except (ValueError, LookupError) as error:
+            flash(str(error), "error")
+        else:
+            flash("Story qualified as a candidate. Draft approval is now available.", "success")
+        return redirect(url_for("story_detail", story_id=story_id), code=303)
+
     @app.post("/stories/<story_id>/review")
     def review_story(story_id: str) -> Response:
         action = request.form.get("action", "")

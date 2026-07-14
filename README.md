@@ -8,7 +8,7 @@ Reporting is neutral by default. A separately labelled open-source lens is avail
 
 - Dated registry covering official AI organizations, open ecosystems, research, government and law, corporate filings, safety and security, independent reporting, aggregators, public newsletters, and accessible social signals.
 - Incremental RSS/Atom, JSON, HTML-listing, sitemap, GitHub-release, and research-feed adapters with bounded SSRF-resistant networking.
-- Evidence-aware clustering, primary/independent-confirmation gates, candidate and watch lifecycles, correction handling, and 72-hour automatic recovery.
+- Evidence-aware clustering, primary/independent-confirmation gates, evidence-first manual qualification with recorded importance overrides, candidate and watch lifecycles, correction handling, and 72-hour automatic recovery.
 - Local SQLite and content-addressed evidence storage outside Git, with explicit migration, diagnostics, integrity, storage-pressure, and purge operations.
 - User-level macOS LaunchAgent at minute `00` and `30`, plus login/load recovery. It runs while the Mac is locked and awake, but does not prevent sleep or change power policy.
 - Packet-only Codex assistance behind a mandatory isolation canary and local usage budget. No API key or paid fallback is supported.

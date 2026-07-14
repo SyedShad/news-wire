@@ -6,6 +6,8 @@
 - Treat an official announcement as proof that the announcement was made, not independent proof of performance, safety, comparison, or impact claims inside it.
 - Treat aggregators, newsletters, link feeds, public social posts, and momentum as discovery unless they contribute original evidence.
 - Keep high-potential but unverified signals as visibly labelled watches. Do not draft them.
+- A human may override automated importance after recording a reason, but may not override the evidence gate. Inspecting and confirming evidence, qualifying a candidate, and approving a draft are separate actions.
+- A manually attached source must be fetched through the same public-network boundary and mapped to specific claims before it can qualify a story.
 
 ## Coverage and freshness
 

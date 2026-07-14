@@ -13,7 +13,7 @@ from open_source_ai_news_wire import __version__
 from open_source_ai_news_wire.content_store import ContentStore
 from open_source_ai_news_wire.demo import seed_demo_data
 from open_source_ai_news_wire.settings import InvalidConfiguration, load_settings, load_source_definitions
-from open_source_ai_news_wire.storage import Database, MigrationRequired, SCHEMA_V1, SCHEMA_VERSION
+from open_source_ai_news_wire.storage import Database, MIGRATIONS, MigrationRequired, SCHEMA_V1, SCHEMA_VERSION
 
 
 def test_runtime_root_refuses_git_worktree() -> None:
@@ -127,6 +127,48 @@ def test_existing_schema_requires_explicit_migration_and_cancels_staged_work(tmp
     assert scan["result"] == "cancelled"
     assert scan["finished_at"] is not None
     assert database.one("SELECT COUNT(*) AS count FROM source_state") == {"count": 0}
+
+
+def test_v3_migration_preserves_data_and_supersedes_legacy_research(tmp_path: Path) -> None:
+    paths = resolve_runtime_paths(tmp_path / "wire-data")
+    ensure_runtime_layout(paths)
+    with sqlite3.connect(paths.database) as connection:
+        connection.executescript(SCHEMA_V1)
+        for statement in MIGRATIONS[2]:
+            connection.execute(statement)
+        connection.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', '2')")
+        connection.execute(
+            """
+            INSERT INTO story_cluster(
+                id, slug, headline, summary, lane, openness_class, status, priority,
+                priority_score, freshness, first_public_at, detected_at, created_at, updated_at
+            ) VALUES('story-one', 'story-one', 'AI event', 'Summary', 'Broader AI News',
+                     'not stated', 'signal', 'Standard', 50, 'Fresh',
+                     '2026-07-14T00:00:00Z', '2026-07-14T00:01:00Z',
+                     '2026-07-14T00:01:00Z', '2026-07-14T00:01:00Z')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO work_item(kind, story_id, status, priority, payload_json, created_at, updated_at)
+            VALUES('research', 'story-one', 'queued', 50, '{}',
+                   '2026-07-14T00:02:00Z', '2026-07-14T00:02:00Z')
+            """
+        )
+        connection.commit()
+
+    database = Database(paths)
+    assert database.migrate() == 3
+    assert database.one("SELECT headline FROM story_cluster WHERE id = 'story-one'") == {
+        "headline": "AI event"
+    }
+    assert database.one("SELECT status, last_error_class FROM work_item") == {
+        "status": "cancelled",
+        "last_error_class": "superseded_legacy_research",
+    }
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'evidence_source'"
+    ) == {"count": 1}
 
 
 def test_storage_pressure_levels_can_be_forced(tmp_path: Path) -> None:

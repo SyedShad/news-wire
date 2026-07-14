@@ -48,6 +48,16 @@ Tracked definitions update source metadata without overwriting local enablement 
 
 ## Assistance and drafting
 
+The story page separates qualification from drafting. For a discovery signal:
+
+1. Use **Inspect linked source** or attach another public HTTPS source.
+2. After the bounded fetch completes, confirm its Event, Reporting, or Discovery role and map it to the claims it supports, attributes, contradicts, or contextualizes.
+3. The evidence gate requires one confirmed first-party Event source or two independent Reporting publishers. It cannot be overridden.
+4. When evidence passes, **Qualify as candidate**. If automated importance did not pass, record the human editorial reason; this changes neither the automated score nor the evidence result.
+5. Separately approve a Neutral News Brief or, for a Strong or Moderate opportunity, an Open-Source Lens Brief.
+
+Official pages prove that an announcement was made. Use `attributes` for announcement or promotional claims unless the page directly establishes the factual claim. Excluding evidence preserves the audit record and invalidates qualification or pending drafts when the gate no longer passes.
+
 Deterministic monitoring works without ChatGPT assistance. Before enabling assistance, run:
 
 ```bash

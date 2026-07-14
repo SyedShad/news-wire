@@ -108,7 +108,14 @@ def test_lens_draft_requires_and_preserves_separate_approved_mode(tmp_path: Path
 
 def test_assistance_fails_closed_on_gate_budget_and_foreign_claims(tmp_path: Path) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-watch-003", "research")
+    now = "2026-07-14T00:00:00Z"
+    database.execute(
+        """
+        INSERT INTO work_item(kind, story_id, status, priority, payload_json, created_at, updated_at)
+        VALUES('semantic', 'story-demo-watch-003', 'pending', 70, '{}', ?, ?)
+        """,
+        (now, now),
+    )
     with pytest.raises(AssistanceDeferred, match="isolation"):
         AssistanceService(database, FakeInvoker()).process_next()
 
@@ -139,6 +146,30 @@ def test_assistance_fails_closed_on_gate_budget_and_foreign_claims(tmp_path: Pat
     }
     with pytest.raises(AssistanceError, match="outside"):
         validate_result(packet, result)
+
+
+def test_assistance_disabled_empty_queue_and_invocation_failure_are_explicit(tmp_path: Path) -> None:
+    database, _ = _service(tmp_path)
+    database.set_state("assistance_isolation_gate", "passed", "2026-07-14T00:00:00Z")
+    with pytest.raises(AssistanceDeferred, match="disabled"):
+        AssistanceService(database, FakeInvoker()).process_next()
+
+    database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
+    assert AssistanceService(database, FakeInvoker()).process_next() is None
+
+    now = "2026-07-14T00:00:00Z"
+    work_id = database.execute(
+        """
+        INSERT INTO work_item(kind, story_id, status, priority, payload_json, created_at, updated_at)
+        VALUES('semantic', 'story-demo-watch-003', 'pending', 70, '{}', ?, ?)
+        """,
+        (now, now),
+    )
+    with pytest.raises(AssistanceError, match="blocked"):
+        AssistanceService(database, FakeInvoker(fail=True)).process_next()
+    assert database.one(
+        "SELECT status, last_error_class FROM work_item WHERE id = ?", (work_id,)
+    ) == {"status": "deferred", "last_error_class": "AssistanceError"}
 
 
 def test_neutral_result_cannot_smuggle_a_lens() -> None:

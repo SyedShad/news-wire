@@ -82,23 +82,121 @@
       </div>
     </section>
 
+    <section class="panel qualification-panel">
+      <div class="panel-heading"><div><p class="section-index">04</p><h2>Evidence and qualification</h2></div><span>{{ 'Candidate qualified' if story.qualification.qualified else 'Human review required' }}</span></div>
+      <div class="gate-grid">
+        <div class="gate-card {{ 'gate-pass' if story.qualification.evidence_gate else 'gate-locked' }}">
+          <small>Evidence gate</small><strong>{{ 'Passed' if story.qualification.evidence_gate else 'Locked' }}</strong>
+          <p>{{ story.qualification.event_count }} Event · {{ story.qualification.reporting_count }} independent Reporting</p>
+        </div>
+        <div class="gate-card {{ 'gate-pass' if story.qualification.effective_importance else 'gate-locked' }}">
+          <small>Importance gate</small><strong>{{ 'Passed' if story.qualification.effective_importance else 'Needs your decision' }}</strong>
+          <p>{% if story.qualification.automated_importance %}Automated qualification passed{% elif story.qualification.importance_override %}Human override recorded{% else %}Automated qualification did not pass{% endif %}</p>
+        </div>
+      </div>
+
+      <div class="evidence-workbench">
+        <div class="workbench-heading"><div><h3>Investigate evidence</h3><p>Inspect public pages first, then confirm what each source actually proves.</p></div></div>
+        <div class="linked-evidence-list">
+        {% for source in story.sources if source.source_role == 'Discovery' %}
+          <form action="{{ url_for('inspect_story_evidence', story_id=story.id) }}" method="post" class="linked-evidence-row">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="url" value="{{ source.canonical_url or source.url }}">
+            <input type="hidden" name="acquisition_method" value="linked">
+            <span><small>Linked from {{ source.source_name }}</small><strong>{{ source.canonical_url or source.url }}</strong></span>
+            <button type="submit">Inspect linked source</button>
+          </form>
+        {% endfor %}
+        </div>
+        <form action="{{ url_for('inspect_story_evidence', story_id=story.id) }}" method="post" class="manual-evidence-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="acquisition_method" value="manual">
+          <label>Attach another public source URL<input type="url" name="url" required placeholder="https://publisher.example/story"></label>
+          <button type="submit">Inspect source</button>
+        </form>
+
+        {% if story.evidence_sources %}
+        <div class="evidence-proposals">
+        {% for evidence in story.evidence_sources %}
+          <article class="evidence-proposal status-{{ evidence.status }}">
+            <div class="proposal-heading"><div><small>{{ evidence.acquisition_method }} evidence · {{ evidence.status }}</small><h3>{{ evidence.title or evidence.canonical_url }}</h3></div><span>{{ evidence.confirmed_role or evidence.proposed_role or 'Pending' }}</span></div>
+            {% if evidence.passage %}<p>{{ evidence.passage }}</p>{% endif %}
+            {% if evidence.status == 'failed' %}<p class="inline-error">Inspection failed safely: {{ evidence.error_class }}. You may retry the URL.</p>{% endif %}
+            {% if evidence.status == 'queued' %}<p class="muted">Queued for bounded public-page inspection.</p>{% endif %}
+            {% if evidence.status == 'fetched' %}
+            <form action="{{ url_for('confirm_story_evidence', story_id=story.id, evidence_id=evidence.id) }}" method="post" class="confirm-evidence-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <label>Source role<select name="role" required>
+                <option value="">Choose a role</option>
+                <option value="Event" {{ 'selected' if evidence.proposed_role == 'Event' else '' }}>Event / first-party source</option>
+                <option value="Reporting" {{ 'selected' if evidence.proposed_role == 'Reporting' else '' }}>Independent reporting</option>
+                <option value="Discovery">Discovery only</option>
+              </select></label>
+              <label class="check-label"><input type="checkbox" name="first_party" value="yes"> I confirm this is a first-party source for the event</label>
+              <div class="claim-mapping"><strong>Map this source to claims</strong><small>Use “attributes” when an official page proves only that an announcement or promotional claim was made.</small>
+              {% for claim in story.claims %}
+                <label><span>{{ claim.text }}</span><select name="claim_{{ claim.id }}">
+                  <option value="">No relationship</option>
+                  <option value="attributes">Attributes the announcement or claim</option>
+                  <option value="supports">Directly supports the claim</option>
+                  <option value="contradicts">Contradicts the claim</option>
+                  <option value="context">Context only</option>
+                </select></label>
+              {% endfor %}
+              </div>
+              <label>Confirmation note <span>optional</span><textarea name="reason" rows="2" placeholder="Why this role and relationship are appropriate"></textarea></label>
+              <button class="button button-primary" type="submit">Confirm evidence</button>
+            </form>
+            {% elif evidence.status == 'confirmed' %}
+              <div class="confirmed-evidence"><strong>Confirmed as {{ evidence.confirmed_role }}</strong><span>{{ evidence.publisher_key }}</span></div>
+              {% for link in evidence.claim_links %}<p class="claim-link"><b>{{ link.relationship }}</b> · {{ link.text }}</p>{% endfor %}
+              <form action="{{ url_for('exclude_story_evidence', story_id=story.id, evidence_id=evidence.id) }}" method="post" class="exclude-evidence-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="text" name="reason" placeholder="Reason for excluding this evidence">
+                <button type="submit">Exclude evidence</button>
+              </form>
+            {% elif evidence.status == 'excluded' %}
+              <p class="muted">Excluded from qualification. The evidence and decision history remain preserved.</p>
+            {% endif %}
+          </article>
+        {% endfor %}
+        </div>
+        {% endif %}
+      </div>
+
+      {% if story.status in ['signal', 'watch'] %}
+      <form action="{{ url_for('qualify_story', story_id=story.id) }}" method="post" class="qualify-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>Qualification reason {% if not story.qualification.automated_importance %}<span>required for importance override</span>{% endif %}
+          <textarea name="reason" rows="2" {{ 'required' if not story.qualification.automated_importance else '' }} placeholder="Why this development deserves a brief"></textarea>
+        </label>
+        <button class="button button-primary" type="submit" {{ 'disabled' if not story.qualification.evidence_gate else '' }}>Qualify as candidate</button>
+        {% if not story.qualification.evidence_gate %}<p class="muted">Qualification remains locked until the evidence gate passes.</p>{% endif %}
+      </form>
+      {% else %}
+      <div class="qualified-state"><strong>Candidate qualification recorded</strong><p>Drafting still requires the separate human approval checkpoint.</p></div>
+      {% endif %}
+    </section>
+
     {% if story.relevance_bridge %}
     <section class="panel lens-panel">
-      <div class="panel-heading"><div><p class="section-index">04</p><h2>Open-source opportunity</h2></div><span class="strength strength-{{ story.opportunity_strength|lower }}">{{ story.opportunity_strength }}</span></div>
+      <div class="panel-heading"><div><p class="section-index">05</p><h2>Open-source opportunity</h2></div><span class="strength strength-{{ story.opportunity_strength|lower }}">{{ story.opportunity_strength }}</span></div>
       <div class="lens-grid"><div><h3>Relevance bridge</h3><p>{{ story.relevance_bridge }}</p></div><div><h3>Limitation</h3><p>{{ story.counterargument }}</p></div></div>
     </section>
     {% endif %}
   </div>
 
   <aside class="review-panel panel">
-    <p class="section-index">Human checkpoint</p><h2>Choose the next state</h2>
+    <p class="section-index">Draft approval</p><h2>Approve a drafting mode</h2>
     {% if story.status == 'approved' %}
     <div class="approval-pending" role="status">
       <strong>Draft request queued</strong>
       <p>Your approval snapshot and guidance are preserved. The system will not create another request while this one is pending.</p>
     </div>
     {% else %}
-    <p class="muted">No draft will be created until you approve one of the modes below.</p>
+    <p class="muted">Qualification never creates a draft. Approve one mode explicitly when the story is ready.</p>
+    {% if story.status not in ['candidate','draft_ready'] %}<div class="approval-lock"><strong>Neutral brief locked</strong><p>Qualify this story as a candidate first.</p></div>{% endif %}
+    {% if story.opportunity_strength not in ['Strong','Moderate'] %}<div class="approval-lock"><strong>Open-source lens locked</strong><p>No Strong or Moderate opportunity is recorded.</p></div>{% endif %}
     <form action="{{ url_for('review_story', story_id=story.id) }}" method="post" class="review-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>Guidance or reason <span>optional</span><textarea name="reason" rows="3" placeholder="What should the next step preserve or investigate?"></textarea></label>
@@ -109,7 +207,6 @@
         <span><strong>Approve open-source lens</strong><small>Neutral report + labelled analysis</small></span><b>→</b>
       </button>
       <div class="secondary-actions">
-        <button name="action" value="research" type="submit">Research more</button>
         <button name="action" value="archive" type="submit">Archive</button>
       </div>
     </form>

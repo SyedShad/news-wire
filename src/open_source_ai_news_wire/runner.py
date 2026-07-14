@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .collector import Collector, ScanSummary, utc_now
 from .assistance import AssistanceDeferred, AssistanceService, CodexInvoker
+from .evidence import EvidenceEnricher
 from .notifications import NativeNotifier
 from .storage import Database
 
@@ -97,12 +98,21 @@ class Worker:
                 raise
             self._finish_trigger_work(queued_ids, "completed")
             self._maintain_watches()
+            self._process_evidence(deadline)
             if datetime.now(UTC) < deadline - timedelta(minutes=2):
                 self._process_assistance()
             NativeNotifier(self.database).dispatch_pending()
             return WorkerResult(summary.result, summary)
         finally:
             self.lock.release()
+
+    def _process_evidence(self, deadline: datetime) -> None:
+        enricher = EvidenceEnricher(self.database)
+        processed = 0
+        while processed < 4 and datetime.now(UTC) < deadline - timedelta(minutes=2):
+            if enricher.process_next() is None:
+                return
+            processed += 1
 
     def _process_assistance(self) -> None:
         if self.database.get_state("assistance_enabled", "false") != "true":

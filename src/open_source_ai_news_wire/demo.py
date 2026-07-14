@@ -139,7 +139,7 @@ def seed_demo_data(database: Database, *, force: bool = False) -> bool:
     with database.transaction() as connection:
         if force:
             for table in (
-                "evidence_link", "claim", "source_item", "review_action", "draft",
+                "evidence_source_claim", "evidence_source", "candidate", "evidence_link", "claim", "source_item", "review_action", "draft",
                 "work_item", "alert", "story_cluster", "source_registry", "scan_run",
                 "usage_ledger", "diagnostic_event", "app_state",
             ):
@@ -221,6 +221,21 @@ def seed_demo_data(database: Database, *, force: bool = False) -> bool:
                     "INSERT INTO evidence_link(claim_id, source_item_id, relationship) VALUES(?, ?, ?)",
                     (claim["id"], item["id"], relationship),
                 )
+
+        connection.executemany(
+            """
+            INSERT INTO candidate(
+                story_id, evidence_gate, importance_gate, score, score_json, qualified_at
+            ) VALUES(?, ?, ?, ?, '{}', ?)
+            """,
+            [
+                ("story-demo-runtime-001", 1, 1, 94, _iso(now - timedelta(minutes=29))),
+                ("story-demo-policy-002", 1, 1, 82, _iso(now - timedelta(hours=2, minutes=39))),
+                ("story-demo-watch-003", 0, 1, 74, None),
+                ("story-demo-eval-004", 1, 1, 68, _iso(now - timedelta(hours=4))),
+                ("story-demo-catchup-005", 1, 1, 51, _iso(now - timedelta(hours=18))),
+            ],
+        )
 
         connection.executemany(
             """

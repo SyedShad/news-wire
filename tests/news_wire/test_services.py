@@ -72,7 +72,7 @@ def test_pending_draft_approval_cannot_be_queued_twice(service: DashboardService
 
 
 def test_watch_cannot_be_approved_for_drafting(service: DashboardService) -> None:
-    with pytest.raises(ValueError, match="verified candidates"):
+    with pytest.raises(ValueError, match="Evidence and importance"):
         service.review("story-demo-watch-003", "approve_neutral")
 
 
@@ -236,13 +236,11 @@ def test_inbox_type_filters_include_editorial_and_operational_work(service: Dash
 
 def test_all_non_draft_review_states_are_recorded(service: DashboardService) -> None:
     assert service.review("story-demo-runtime-001", "archive", "No longer timely") == "archived"
-    assert service.review("story-demo-watch-003", "research") == "watch"
-    assert service.review("story-demo-watch-003", "accept") == "candidate"
     assert service.review("story-demo-watch-003", "withdraw") == "withdrawn"
-    research = service.database.one(
-        "SELECT kind FROM work_item WHERE story_id = 'story-demo-watch-003' AND kind = 'research'"
-    )
-    assert research == {"kind": "research"}
+    with pytest.raises(ValueError, match="Unsupported"):
+        service.review("story-demo-watch-003", "research")
+    with pytest.raises(ValueError, match="Unsupported"):
+        service.review("story-demo-watch-003", "accept")
 
 
 def test_installed_schedule_can_resume(service: DashboardService) -> None:
@@ -265,7 +263,7 @@ def test_settings_alerts_and_evidence_failure_paths(service: DashboardService) -
     assert settings["counts"]["stories"] == 5
     assert settings["counts"]["registered sources"] == 12
     assert settings["counts"]["source items"] == 9
-    assert settings["app_version"] == "0.2.0"
+    assert settings["app_version"] == "0.3.0"
     assert settings["purge_preview"]["operations_count"] == 1
     assert settings["demo_mode"] is True
     assert service.mark_alerts_read() == 6

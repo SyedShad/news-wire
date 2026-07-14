@@ -47,7 +47,7 @@ def diagnostic_payload(database: Database) -> dict[str, Any]:
     )
     counts: dict[str, int] = {}
     for table in (
-        "source_registry", "raw_observation", "story_cluster", "source_item", "claim",
+        "source_registry", "raw_observation", "story_cluster", "source_item", "evidence_source", "claim",
         "alert", "draft", "work_item", "usage_ledger", "diagnostic_event",
     ):
         counts[table] = int(database.one(f"SELECT COUNT(*) AS count FROM {table}")["count"])
