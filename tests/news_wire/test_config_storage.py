@@ -108,6 +108,12 @@ def test_existing_schema_requires_explicit_migration_and_cancels_staged_work(tmp
             VALUES('scout_scan', 'queued', 100, '{}', '2026-07-14T00:00:00Z', '2026-07-14T00:00:00Z')
             """
         )
+        connection.execute(
+            """
+            INSERT INTO scan_run(trigger_type, started_at, result, details)
+            VALUES('manual', '2026-07-14T00:00:00Z', 'queued', 'Staged dashboard request')
+            """
+        )
         connection.commit()
     database = Database(paths)
 
@@ -117,6 +123,9 @@ def test_existing_schema_requires_explicit_migration_and_cancels_staged_work(tmp
     assert database.migrate() == SCHEMA_VERSION
     assert database.initialize() is None
     assert database.one("SELECT status FROM work_item") == {"status": "cancelled"}
+    scan = database.one("SELECT result, finished_at FROM scan_run")
+    assert scan["result"] == "cancelled"
+    assert scan["finished_at"] is not None
     assert database.one("SELECT COUNT(*) AS count FROM source_state") == {"count": 0}
 
 

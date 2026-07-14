@@ -463,7 +463,16 @@ class Database:
                         """,
                         (now,),
                     ).rowcount
-                    if cancelled:
+                    cancelled_scans = connection.execute(
+                        """
+                        UPDATE scan_run
+                        SET result = 'cancelled', finished_at = ?,
+                            details = 'Cancelled during worker migration; no collection was performed.'
+                        WHERE result = 'queued' AND finished_at IS NULL
+                        """,
+                        (now,),
+                    ).rowcount
+                    if cancelled or cancelled_scans:
                         connection.execute(
                             """
                             INSERT INTO diagnostic_event(level, event_type, message, created_at, detail_json)
@@ -472,7 +481,10 @@ class Database:
                             (
                                 "Cancelled pre-worker staged requests during schema migration.",
                                 now,
-                                self.json({"cancelled_work_items": cancelled}),
+                                self.json({
+                                    "cancelled_work_items": cancelled,
+                                    "cancelled_scan_records": cancelled_scans,
+                                }),
                             ),
                         )
                 connection.execute(
