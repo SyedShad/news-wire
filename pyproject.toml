@@ -33,13 +33,13 @@ open_source_ai_news_wire = [
 
 [dependency-groups]
 dev = [
-  "pytest>=9.1.0,<10",
+  "pytest>=9.1.1,<10",
   "pytest-cov>=7,<8",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=9.1.0,<10",
+  "pytest>=9.1.1,<10",
   "pytest-cov>=7,<8",
 ]
 
