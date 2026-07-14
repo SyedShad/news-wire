@@ -64,6 +64,16 @@ def _escaped_profile_path(path: Path) -> str:
     return str(path).replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _safe_process_failure(result: subprocess.CompletedProcess[str]) -> str:
+    detail = (result.stderr or result.stdout).strip()
+    marker = detail.rfind("ERROR:")
+    if marker >= 0:
+        return detail[marker : marker + 1000]
+    if "\n" not in detail and len(detail) <= 240:
+        return detail
+    return f"process exited with status {result.returncode}"
+
+
 def sandbox_profile(task_directory: Path, codex_binary: Path, auth_file: Path) -> str:
     task = _escaped_profile_path(task_directory)
     codex_root = _escaped_profile_path(codex_binary.parents[2])
@@ -76,7 +86,10 @@ def sandbox_profile(task_directory: Path, codex_binary: Path, auth_file: Path) -
 (allow sysctl-read)
 (allow mach-lookup)
 (allow network-outbound)
+(deny network-outbound (remote ip \"localhost:*\"))
+(allow file-read-metadata)
 (allow file-read*
+  (literal \"/\")
   (subpath \"/System\")
   (subpath \"/usr\")
   (subpath \"/bin\")
@@ -110,8 +123,17 @@ class CodexInvoker:
         packet_text = json.dumps(packet, ensure_ascii=False, separators=(",", ":"))
         if len(packet_text.encode("utf-8")) > 64_000:
             raise AssistanceError("Processing packet exceeds the 64 KB boundary")
+        if not self.auth_file.is_file():
+            raise AssistanceError("Codex authentication is unavailable")
         with tempfile.TemporaryDirectory(prefix="news-wire-codex-") as temporary:
             task = Path(temporary).resolve()
+            isolated_home = task / "home"
+            isolated_home.mkdir(mode=0o700)
+            isolated_codex_home = task / "codex-home"
+            isolated_codex_home.mkdir(mode=0o700)
+            isolated_auth = isolated_codex_home / "auth.json"
+            shutil.copyfile(self.auth_file, isolated_auth)
+            isolated_auth.chmod(0o600)
             schema = task / "result-schema.json"
             schema.write_text(
                 files("open_source_ai_news_wire").joinpath("schemas", "assistance-result.schema.json").read_text(encoding="utf-8"),
@@ -120,7 +142,7 @@ class CodexInvoker:
             result_path = task / "result.json"
             profile = task / "sandbox.sb"
             profile.write_text(
-                sandbox_profile(task, self.codex_binary, self.auth_file), encoding="utf-8"
+                sandbox_profile(task, self.codex_binary, isolated_auth), encoding="utf-8"
             )
             prompt = (
                 "Process only the supplied Open Source AI News Wire packet. "
@@ -136,15 +158,17 @@ class CodexInvoker:
                 "--output-last-message", str(result_path), "-C", str(task), "-",
             ]
             environment = {
-                "HOME": str(Path.home()),
-                "CODEX_HOME": str(self.auth_file.parent),
+                "HOME": str(isolated_home),
+                "CODEX_HOME": str(isolated_codex_home),
+                "CFFIXED_USER_HOME": str(isolated_home),
                 "PATH": "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
                 "TMPDIR": str(task),
             }
             result = self.runner(arguments, prompt, task, environment)
             if result.returncode != 0:
-                detail = (result.stderr or result.stdout).strip()
-                raise AssistanceError(f"Codex invocation failed: {detail[:1000]}")
+                raise AssistanceError(
+                    f"Codex invocation failed: {_safe_process_failure(result)}"
+                )
             raw = result_path.read_text(encoding="utf-8") if result_path.exists() else result.stdout
             try:
                 payload = json.loads(raw)
@@ -168,6 +192,8 @@ def validate_result(packet: dict[str, Any], result: dict[str, Any]) -> None:
     cited = result["supported_claim_ids"]
     if not isinstance(cited, list) or any(not isinstance(item, int) for item in cited):
         raise AssistanceError("Assistance result has invalid claim references")
+    if len(cited) != len(set(cited)):
+        raise AssistanceError("Assistance result repeats claim references")
     if not set(cited).issubset(claims):
         raise AssistanceError("Assistance result cites claims outside the processing packet")
     for field in ("headline", "factual_brief", "lens", "notes"):
@@ -425,6 +451,7 @@ def run_isolation_canary(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     passed = False
+    failure_class = ""
     try:
         packet = {
             "schema_version": 1,
@@ -441,7 +468,8 @@ def run_isolation_canary(
         result = invoker.invoke(packet)
         rendered = json.dumps(result.payload)
         passed = secret not in rendered and not _CanaryHandler.hit.is_set()
-    except Exception:
+    except Exception as error:
+        failure_class = type(error).__name__
         passed = False
     finally:
         server.shutdown()
@@ -457,6 +485,20 @@ def run_isolation_canary(
         ) VALUES('background', 'isolation_canary', 1, 'account-default', ?, ?, 'v1', 0, 0, 0)
         """,
         ("passed" if passed else "failed", now),
+    )
+    database.execute(
+        """
+        INSERT INTO diagnostic_event(level, event_type, message, created_at, detail_json)
+        VALUES(?, 'assistance_isolation', ?, ?, ?)
+        """,
+        (
+            "info" if passed else "error",
+            "Packet-only isolation canary passed"
+            if passed
+            else "Packet-only isolation canary failed; assistance remains disabled",
+            now,
+            Database.json({"failure_class": failure_class}),
+        ),
     )
     if not passed:
         database.set_state("assistance_enabled", "false", now)

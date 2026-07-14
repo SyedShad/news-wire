@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from importlib.resources import files
 from pathlib import Path
 
 import pytest
@@ -211,6 +212,8 @@ def test_outer_sandbox_profile_allows_only_task_auth_system_and_codex_paths(tmp_
     assert str(auth) in profile
     assert "/Applications/ChatGPT.app" in profile
     assert "(deny default)" in profile
+    assert '(deny network-outbound (remote ip "localhost:*"))' in profile
+    assert '(literal "/")' in profile
     assert "(allow file-write*" in profile
 
 
@@ -224,7 +227,17 @@ def test_codex_invoker_builds_isolated_command_and_validates_result(tmp_path: Pa
     captured: dict[str, object] = {}
 
     def runner(arguments, input_text, cwd, environment):
-        captured.update(arguments=arguments, input=input_text, cwd=cwd, environment=environment)
+        profile_path = Path(arguments[arguments.index("-f") + 1])
+        isolated_auth = Path(environment["CODEX_HOME"]) / "auth.json"
+        captured.update(
+            arguments=arguments,
+            input=input_text,
+            cwd=cwd,
+            environment=environment,
+            profile=profile_path.read_text(encoding="utf-8"),
+            auth_copied=isolated_auth.read_text(encoding="utf-8") == "{}",
+            auth_mode=isolated_auth.stat().st_mode & 0o777,
+        )
         output = Path(arguments[arguments.index("--output-last-message") + 1])
         output.write_text(json.dumps({
             "schema_version": 1,
@@ -248,7 +261,12 @@ def test_codex_invoker_builds_isolated_command_and_validates_result(tmp_path: Pa
     assert "--ignore-user-config" in arguments
     assert "--strict-config" in arguments
     assert 'approval_policy="never"' in arguments
-    assert captured["environment"]["CODEX_HOME"] == str(auth.parent)
+    assert str(captured["environment"]["CODEX_HOME"]).startswith(str(captured["cwd"]))
+    assert captured["environment"]["HOME"] != str(Path.home())
+    assert captured["environment"]["CFFIXED_USER_HOME"] == captured["environment"]["HOME"]
+    assert str(auth) not in str(captured["profile"])
+    assert captured["auth_copied"] is True
+    assert captured["auth_mode"] == 0o600
     assert str(tmp_path) not in str(captured["input"])
 
 
@@ -317,7 +335,21 @@ def test_result_schema_rejects_wrong_shape_types_and_empty_draft() -> None:
         validate_result(packet, {**base, "operation": "triage"})
     with pytest.raises(AssistanceError, match="invalid claim"):
         validate_result(packet, {**base, "supported_claim_ids": ["1"]})
+    with pytest.raises(AssistanceError, match="repeats claim"):
+        validate_result(packet, {**base, "supported_claim_ids": [1, 1]})
     with pytest.raises(AssistanceError, match="must be text"):
         validate_result(packet, {**base, "notes": 1})
     with pytest.raises(AssistanceError, match="requires a headline"):
         validate_result(packet, {**base, "headline": ""})
+
+
+def test_structured_output_schema_types_const_and_enum_fields() -> None:
+    schema = json.loads(
+        files("open_source_ai_news_wire")
+        .joinpath("schemas", "assistance-result.schema.json")
+        .read_text(encoding="utf-8")
+    )
+
+    assert schema["properties"]["schema_version"]["type"] == "integer"
+    assert schema["properties"]["operation"]["type"] == "string"
+    assert "uniqueItems" not in schema["properties"]["supported_claim_ids"]
