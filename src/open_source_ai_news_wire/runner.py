@@ -12,6 +12,8 @@ from .collector import Collector, ScanSummary, utc_now
 from .assistance import AssistanceDeferred, AssistanceService, CodexInvoker
 from .evidence import EvidenceEnricher
 from .notifications import NativeNotifier
+from .pilot import PilotManager
+from .scheduler import next_scheduled_run
 from .storage import Database
 
 
@@ -97,10 +99,18 @@ class Worker:
                 self._finish_trigger_work(queued_ids, "failed")
                 raise
             self._finish_trigger_work(queued_ids, "completed")
+            now_value = utc_now()
+            if self.database.get_state("schedule_status", "not_installed") == "active":
+                self.database.set_state(
+                    "next_scan_at",
+                    next_scheduled_run().isoformat().replace("+00:00", "Z"),
+                    now_value,
+                )
             self._maintain_watches()
             self._process_evidence(deadline)
             if datetime.now(UTC) < deadline - timedelta(minutes=2):
                 self._process_assistance()
+            PilotManager(self.database).try_auto_activate()
             NativeNotifier(self.database).dispatch_pending()
             return WorkerResult(summary.result, summary)
         finally:

@@ -1,8 +1,12 @@
 # Open Source AI News Wire — V1 Implementation Plan
 
-Status: dashboard milestone implemented and verified; broader monitoring phases remain planned
+Status: V1 implementation complete in release 0.3.1; additional 72-hour repair validation pending live human workflow checkpoint
 
 Planning date: 2026-07-14
+
+Completion update: 2026-07-17
+
+Release 0.3.1 retains schema 3 and completes deterministic collection, DNS-aware whole-Mac outage grouping, half-hour schedule reporting, evidence-first qualification, production-safe draft exports, five dedicated non-SEC source adapters, native notification watermarking, and fail-closed automatic pilot activation. SEC access remains excluded by operator choice. The remaining rollout work is operational: install the immutable release, perform one human-approved live draft and notification canary, begin the additional 72-hour validation epoch, and let the worker activate notifications only after all readiness gates pass.
 
 Target environment: one local macOS user account
 
@@ -886,15 +890,15 @@ Because V1 intentionally has no backup feature, database corruption or disk loss
 
 Before writing application code:
 
-- [ ] Re-authenticate GitHub CLI.
-- [ ] Confirm creation of private `SyedShad/open-source-ai-news-wire`.
-- [ ] Verify the destination is independent rather than a public fork.
-- [ ] Protect the public upstream from pushes.
-- [ ] Audit hosted workflows before enabling them.
-- [ ] Approve download of a pinned, checksum-verified Python 3.12 runtime.
-- [ ] Confirm the default runtime root is outside Git and cloud-synchronized folders.
-- [ ] Capture a clean repository status and preserve unrelated work.
-- [ ] Turn this plan into phase-specific pull requests with gates intact.
+- [x] Re-authenticate GitHub CLI.
+- [x] Confirm creation of private `SyedShad/open-source-ai-news-wire`.
+- [x] Verify the destination is independent rather than a public fork.
+- [x] Protect the public upstream from pushes.
+- [x] Audit hosted workflows before enabling them.
+- [x] Provision a pinned Python 3.12 runtime and locked environment.
+- [x] Confirm the default runtime root is outside Git and cloud-synchronized folders.
+- [x] Preserve the local runtime corpus with no backup or synchronization feature.
+- [x] Implement and verify the V1 application through release 0.3.1.
 
 ## 24. Reference decisions and current documentation
 

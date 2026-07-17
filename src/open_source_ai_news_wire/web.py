@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import html
 import json
 import re
 import secrets
@@ -412,19 +411,11 @@ def create_app(
 
     @app.get("/drafts/<int:draft_id>/export.html")
     def export_draft_html(draft_id: int) -> Response:
-        draft = service.get_draft(draft_id)
-        if not draft:
+        try:
+            document = service.draft_html(draft_id)
+            draft = service.get_draft(draft_id)
+        except LookupError:
             abort(404)
-        body = "".join(f"<p>{html.escape(paragraph)}</p>" for paragraph in draft["body"].split("\n\n"))
-        lens = ""
-        if draft["lens"]:
-            lens = f"<h2>Open-Source Lens</h2><p>{html.escape(draft['lens'])}</p>"
-        sources = "".join(f"<li>{html.escape(source)}</li>" for source in draft["sources"])
-        document = f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>{html.escape(draft['headline'])}</title>
-<style>body{{font:17px/1.65 system-ui;max-width:760px;margin:7vh auto;padding:0 24px;color:#17201d}}h1{{font:700 42px/1.08 Georgia,serif}}.meta{{color:#61706a}}h2{{margin-top:2.4rem}}</style>
-</head><body><article><h1>{html.escape(draft['headline'])}</h1><p class="meta">{html.escape(draft['metadata'])}</p>{body}{lens}<h2>Sources</h2><ul>{sources}</ul></article></body></html>"""
         filename = _slug_filename(str(draft["headline"]))
         return Response(
             document,

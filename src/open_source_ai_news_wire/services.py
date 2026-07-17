@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import hashlib
+import html
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from . import __version__
 from .storage import Database, database_size
 from .source_registry import set_source_enabled
+from .scheduler import next_scheduled_run
 from .evidence import (
     ALLOWED_RELATIONSHIPS,
     ALLOWED_ROLES,
@@ -498,6 +501,7 @@ class DashboardService:
         )
         if draft:
             draft["sources"] = json.loads(draft.get("sources_json") or "[]")
+            draft["source_rows"] = [self._source_parts(source) for source in draft["sources"]]
             draft["history"] = self.database.query(
                 "SELECT id, version, status, updated_at FROM draft WHERE story_id = ? ORDER BY version DESC",
                 (draft["story_id"],),
@@ -677,6 +681,13 @@ class DashboardService:
         rows = self.database.query(
             "SELECT * FROM source_registry ORDER BY family, name"
         )
+        for row in rows:
+            try:
+                definition = json.loads(str(row.get("definition_json") or "{}"))
+            except json.JSONDecodeError:
+                definition = {}
+            row["validation_status"] = definition.get("validation_status", "unknown")
+            row["operational_status"] = row["health"] if row["enabled"] else row["validation_status"]
         enabled_rows = [row for row in rows if bool(row["enabled"])]
         health_counts = {
             health: sum(1 for row in enabled_rows if row["health"] == health)
@@ -722,11 +733,17 @@ class DashboardService:
             """
         ) or {"background": 0, "draft": 0}
         today = datetime.now(UTC).date()
+        schedule_active = self.database.get_state("schedule_status", "not_installed") == "active"
+        next_scan = (
+            next_scheduled_run().isoformat().replace("+00:00", "Z")
+            if schedule_active
+            else "Not scheduled"
+        )
         return {
             "installed": self.database.get_state("schedule_installed", "false") == "true",
             "status": self.database.get_state("schedule_status", "not_installed"),
             "last_scan_at": self.database.get_state("last_scan_at", "Never"),
-            "next_scan_at": self.database.get_state("next_scan_at", "Not scheduled"),
+            "next_scan_at": next_scan,
             "assistance_enabled": self.database.get_state("assistance_enabled", "false") == "true",
             "shadow_mode": self.database.get_state("shadow_mode", "true") == "true",
             "background_units": int(usage["background"] or 0),
@@ -917,5 +934,61 @@ class DashboardService:
         if draft["lens"]:
             sections.extend(["", "## Open-Source Lens", "", draft["lens"]])
         sections.extend(["", "## Sources", ""])
-        sections.extend(f"- {source}" for source in draft["sources"])
+        sections.extend(f"- {self._source_markdown(source)}" for source in draft["sources"])
         return "\n".join(sections).strip() + "\n"
+
+    @staticmethod
+    def _source_parts(source: Any) -> dict[str, str]:
+        if isinstance(source, dict):
+            title = " ".join(str(source.get("title") or source.get("name") or "Source").split())[:500]
+            role = " ".join(str(source.get("role") or source.get("source_role") or "").split())[:80]
+            raw_url = str(source.get("url") or "").strip()
+        else:
+            title = " ".join(str(source).split())[:500] or "Source"
+            role = ""
+            raw_url = ""
+        parsed = urlsplit(raw_url)
+        safe_url = raw_url if parsed.scheme == "https" and bool(parsed.hostname) and not parsed.username and not parsed.password else ""
+        return {"title": title, "role": role, "url": safe_url}
+
+    @classmethod
+    def _source_markdown(cls, source: Any) -> str:
+        parts = cls._source_parts(source)
+        title = parts["title"].replace("[", "\\[").replace("]", "\\]")
+        url = parts["url"].replace("<", "%3C").replace(">", "%3E")
+        rendered = f"[{title}](<{url}>)" if url else title
+        return f"{rendered} — {parts['role']}" if parts["role"] else rendered
+
+    @classmethod
+    def _source_html(cls, source: Any) -> str:
+        parts = cls._source_parts(source)
+        title = html.escape(parts["title"])
+        if parts["url"]:
+            rendered = (
+                f'<a href="{html.escape(parts["url"], quote=True)}" '
+                f'rel="noreferrer noopener">{title}</a>'
+            )
+        else:
+            rendered = title
+        if parts["role"]:
+            rendered += f" — {html.escape(parts['role'])}"
+        return rendered
+
+    def draft_html(self, draft_id: int) -> str:
+        draft = self.get_draft(draft_id)
+        if not draft:
+            raise LookupError("Draft not found")
+        body = "".join(
+            f"<p>{html.escape(paragraph)}</p>" for paragraph in str(draft["body"]).split("\n\n")
+        )
+        lens = ""
+        if draft["lens"]:
+            lens = f"<h2>Open-Source Lens</h2><p>{html.escape(str(draft['lens']))}</p>"
+        sources = "".join(f"<li>{self._source_html(source)}</li>" for source in draft["sources"])
+        headline = html.escape(str(draft["headline"]))
+        metadata = html.escape(str(draft["metadata"]))
+        return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>{headline}</title>
+<style>body{{font:17px/1.65 system-ui;max-width:760px;margin:7vh auto;padding:0 24px;color:#17201d}}h1{{font:700 42px/1.08 Georgia,serif}}.meta{{color:#61706a}}h2{{margin-top:2.4rem}}</style>
+</head><body><article><h1>{headline}</h1><p class="meta">{metadata}</p>{body}{lens}<h2>Sources</h2><ul>{sources}</ul></article></body></html>"""

@@ -19,6 +19,10 @@ class ResponseTooLarge(RuntimeError):
     """Raised when a source exceeds its bounded response allowance."""
 
 
+class NetworkUnavailable(ConnectionError):
+    """Raised when the host network cannot currently resolve a public source."""
+
+
 Resolver = Callable[[str], Iterable[str]]
 
 
@@ -33,8 +37,11 @@ class FetchResult:
 
 def system_resolver(host: str) -> list[str]:
     addresses: set[str] = set()
-    for entry in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM):
-        addresses.add(str(entry[4][0]))
+    try:
+        for entry in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM):
+            addresses.add(str(entry[4][0]))
+    except OSError as error:
+        raise NetworkUnavailable("The source host could not be resolved") from error
     return sorted(addresses)
 
 

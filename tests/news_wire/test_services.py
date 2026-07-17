@@ -263,7 +263,7 @@ def test_settings_alerts_and_evidence_failure_paths(service: DashboardService) -
     assert settings["counts"]["stories"] == 5
     assert settings["counts"]["registered sources"] == 12
     assert settings["counts"]["source items"] == 9
-    assert settings["app_version"] == "0.3.0"
+    assert settings["app_version"] == "0.3.1"
     assert settings["purge_preview"]["operations_count"] == 1
     assert settings["demo_mode"] is True
     assert service.mark_alerts_read() == 6
@@ -280,3 +280,30 @@ def test_lens_markdown_includes_separate_label(service: DashboardService) -> Non
     rendered = service.draft_markdown(1)
     assert "## Open-Source Lens" in rendered
     assert "A bounded lens section." in rendered
+
+
+def test_production_draft_sources_render_safely_in_markdown_html_and_view_model(service: DashboardService) -> None:
+    service.database.execute(
+        "UPDATE draft SET sources_json=? WHERE id=1",
+        (
+            Database.json(
+                [
+                    {"title": "Primary [announcement]", "url": "https://example.com/news?a=1&b=2", "role": "Event"},
+                    {"title": "Unsafe <source>", "url": "javascript:alert(1)", "role": "Reporting"},
+                    "Legacy source name",
+                ]
+            ),
+        ),
+    )
+
+    draft = service.get_draft(1)
+    markdown = service.draft_markdown(1)
+    document = service.draft_html(1)
+
+    assert draft["source_rows"][0]["url"] == "https://example.com/news?a=1&b=2"
+    assert draft["source_rows"][1]["url"] == ""
+    assert "[Primary \\[announcement\\]](<https://example.com/news?a=1&b=2>) — Event" in markdown
+    assert "Unsafe &lt;source&gt; — Reporting" in document
+    assert "javascript:" not in document
+    assert 'rel="noreferrer noopener"' in document
+    assert "Legacy source name" in markdown and "Legacy source name" in document

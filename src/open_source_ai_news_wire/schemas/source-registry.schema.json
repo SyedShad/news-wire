@@ -16,7 +16,7 @@
           "name": {"type": "string", "minLength": 1},
           "family": {"type": "string", "minLength": 1},
           "monitoring_role": {"enum": ["Event", "Reporting", "Discovery"]},
-          "adapter": {"enum": ["feed", "json", "html_listing", "sitemap", "github_release", "research_feed"]},
+          "adapter": {"enum": ["feed", "json", "html_listing", "sitemap", "github_release", "research_feed", "anthropic_newsroom", "meta_ai_blog", "cisa_advisories", "huggingnews", "mastodon_signal"]},
           "url": {"type": "string", "format": "uri"},
           "base_hosts": {"type": "array", "minItems": 1, "items": {"type": "string"}},
           "enabled_by_default": {"type": "boolean"},
@@ -25,7 +25,7 @@
           "detail": {"type": "string"},
           "include_terms": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
           "exclude_terms": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
-          "validation_status": {"enum": ["live-validated", "disabled-access", "disabled-parser", "disabled-policy"]},
+          "validation_status": {"enum": ["live-validated", "disabled-access", "disabled-parser", "disabled-policy", "validated-unavailable", "excluded-by-operator"]},
           "evidence_use": {"enum": ["primary", "reporting", "discovery-only"]}
         },
         "additionalProperties": false

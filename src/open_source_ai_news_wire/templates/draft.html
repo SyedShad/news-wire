@@ -35,7 +35,7 @@
       <h2>No adjacent version</h2><p class="comparison-note">Save a revision to compare field-level changes while preserving this version.</p>
       {% endif %}
     </section>
-    <section class="panel"><p class="section-index">Sources</p><ul class="plain-list">{% for source in draft.sources %}<li>{{ source }}</li>{% endfor %}</ul></section>
+    <section class="panel"><p class="section-index">Sources</p><ul class="plain-list">{% for source in draft.source_rows %}<li>{% if source.url %}<a href="{{ source.url }}" rel="noreferrer noopener">{{ source.title }}</a>{% else %}{{ source.title }}{% endif %}{% if source.role %} — {{ source.role }}{% endif %}</li>{% endfor %}</ul></section>
   </aside>
 </div>
 {% endblock %}

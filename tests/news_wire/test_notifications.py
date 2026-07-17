@@ -29,6 +29,7 @@ def test_burst_notifications_are_grouped_and_never_duplicated(tmp_path: Path) ->
         )
     database.set_state("notifications_enabled", "true", now)
     database.set_state("shadow_mode", "false", now)
+    database.set_state("pilot_notification_watermark", now, now)
     commands: list[list[str]] = []
 
     def runner(arguments: list[str]) -> subprocess.CompletedProcess[str]:
@@ -57,6 +58,7 @@ def test_shadow_mode_allows_health_but_suppresses_content_notices(tmp_path: Path
     )
     database.set_state("notifications_enabled", "true", now)
     database.set_state("shadow_mode", "true", now)
+    database.set_state("pilot_notification_watermark", now, now)
     commands: list[list[str]] = []
 
     def runner(arguments: list[str]) -> subprocess.CompletedProcess[str]:
@@ -80,6 +82,7 @@ def test_terminal_notifier_click_command_uses_fixed_launcher_and_story_id(tmp_pa
         (now,),
     )
     database.set_state("notifications_enabled", "true", now)
+    database.set_state("pilot_notification_watermark", now, now)
     notifier_binary = tmp_path / "terminal-notifier"
     notifier_binary.write_text("binary", encoding="utf-8")
     launcher = tmp_path / "open-source-ai-news-wire"
@@ -98,6 +101,49 @@ def test_terminal_notifier_click_command_uses_fixed_launcher_and_story_id(tmp_pa
     ).dispatch_pending()
     assert commands[0][0] == str(notifier_binary)
     assert "-execute" not in commands[0]
+
+
+def test_activation_watermark_and_severity_filter_suppress_old_or_standard_alerts(tmp_path: Path) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    old = "2026-07-17T08:00:00Z"
+    watermark = "2026-07-17T09:00:00Z"
+    current = "2026-07-17T09:01:00Z"
+    for created_at, kind, severity, title in (
+        (old, "candidate", "high", "Historical candidate"),
+        (current, "candidate", "standard", "Standard candidate"),
+        (current, "candidate", "high", "Current candidate"),
+    ):
+        database.execute(
+            "INSERT INTO alert(kind,severity,title,body,created_at) VALUES(?,?,?,'Body',?)",
+            (kind, severity, title, created_at),
+        )
+    database.set_state("notifications_enabled", "true", current)
+    database.set_state("shadow_mode", "false", current)
+    database.set_state("pilot_notification_watermark", watermark, current)
+    commands: list[list[str]] = []
+
+    def runner(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(arguments)
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    delivered = NativeNotifier(
+        database, runner=runner, terminal_notifier=tmp_path / "missing"
+    ).dispatch_pending()
+
+    assert delivered == 1
+    assert commands[0][-2:] == ["Current candidate", "Body"]
+    assert database.one("SELECT COUNT(*) AS count FROM notification_delivery") == {"count": 1}
+
+
+def test_notification_canary_records_machine_verifiable_result(tmp_path: Path) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    runner = lambda args: subprocess.CompletedProcess(args, 0, "", "")
+
+    assert NativeNotifier(database, runner=runner, terminal_notifier=tmp_path / "missing").send_canary() is True
+    assert database.get_state("notification_canary_status") == "passed"
+    assert database.one("SELECT event_type FROM diagnostic_event") == {"event_type": "notification_canary"}
 
 
 def test_dashboard_auth_link_can_open_a_specific_story(tmp_path: Path) -> None:

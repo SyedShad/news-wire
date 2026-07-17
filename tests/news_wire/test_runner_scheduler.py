@@ -14,7 +14,7 @@ from open_source_ai_news_wire.assistance import AssistanceDeferred
 from open_source_ai_news_wire.config import resolve_runtime_paths
 from open_source_ai_news_wire.demo import seed_demo_data
 from open_source_ai_news_wire.runner import ScanLock, Worker
-from open_source_ai_news_wire.scheduler import LABEL, LaunchAgentManager, SchedulerError
+from open_source_ai_news_wire.scheduler import LABEL, LaunchAgentManager, SchedulerError, next_scheduled_run
 from open_source_ai_news_wire.storage import Database
 
 
@@ -25,6 +25,19 @@ class RecordingCollector:
     def scan(self, **kwargs: str | None) -> ScanSummary:
         self.calls.append(kwargs)
         return ScanSummary(1, "success", 1, 0, 2, False)
+
+
+@pytest.mark.parametrize(
+    ("current", "expected"),
+    [
+        (datetime(2026, 7, 17, 10, 0, tzinfo=UTC), datetime(2026, 7, 17, 10, 30, tzinfo=UTC)),
+        (datetime(2026, 7, 17, 10, 29, 59, tzinfo=UTC), datetime(2026, 7, 17, 10, 30, tzinfo=UTC)),
+        (datetime(2026, 7, 17, 10, 30, tzinfo=UTC), datetime(2026, 7, 17, 11, 0, tzinfo=UTC)),
+        (datetime(2026, 7, 17, 10, 59, 59, tzinfo=UTC), datetime(2026, 7, 17, 11, 0, tzinfo=UTC)),
+    ],
+)
+def test_next_scheduled_run_uses_strict_half_hour_boundaries(current: datetime, expected: datetime) -> None:
+    assert next_scheduled_run(current) == expected
 
 
 def test_worker_coalesces_overlapping_triggers(tmp_path: Path) -> None:
@@ -81,6 +94,20 @@ def test_worker_claims_and_completes_dashboard_run_requests(tmp_path: Path) -> N
         "status": "completed",
         "attempt_count": 1,
     }
+
+
+def test_worker_refreshes_persisted_next_scan_after_each_active_run(tmp_path: Path) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    database.set_state("schedule_status", "active", "2026-07-14T00:00:00Z")
+    database.set_state("next_scan_at", "2020-01-01T00:00:00Z", "2026-07-14T00:00:00Z")
+
+    Worker(database, collector=RecordingCollector()).run(trigger="manual")
+
+    next_scan = datetime.fromisoformat(database.get_state("next_scan_at").replace("Z", "+00:00"))
+    assert next_scan > datetime.now(UTC)
+    assert next_scan.minute in {0, 30}
+    assert next_scan.second == 0
 
 
 def test_launchagent_install_pause_resume_and_uninstall_are_atomic(tmp_path: Path) -> None:

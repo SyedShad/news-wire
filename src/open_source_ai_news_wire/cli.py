@@ -13,7 +13,7 @@ from .assistance import AssistanceService, CodexInvoker, run_isolation_canary
 from .demo import seed_demo_data
 from .installer import LocalInstaller
 from .operations import create_purge_plan, execute_purge_plan, export_diagnostics
-from .pilot import PilotManager
+from .pilot import PilotGateError, PilotManager
 from .runner import Worker
 from .scheduler import LaunchAgentManager
 from .server import DashboardServer
@@ -97,8 +97,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     pilot = subparsers.add_parser("pilot", help="Manage shadow and notification activation gates")
-    pilot.add_argument("action", choices=("start-shadow", "status", "activate-notifications", "stop-notifications"))
+    pilot.add_argument(
+        "action",
+        choices=(
+            "start-shadow", "status", "readiness", "notification-canary",
+            "extend-validation", "activate-notifications", "stop-notifications",
+        ),
+    )
     pilot.add_argument("--confirm-reviewed", action="store_true")
+    pilot.add_argument("--auto-activate", action="store_true")
     return parser
 
 
@@ -219,13 +226,22 @@ def main(argv: list[str] | None = None) -> int:
             set_source_enabled(database, arguments.source_id, arguments.action == "enable")
         rows = database.query(
             """
-            SELECT r.id, r.name, r.family, r.monitoring_role, r.adapter,
+            SELECT r.id, r.name, r.family, r.monitoring_role, r.adapter, r.definition_json,
                    s.enabled, s.health, s.failure_streak, s.last_checked_at, s.last_success_at,
                    s.last_error_class
             FROM source_registry r JOIN source_state s ON s.source_id = r.id
             ORDER BY r.family, r.name
             """
         )
+        for row in rows:
+            try:
+                definition = json.loads(str(row.pop("definition_json") or "{}"))
+            except json.JSONDecodeError:
+                definition = {}
+            row["validation_status"] = definition.get("validation_status", "unknown")
+            row["operational_status"] = (
+                row["health"] if row["enabled"] else row["validation_status"]
+            )
         print(json.dumps(rows, indent=2))
         return 0
 
@@ -317,16 +333,29 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.command == "pilot":
         database = _database(data_root)
         manager = PilotManager(database)
-        if arguments.action == "start-shadow":
-            status = manager.start_shadow()
-        elif arguments.action == "activate-notifications":
-            status = manager.activate_notifications(
-                human_review_confirmed=arguments.confirm_reviewed
-            )
-        elif arguments.action == "stop-notifications":
-            status = manager.stop_notifications()
-        else:
-            status = manager.status()
+        try:
+            if arguments.action == "start-shadow":
+                status = manager.start_shadow()
+            elif arguments.action == "readiness":
+                print(json.dumps(asdict(manager.readiness()), indent=2))
+                return 0
+            elif arguments.action == "notification-canary":
+                passed = manager.run_notification_canary()
+                print(json.dumps({"notification_canary": "passed" if passed else "failed"}, indent=2))
+                return 0 if passed else 1
+            elif arguments.action == "extend-validation":
+                status = manager.extend_validation(auto_activate=arguments.auto_activate)
+            elif arguments.action == "activate-notifications":
+                status = manager.activate_notifications(
+                    human_review_confirmed=arguments.confirm_reviewed
+                )
+            elif arguments.action == "stop-notifications":
+                status = manager.stop_notifications()
+            else:
+                status = manager.status()
+        except PilotGateError as error:
+            print(json.dumps({"status": "blocked", "reason": str(error)}, indent=2))
+            return 2
         print(json.dumps(asdict(status), indent=2))
         return 0
 

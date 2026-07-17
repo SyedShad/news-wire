@@ -22,7 +22,7 @@
         <div><span class="cell-label">Lag</span><strong>{{ source.lag_minutes }} min</strong></div>
         <div><span class="cell-label">Checked</span><strong>{{ source.last_checked_at|wire_time }}</strong></div>
         <div class="source-controls">
-          <span class="status-chip status-{{ source.health if source.enabled else 'disabled' }}">{{ source.health if source.enabled else 'disabled' }}</span>
+          <span class="status-chip status-{{ source.health if source.enabled else 'disabled' }}">{{ source.operational_status|replace('-',' ') }}</span>
           <form action="{{ url_for('toggle_source', source_id=source.id) }}" method="post">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button class="toggle {{ 'on' if source.enabled else '' }}" type="submit" aria-label="{{ 'Disable' if source.enabled else 'Enable' }} {{ source.name }}"><span></span></button>

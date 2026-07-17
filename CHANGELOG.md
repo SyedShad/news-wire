@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-17
+
+### Added
+
+- Dedicated dated parsers for Anthropic, Meta AI, CISA, and HuggingNews, plus a bounded Mastodon discovery parser with deterministic noise filtering.
+- Machine-readable pilot readiness, native-notification canary, an additional 72-hour validation epoch, fail-closed automatic activation, and a notification watermark that suppresses the historical inbox backlog.
+- Source-health status distinctions for live health, validated-unavailable access, and operator exclusion.
+
+### Fixed
+
+- DNS resolver failures now follow the whole-Mac offline path without advancing source failure streaks or creating per-source alert storms.
+- The dashboard calculates the next half-hour scan dynamically and the worker refreshes its persisted value after each active run.
+- Markdown, HTML, and dashboard draft sources safely support production-shaped structured source records and legacy strings.
+- Generic GitHub release headlines now include the repository identity.
+
+### Security
+
+- CISA remains disabled because the declared product client receives HTTP 403; the application does not disguise its user agent or bypass access controls.
+- SEC collection remains excluded by operator choice and makes no requests.
+
 ## [3.14.0] - 2026-07-12
 
 ### Added
