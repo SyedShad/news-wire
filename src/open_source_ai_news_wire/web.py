@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import html
 import json
 import re
 import secrets
@@ -273,6 +272,69 @@ def create_app(
             abort(404)
         return render_template("story.html", page="inbox", story=story)
 
+    @app.post("/stories/<story_id>/evidence/inspect")
+    def inspect_story_evidence(story_id: str) -> Response:
+        try:
+            _, status = service.queue_evidence_inspection(
+                story_id,
+                request.form.get("url", ""),
+                request.form.get("acquisition_method", "manual"),
+            )
+        except (ValueError, LookupError) as error:
+            flash(str(error), "error")
+        else:
+            flash(
+                "Evidence inspection queued." if status == "queued" else "That source is already confirmed.",
+                "success",
+            )
+        return redirect(url_for("story_detail", story_id=story_id), code=303)
+
+    @app.post("/stories/<story_id>/evidence/<int:evidence_id>/confirm")
+    def confirm_story_evidence(story_id: str, evidence_id: int) -> Response:
+        relationships: dict[int, str] = {}
+        for key, value in request.form.items():
+            if not key.startswith("claim_") or not value:
+                continue
+            try:
+                claim_id = int(key.removeprefix("claim_"))
+            except ValueError:
+                continue
+            relationships[claim_id] = value
+        try:
+            service.confirm_evidence(
+                story_id,
+                evidence_id,
+                request.form.get("role", ""),
+                relationships,
+                first_party=request.form.get("first_party") == "yes",
+                reason=request.form.get("reason", ""),
+            )
+        except (ValueError, LookupError) as error:
+            flash(str(error), "error")
+        else:
+            flash("Evidence confirmed and qualification gates recalculated.", "success")
+        return redirect(url_for("story_detail", story_id=story_id), code=303)
+
+    @app.post("/stories/<story_id>/evidence/<int:evidence_id>/exclude")
+    def exclude_story_evidence(story_id: str, evidence_id: int) -> Response:
+        try:
+            service.exclude_evidence(story_id, evidence_id, request.form.get("reason", ""))
+        except (ValueError, LookupError) as error:
+            flash(str(error), "error")
+        else:
+            flash("Evidence excluded; its audit history was preserved.", "success")
+        return redirect(url_for("story_detail", story_id=story_id), code=303)
+
+    @app.post("/stories/<story_id>/qualify")
+    def qualify_story(story_id: str) -> Response:
+        try:
+            service.qualify_story(story_id, request.form.get("reason", ""))
+        except (ValueError, LookupError) as error:
+            flash(str(error), "error")
+        else:
+            flash("Story qualified as a candidate. Draft approval is now available.", "success")
+        return redirect(url_for("story_detail", story_id=story_id), code=303)
+
     @app.post("/stories/<story_id>/review")
     def review_story(story_id: str) -> Response:
         action = request.form.get("action", "")
@@ -349,19 +411,11 @@ def create_app(
 
     @app.get("/drafts/<int:draft_id>/export.html")
     def export_draft_html(draft_id: int) -> Response:
-        draft = service.get_draft(draft_id)
-        if not draft:
+        try:
+            document = service.draft_html(draft_id)
+            draft = service.get_draft(draft_id)
+        except LookupError:
             abort(404)
-        body = "".join(f"<p>{html.escape(paragraph)}</p>" for paragraph in draft["body"].split("\n\n"))
-        lens = ""
-        if draft["lens"]:
-            lens = f"<h2>Open-Source Lens</h2><p>{html.escape(draft['lens'])}</p>"
-        sources = "".join(f"<li>{html.escape(source)}</li>" for source in draft["sources"])
-        document = f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>{html.escape(draft['headline'])}</title>
-<style>body{{font:17px/1.65 system-ui;max-width:760px;margin:7vh auto;padding:0 24px;color:#17201d}}h1{{font:700 42px/1.08 Georgia,serif}}.meta{{color:#61706a}}h2{{margin-top:2.4rem}}</style>
-</head><body><article><h1>{html.escape(draft['headline'])}</h1><p class="meta">{html.escape(draft['metadata'])}</p>{body}{lens}<h2>Sources</h2><ul>{sources}</ul></article></body></html>"""
         filename = _slug_filename(str(draft["headline"]))
         return Response(
             document,

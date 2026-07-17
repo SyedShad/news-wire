@@ -45,14 +45,25 @@ class NativeNotifier:
         if self.database.get_state("notifications_enabled", "false") != "true":
             return 0
         shadow = self.database.get_state("shadow_mode", "true") == "true"
-        condition = "AND a.kind IN ('health', 'recovery')" if shadow else ""
+        watermark = self.database.get_state("pilot_notification_watermark", "")
+        if not watermark:
+            return 0
+        condition = "AND a.kind IN ('health', 'recovery')" if shadow else """
+        AND (
+          (a.kind = 'candidate' AND a.severity IN ('high', 'urgent', 'critical')) OR
+          (a.kind = 'watch' AND a.severity IN ('watch', 'high', 'urgent', 'critical')) OR
+          a.kind = 'correction' OR
+          (a.kind IN ('health', 'recovery') AND a.severity IN ('high', 'urgent', 'critical'))
+        )
+        """
         rows = self.database.query(
             f"""
             SELECT a.* FROM alert a
             LEFT JOIN notification_delivery n ON n.alert_id = a.id
-            WHERE n.id IS NULL AND a.read_at IS NULL {condition}
+            WHERE n.id IS NULL AND a.read_at IS NULL AND a.created_at >= ? {condition}
             ORDER BY a.created_at, a.id
-            """
+            """,
+            (watermark,),
         )
         if not rows:
             return 0
@@ -84,6 +95,29 @@ class NativeNotifier:
             self._record([row], f"news-wire-alert-{row['id']}", success, error_class)
             delivered += int(success)
         return delivered
+
+    def send_canary(self) -> bool:
+        now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        success, error_class = self._notify(
+            "Open Source AI News Wire",
+            "Notification canary passed. Content notifications remain disabled during validation.",
+            group="news-wire-canary",
+        )
+        self.database.set_state("notification_canary_status", "passed" if success else "failed", now)
+        self.database.set_state("notification_canary_at", now, now)
+        self.database.execute(
+            """
+            INSERT INTO diagnostic_event(level, event_type, message, created_at, detail_json)
+            VALUES(?, 'notification_canary', ?, ?, ?)
+            """,
+            (
+                "info" if success else "warning",
+                "Native notification canary passed." if success else "Native notification canary failed.",
+                now,
+                Database.json({"error_class": error_class}),
+            ),
+        )
+        return success
 
     def _notify(
         self,

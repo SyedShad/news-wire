@@ -21,6 +21,19 @@ class SchedulerError(RuntimeError):
     """Raised when launchd cannot apply the requested lifecycle action."""
 
 
+def next_scheduled_run(now: datetime | None = None) -> datetime:
+    """Return the next half-hour LaunchAgent boundary in UTC."""
+    current = (now or datetime.now(UTC)).astimezone(UTC)
+    boundary = current.replace(
+        minute=30 if current.minute < 30 else 0,
+        second=0,
+        microsecond=0,
+    )
+    if current.minute >= 30:
+        boundary += timedelta(hours=1)
+    return boundary
+
+
 @dataclass(frozen=True, slots=True)
 class SchedulerStatus:
     installed: bool
@@ -126,9 +139,7 @@ class LaunchAgentManager:
         installed = self.plist_path.exists()
         self.database.set_state("schedule_installed", "true" if installed else "false", now.isoformat().replace("+00:00", "Z"))
         self.database.set_state("schedule_status", state, now.isoformat().replace("+00:00", "Z"))
-        next_run = now.replace(minute=30 if now.minute < 30 else 0, second=0)
-        if now.minute >= 30:
-            next_run += timedelta(hours=1)
+        next_run = next_scheduled_run(now)
         self.database.set_state(
             "next_scan_at",
             next_run.isoformat().replace("+00:00", "Z") if state == "active" else "Not scheduled",

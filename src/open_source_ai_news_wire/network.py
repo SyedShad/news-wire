@@ -19,6 +19,10 @@ class ResponseTooLarge(RuntimeError):
     """Raised when a source exceeds its bounded response allowance."""
 
 
+class NetworkUnavailable(ConnectionError):
+    """Raised when the host network cannot currently resolve a public source."""
+
+
 Resolver = Callable[[str], Iterable[str]]
 
 
@@ -33,8 +37,11 @@ class FetchResult:
 
 def system_resolver(host: str) -> list[str]:
     addresses: set[str] = set()
-    for entry in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM):
-        addresses.add(str(entry[4][0]))
+    try:
+        for entry in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM):
+            addresses.add(str(entry[4][0]))
+    except OSError as error:
+        raise NetworkUnavailable("The source host could not be resolved") from error
     return sorted(addresses)
 
 
@@ -67,6 +74,7 @@ class SafeHttpClient:
         self.allowed_hosts = {host.lower().rstrip(".") for host in allowed_hosts}
         self.allow_http_hosts = {host.lower().rstrip(".") for host in allow_http_hosts}
         self.resolver = resolver
+        self._resolved_addresses: dict[str, tuple[str, ...]] = {}
         self.maximum_bytes = maximum_bytes
         self.maximum_redirects = maximum_redirects
         timeout = httpx.Timeout(connect=connect_timeout, read=read_timeout, write=read_timeout, pool=connect_timeout)
@@ -98,9 +106,13 @@ class SafeHttpClient:
             raise UnsafeRequest("Plain HTTP requires an explicit source exception")
         if not host or host not in self.allowed_hosts:
             raise UnsafeRequest("Host is not registered for this source")
-        addresses = list(self.resolver(host))
+        addresses = tuple(sorted(set(self.resolver(host))))
         if not addresses or any(not _public_address(address) for address in addresses):
             raise UnsafeRequest("Source host did not resolve exclusively to public addresses")
+        previous = self._resolved_addresses.get(host)
+        if previous is not None and previous != addresses:
+            raise UnsafeRequest("Source DNS resolution changed during one request")
+        self._resolved_addresses[host] = addresses
         return url
 
     def fetch(
@@ -117,6 +129,8 @@ class SafeHttpClient:
         if last_modified:
             headers["If-Modified-Since"] = last_modified
         for redirect_count in range(self.maximum_redirects + 1):
+            # Revalidate immediately before every connection and redirect hop.
+            current = self._validated(current)
             with self.client.stream("GET", current, headers=headers) as response:
                 if response.status_code in {301, 302, 303, 307, 308}:
                     if redirect_count >= self.maximum_redirects:

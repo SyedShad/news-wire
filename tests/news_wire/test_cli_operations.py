@@ -10,7 +10,7 @@ import pytest
 from open_source_ai_news_wire import cli
 from open_source_ai_news_wire.collector import ScanSummary
 from open_source_ai_news_wire.installer import InstalledRelease
-from open_source_ai_news_wire.pilot import PilotStatus
+from open_source_ai_news_wire.pilot import PilotReadiness, PilotStatus
 from open_source_ai_news_wire.runner import WorkerResult
 from open_source_ai_news_wire.scheduler import SchedulerStatus
 
@@ -29,7 +29,7 @@ class FakeWorker:
 def test_cli_migrate_scan_and_catch_up(monkeypatch, tmp_path: Path, capsys) -> None:
     root = tmp_path / "runtime"
     assert cli.main(["--data-root", str(root), "migrate"]) == 0
-    assert "version 2" in capsys.readouterr().out
+    assert "version 3" in capsys.readouterr().out
 
     FakeWorker.calls.clear()
     monkeypatch.setattr(cli, "Worker", FakeWorker)
@@ -198,6 +198,16 @@ def test_cli_assistance_and_pilot(monkeypatch, tmp_path: Path, capsys) -> None:
             assert human_review_confirmed is True
             return self._status("notifications")
 
+        def readiness(self):
+            return PilotReadiness(False, "2026-07-14T00:00:00Z", None, 0, False, {"validation_started": False}, ("not started",))
+
+        def run_notification_canary(self):
+            return True
+
+        def extend_validation(self, *, auto_activate):
+            assert auto_activate is True
+            return self._status("extended_shadow")
+
         def stop_notifications(self):
             return self._status("paused")
 
@@ -207,7 +217,12 @@ def test_cli_assistance_and_pilot(monkeypatch, tmp_path: Path, capsys) -> None:
     monkeypatch.setattr(cli, "PilotManager", FakePilot)
     for action, extra in (
         ("start-shadow", []), ("status", []),
+        ("extend-validation", ["--auto-activate"]),
         ("activate-notifications", ["--confirm-reviewed"]), ("stop-notifications", []),
     ):
         assert cli.main(["--data-root", str(root), "pilot", action, *extra]) == 0
         assert json.loads(capsys.readouterr().out)["state"]
+    assert cli.main(["--data-root", str(root), "pilot", "readiness"]) == 0
+    assert json.loads(capsys.readouterr().out)["ready"] is False
+    assert cli.main(["--data-root", str(root), "pilot", "notification-canary"]) == 0
+    assert json.loads(capsys.readouterr().out)["notification_canary"] == "passed"

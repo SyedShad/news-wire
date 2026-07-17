@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +15,12 @@ from open_source_ai_news_wire.adapters import (
     canonical_url,
     parse_feed,
     parse_html_listing,
+    parse_anthropic_newsroom,
+    parse_cisa_advisories,
+    parse_huggingnews,
     parse_json,
+    parse_mastodon_signal,
+    parse_meta_ai_blog,
     parse_public_time,
     parse_source,
     parse_sitemap,
@@ -144,6 +150,92 @@ def test_adapter_variants_and_malformed_payloads() -> None:
         parse_source("unknown", b"", source_url="https://example.com", observed_at=observed)
     with pytest.raises(AdapterError, match="UTF-8"):
         parse_html_listing(b"\xff", source_url="https://example.com", observed_at=observed)
+
+
+def test_dedicated_source_fixtures_preserve_dates_roles_and_discovery_metadata() -> None:
+    fixtures = Path(__file__).parent / "fixtures"
+    observed = "2026-07-17T10:00:00Z"
+    anthropic = parse_anthropic_newsroom(
+        (fixtures / "anthropic_newsroom.html").read_bytes(),
+        source_url="https://www.anthropic.com/news",
+        observed_at=observed,
+    )
+    meta = parse_meta_ai_blog(
+        (fixtures / "meta_ai_blog.html").read_bytes(),
+        source_url="https://ai.meta.com/blog/",
+        observed_at=observed,
+    )
+    cisa = parse_cisa_advisories(
+        (fixtures / "cisa_advisories.html").read_bytes(),
+        source_url="https://www.cisa.gov/news-events/cybersecurity-advisories",
+        observed_at=observed,
+    )
+    hugging = parse_huggingnews(
+        (fixtures / "huggingnews.html").read_bytes(),
+        source_url="https://huggingnews.com/",
+        observed_at=observed,
+    )
+    mastodon = parse_mastodon_signal(
+        (fixtures / "mastodon_signal.xml").read_bytes(),
+        source_url="https://mastodon.social/tags/artificialintelligence.rss",
+        observed_at=observed,
+    )
+
+    assert [(item.title, item.published_at) for item in anthropic] == [
+        ("Introducing Claude Example", "2026-07-17T00:00:00Z")
+    ]
+    assert meta[0].published_at == "2026-07-16T00:00:00Z"
+    assert cisa[0].published_at == "2026-07-15T12:00:00Z"
+    assert "Popularity is not evidence" in hugging[0].summary
+    assert hugging[0].published_at == "2026-07-17T00:00:00Z"
+    assert [item.external_id for item in mastodon] == ["https://social.example/@lab/1"]
+
+
+def test_dedicated_parsers_reject_malformed_or_non_utf8_payloads() -> None:
+    observed = "2026-07-17T10:00:00Z"
+    for parser, url in (
+        (parse_anthropic_newsroom, "https://www.anthropic.com/news"),
+        (parse_meta_ai_blog, "https://ai.meta.com/blog/"),
+        (parse_cisa_advisories, "https://www.cisa.gov/news-events/cybersecurity-advisories"),
+        (parse_huggingnews, "https://huggingnews.com/"),
+    ):
+        with pytest.raises(AdapterError):
+            parser(b"\xff", source_url=url, observed_at=observed)
+    with pytest.raises(AdapterError, match="Malformed Mastodon"):
+        parse_mastodon_signal(b"<", source_url="https://mastodon.social/tags/artificialintelligence.rss", observed_at=observed)
+
+
+def test_github_release_headline_is_grounded_in_repository_identity() -> None:
+    item = Observation("1", "Patch release: v5.14.1", "https://github.com/huggingface/transformers/releases/tag/v5.14.1", "2026-07-17T00:00:00Z")
+    rows = Collector._contextualize_release_titles(
+        {"url": "https://github.com/huggingface/transformers/releases.atom", "name": "Transformers Releases"},
+        [item],
+    )
+    assert rows[0].title == "Transformers v5.14.1 released"
+
+
+def test_completion_registry_enables_validated_non_sec_sources_and_excludes_sec() -> None:
+    payload = json.loads(
+        (Path(__file__).parents[2] / "src/open_source_ai_news_wire/definitions/sources.json").read_text(encoding="utf-8")
+    )
+    definitions = {item["id"]: item for item in payload["sources"]}
+    expected = {
+        "anthropic-newsroom": "anthropic_newsroom",
+        "meta-ai-blog": "meta_ai_blog",
+        "cisa-ai-security": "cisa_advisories",
+        "hugging-news": "huggingnews",
+        "mastodon-ai-signal": "mastodon_signal",
+    }
+    for source_id, adapter in expected.items():
+        assert definitions[source_id]["adapter"] == adapter
+        if source_id == "cisa-ai-security":
+            assert definitions[source_id]["enabled_by_default"] is False
+            assert definitions[source_id]["validation_status"] == "validated-unavailable"
+        else:
+            assert definitions[source_id]["enabled_by_default"] is True
+            assert definitions[source_id]["validation_status"] == "live-validated"
+    assert definitions["sec-ai-company-filings"]["enabled_by_default"] is False
+    assert definitions["sec-ai-company-filings"]["validation_status"] == "excluded-by-operator"
 
 
 def test_qualification_has_neutral_broader_lane_and_bounded_open_source_lens() -> None:
@@ -336,6 +428,58 @@ def test_whole_mac_offline_does_not_advance_source_failure_streak(tmp_path: Path
 
     assert result.offline is True
     assert database.one("SELECT failure_streak FROM source_state WHERE source_id = 'openai-news'") == {"failure_streak": 0}
+
+
+def test_dns_failure_is_grouped_once_and_recovery_is_grouped(tmp_path: Path, monkeypatch) -> None:
+    database = _database_with_one_source(tmp_path)
+
+    def unavailable(*_args, **_kwargs):
+        raise socket.gaierror(socket.EAI_NONAME, "name unavailable")
+
+    monkeypatch.setattr(socket, "getaddrinfo", unavailable)
+    first = Collector(database, now=lambda: "2026-07-14T10:00:00Z").scan(trigger="scheduled")
+    second = Collector(database, now=lambda: "2026-07-14T10:01:00Z").scan(trigger="scheduled")
+
+    assert first.offline is True and second.offline is True
+    assert database.one("SELECT COUNT(*) AS count FROM diagnostic_event WHERE event_type='offline'") == {"count": 1}
+    assert database.one("SELECT COUNT(*) AS count FROM alert WHERE title='News Wire is offline'") == {"count": 1}
+    assert database.one("SELECT failure_streak FROM source_state WHERE source_id='openai-news'") == {"failure_streak": 0}
+
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *_args, **_kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))])
+    transport = httpx.MockTransport(lambda request: httpx.Response(304, request=request))
+    factory = lambda source: SafeHttpClient(
+        allowed_hosts=set(json.loads(str(source["base_hosts_json"]))),
+        resolver=PUBLIC_IP,
+        transport=transport,
+    )
+    recovered = Collector(database, client_factory=factory, now=lambda: "2026-07-14T10:31:00Z").scan()
+    assert recovered.result == "success"
+    assert database.get_state("network_offline_active") == "false"
+    assert database.one("SELECT COUNT(*) AS count FROM alert WHERE title='News Wire is back online'") == {"count": 1}
+
+
+def test_mixed_network_and_parser_failures_remain_source_specific(tmp_path: Path) -> None:
+    database = _database_with_one_source(tmp_path)
+    set_source_enabled(database, "deepmind-blog", True)
+
+    def factory(source: dict[str, object]) -> SafeHttpClient:
+        if source["id"] == "openai-news":
+            def handler(request: httpx.Request) -> httpx.Response:
+                raise httpx.ConnectError("network", request=request)
+        else:
+            def handler(request: httpx.Request) -> httpx.Response:
+                return httpx.Response(200, content=b"not xml", headers={"content-type": "application/xml"}, request=request)
+        return SafeHttpClient(
+            allowed_hosts=set(json.loads(str(source["base_hosts_json"]))),
+            resolver=PUBLIC_IP,
+            transport=httpx.MockTransport(handler),
+        )
+
+    result = Collector(database, client_factory=factory, now=lambda: "2026-07-14T10:00:00Z").scan()
+
+    assert result.offline is False
+    assert result.source_failure_count == 2
+    assert database.one("SELECT failure_streak FROM source_state WHERE source_id='openai-news'") == {"failure_streak": 1}
 
 
 def test_parser_failure_degrades_only_its_source(tmp_path: Path) -> None:

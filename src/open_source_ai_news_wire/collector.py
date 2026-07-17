@@ -9,12 +9,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
 from .adapters import AdapterError, Observation, parse_source
-from .network import FetchResult, ResponseTooLarge, SafeHttpClient, UnsafeRequest
+from .network import FetchResult, NetworkUnavailable, ResponseTooLarge, SafeHttpClient, UnsafeRequest
 from .qualification import Qualification, qualify
+from .evidence import publisher_key
 from .settings import load_settings
 from .source_registry import synchronize_sources
 from .storage import Database
@@ -146,6 +148,7 @@ class Collector:
                     source_url=fetched.url,
                     observed_at=self.now(),
                 )
+                observations = self._contextualize_release_titles(source, observations)
                 observations = self._definition_filtered_observations(source, observations)
                 observations = self._incremental_observations(
                     source, observations, interval_start, interval_end
@@ -155,7 +158,7 @@ class Collector:
                 )
                 successes += 1
                 discovered += new_count
-            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as error:
+            except (NetworkUnavailable, httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as error:
                 network_failures.append((source, transaction_id, error))
             except Exception as error:
                 self._record_failure(source, transaction_id, error)
@@ -191,12 +194,75 @@ class Collector:
         if offline:
             self.database.execute(
                 """
-                INSERT INTO diagnostic_event(level, event_type, message, created_at, detail_json)
-                VALUES('warning', 'offline', 'The Mac appeared offline; source failure streaks were not advanced.', ?, ?)
+                INSERT INTO app_state(key, value, updated_at) VALUES('network_offline_active', 'true', ?)
+                ON CONFLICT(key) DO UPDATE SET value='true', updated_at=excluded.updated_at
                 """,
-                (finished, Database.json({"source_count": len(network_failures)})),
+                (finished,),
             )
+            if self.database.get_state("network_offline_alerted", "false") != "true":
+                with self.database.transaction() as connection:
+                    connection.execute(
+                        """
+                        INSERT INTO diagnostic_event(level, event_type, message, created_at, detail_json)
+                        VALUES('warning', 'offline', 'The Mac appeared offline; source failure streaks were not advanced.', ?, ?)
+                        """,
+                        (finished, Database.json({"source_count": len(network_failures)})),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO alert(kind, severity, title, body, created_at)
+                        VALUES('health', 'high', 'News Wire is offline', 'Collection paused without advancing source failure streaks.', ?)
+                        """,
+                        (finished,),
+                    )
+                self.database.set_state("network_offline_alerted", "true", finished)
+        elif successes and self.database.get_state("network_offline_active", "false") == "true":
+            with self.database.transaction() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO diagnostic_event(level, event_type, message, created_at, detail_json)
+                    VALUES('info', 'network_recovery', 'Network collection recovered after an offline interval.', ?, '{}')
+                    """,
+                    (finished,),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO alert(kind, severity, title, body, created_at)
+                    VALUES('recovery', 'high', 'News Wire is back online', 'Collection resumed and source health will recover through normal scans.', ?)
+                    """,
+                    (finished,),
+                )
+            self.database.set_state("network_offline_active", "false", finished)
+            self.database.set_state("network_offline_alerted", "false", finished)
         return ScanSummary(scan_id, result, successes, failures, discovered, offline)
+
+    @staticmethod
+    def _contextualize_release_titles(
+        source: dict[str, Any], observations: list[Observation]
+    ) -> list[Observation]:
+        path = urlsplit(str(source.get("url") or "")).path.rstrip("/")
+        if "github.com" not in str(source.get("url") or "") or not path.endswith("releases.atom"):
+            return observations
+        segments = path.split("/")
+        project = segments[-2].replace("-", " ").strip().title() if len(segments) >= 2 else str(source.get("name") or "Project")
+        contextualized: list[Observation] = []
+        for item in observations:
+            title = item.title
+            version = re.search(r"\bv?\d+(?:\.\d+){1,3}(?:[-.][a-z0-9]+)?\b", title, re.IGNORECASE)
+            generic = bool(re.match(r"^(?:patch\s+)?release\s*:|^v?\d+(?:\.\d+)+\b", title, re.IGNORECASE))
+            if generic and version:
+                title = f"{project} {version.group(0)} released"
+            contextualized.append(
+                Observation(
+                    item.external_id,
+                    title,
+                    item.url,
+                    item.published_at,
+                    item.summary,
+                    item.language,
+                )
+            )
+        return contextualized
 
     @staticmethod
     def _definition_filtered_observations(
@@ -564,16 +630,31 @@ class Collector:
             "SELECT MIN(published_at) AS value FROM source_item WHERE story_id = ?",
             (story_id,),
         ).fetchone()["value"]
-        evidence = connection.execute(
+        legacy_evidence = connection.execute(
+            "SELECT source_role, canonical_url, url FROM source_item WHERE story_id = ?",
+            (story_id,),
+        ).fetchall()
+        manual_evidence = connection.execute(
             """
-            SELECT
-              SUM(CASE WHEN source_role = 'Event' THEN 1 ELSE 0 END) AS event_count,
-              COUNT(DISTINCT CASE WHEN source_role = 'Reporting' THEN source_registry_id END) AS reporting_count
-            FROM source_item WHERE story_id = ?
+            SELECT confirmed_role, publisher_key FROM evidence_source
+            WHERE story_id = ? AND status = 'confirmed'
             """,
             (story_id,),
-        ).fetchone()
-        evidence_gate = int(evidence["event_count"] or 0) >= 1 or int(evidence["reporting_count"] or 0) >= 2
+        ).fetchall()
+        event_count = sum(row["source_role"] == "Event" for row in legacy_evidence) + sum(
+            row["confirmed_role"] == "Event" for row in manual_evidence
+        )
+        reporting_publishers = {
+            publisher_key(str(row["canonical_url"] or row["url"]))
+            for row in legacy_evidence
+            if row["source_role"] == "Reporting"
+        }
+        reporting_publishers.update(
+            str(row["publisher_key"])
+            for row in manual_evidence
+            if row["confirmed_role"] == "Reporting"
+        )
+        evidence_gate = event_count >= 1 or len(reporting_publishers) >= 2
         current = connection.execute("SELECT status, priority_score FROM story_cluster WHERE id = ?", (story_id,)).fetchone()
         new_status = current["status"]
         if evidence_gate and qualification.importance_gate and new_status in {"signal", "watch"}:

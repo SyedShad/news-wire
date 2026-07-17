@@ -15,7 +15,7 @@ from typing import Any
 from .config import RuntimePaths, ensure_runtime_layout
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class MigrationRequired(RuntimeError):
@@ -380,6 +380,51 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "CREATE INDEX idx_source_transaction_source ON source_transaction(source_id, started_at DESC)",
         "CREATE INDEX idx_watch_due ON watch_notice(status, next_check_at)",
     ),
+    3: (
+        "ALTER TABLE candidate ADD COLUMN importance_override INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE candidate ADD COLUMN importance_override_reason TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE candidate ADD COLUMN importance_overridden_at TEXT",
+        "ALTER TABLE candidate ADD COLUMN importance_override_action_id INTEGER REFERENCES review_action(id)",
+        """
+        CREATE TABLE evidence_source (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            story_id TEXT NOT NULL REFERENCES story_cluster(id) ON DELETE CASCADE,
+            requested_url TEXT NOT NULL,
+            final_url TEXT,
+            canonical_url TEXT NOT NULL,
+            publisher_key TEXT NOT NULL,
+            acquisition_method TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            passage TEXT NOT NULL DEFAULT '',
+            published_at TEXT,
+            language TEXT NOT NULL DEFAULT 'und',
+            proposed_role TEXT,
+            confirmed_role TEXT,
+            first_party_confirmed INTEGER NOT NULL DEFAULT 0,
+            confirmation_reason TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            content_digest TEXT,
+            content_type TEXT,
+            fetched_at TEXT,
+            confirmed_at TEXT,
+            excluded_at TEXT,
+            error_class TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(story_id, canonical_url)
+        )
+        """,
+        """
+        CREATE TABLE evidence_source_claim (
+            evidence_source_id INTEGER NOT NULL REFERENCES evidence_source(id) ON DELETE CASCADE,
+            claim_id INTEGER NOT NULL REFERENCES claim(id) ON DELETE CASCADE,
+            relationship TEXT NOT NULL,
+            PRIMARY KEY(evidence_source_id, claim_id)
+        )
+        """,
+        "CREATE INDEX idx_evidence_source_story ON evidence_source(story_id, status)",
+        "CREATE INDEX idx_evidence_source_publisher ON evidence_source(publisher_key, confirmed_role, status)",
+    ),
 }
 
 
@@ -485,6 +530,29 @@ class Database:
                                     "cancelled_work_items": cancelled,
                                     "cancelled_scan_records": cancelled_scans,
                                 }),
+                            ),
+                        )
+                if version == 2:
+                    now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                    cancelled = connection.execute(
+                        """
+                        UPDATE work_item
+                        SET status = 'cancelled', updated_at = ?,
+                            last_error_class = 'superseded_legacy_research'
+                        WHERE kind = 'research' AND status IN ('pending', 'queued')
+                        """,
+                        (now,),
+                    ).rowcount
+                    if cancelled:
+                        connection.execute(
+                            """
+                            INSERT INTO diagnostic_event(level, event_type, message, created_at, detail_json)
+                            VALUES('info', 'migration', ?, ?, ?)
+                            """,
+                            (
+                                "Cancelled legacy research requests superseded by evidence enrichment.",
+                                now,
+                                self.json({"cancelled_work_items": cancelled}),
                             ),
                         )
                 connection.execute(

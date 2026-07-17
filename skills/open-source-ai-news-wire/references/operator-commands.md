@@ -48,11 +48,14 @@ open-source-ai-news-wire assistance disable
 open-source-ai-news-wire assistance run-pending
 open-source-ai-news-wire pilot start-shadow
 open-source-ai-news-wire pilot status
+open-source-ai-news-wire pilot notification-canary
+open-source-ai-news-wire pilot extend-validation --auto-activate
+open-source-ai-news-wire pilot readiness
 open-source-ai-news-wire pilot activate-notifications --confirm-reviewed
 open-source-ai-news-wire pilot stop-notifications
 ```
 
-Do not activate notifications before the 72-hour shadow window and human review both pass.
+The completion pilot uses the additional 72-hour validation and fail-closed automatic activation. The manual activation command is retained for compatibility. Drafting remains human-approved in both modes.
 
 ## Data deletion
 

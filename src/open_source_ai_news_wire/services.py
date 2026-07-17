@@ -3,12 +3,25 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import html
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from . import __version__
 from .storage import Database, database_size
 from .source_registry import set_source_enabled
+from .scheduler import next_scheduled_run
+from .evidence import (
+    ALLOWED_RELATIONSHIPS,
+    ALLOWED_ROLES,
+    normalize_public_https_url,
+    publisher_key,
+    qualification_state,
+    recalculate_claim_statuses,
+    recalculate_story_qualification,
+)
 
 
 def utc_now() -> str:
@@ -179,7 +192,292 @@ class DashboardService:
             "SELECT * FROM draft WHERE story_id = ? ORDER BY version DESC",
             (story_id,),
         )
+        story["evidence_sources"] = self.database.query(
+            "SELECT * FROM evidence_source WHERE story_id = ? ORDER BY created_at, id",
+            (story_id,),
+        )
+        for evidence in story["evidence_sources"]:
+            evidence["claim_links"] = self.database.query(
+                """
+                SELECT esc.claim_id, esc.relationship, c.text
+                FROM evidence_source_claim esc JOIN claim c ON c.id = esc.claim_id
+                WHERE esc.evidence_source_id = ? ORDER BY esc.claim_id
+                """,
+                (evidence["id"],),
+            )
+        manual_links = self.database.query(
+            """
+            SELECT esc.claim_id, esc.relationship, es.title, es.final_url
+            FROM evidence_source_claim esc JOIN evidence_source es ON es.id = esc.evidence_source_id
+            WHERE es.story_id = ? AND es.status = 'confirmed'
+            ORDER BY es.id
+            """,
+            (story_id,),
+        )
+        claims_by_id = {int(claim["id"]): claim for claim in story["claims"]}
+        for link in manual_links:
+            claim = claims_by_id.get(int(link["claim_id"]))
+            if not claim:
+                continue
+            source_name = str(link["title"] or link["final_url"] or "Confirmed evidence")
+            claim["evidence_sources"] = " · ".join(
+                part for part in (claim.get("evidence_sources"), source_name) if part
+            )
+            claim["evidence_relationships"] = " · ".join(
+                part for part in (claim.get("evidence_relationships"), link["relationship"]) if part
+            )
+        story["candidate"] = self.database.one(
+            "SELECT * FROM candidate WHERE story_id = ?", (story_id,)
+        ) or {}
+        story["qualification"] = qualification_state(self.database, story_id)
+        story["qualification"]["lock_reasons"] = self._qualification_lock_reasons(story)
         return story
+
+    @staticmethod
+    def _qualification_lock_reasons(story: dict[str, Any]) -> list[str]:
+        state = story["qualification"]
+        reasons: list[str] = []
+        if not state["evidence_gate"]:
+            reasons.append("Confirm one Event source or two independent Reporting sources.")
+        if not state["effective_importance"]:
+            reasons.append("Automated importance did not pass; a recorded human reason is required.")
+        if story["status"] not in {"candidate", "draft_ready", "approved"}:
+            reasons.append("Qualify this story as a candidate before approving a draft.")
+        if story.get("opportunity_strength") not in {"Strong", "Moderate"}:
+            reasons.append("The open-source lens requires a Strong or Moderate opportunity.")
+        return reasons
+
+    def _draft_sources(self, story_id: str) -> list[dict[str, Any]]:
+        sources = self.database.query(
+            """
+            SELECT 'registry:' || id AS evidence_key, source_role, title, url,
+                   published_at, language, verification_status, passage
+            FROM source_item WHERE story_id = ?
+            """,
+            (story_id,),
+        )
+        sources.extend(
+            self.database.query(
+                """
+                SELECT 'enriched:' || id AS evidence_key, confirmed_role AS source_role,
+                       title, final_url AS url, published_at, language,
+                       CASE confirmed_role WHEN 'Event' THEN 'supports'
+                           WHEN 'Reporting' THEN 'supports' ELSE 'trace' END AS verification_status,
+                       passage
+                FROM evidence_source
+                WHERE story_id = ? AND status = 'confirmed'
+                """,
+                (story_id,),
+            )
+        )
+        return sources
+
+    def queue_evidence_inspection(
+        self, story_id: str, url: str, acquisition_method: str
+    ) -> tuple[int, str]:
+        story = self.database.one("SELECT id FROM story_cluster WHERE id = ?", (story_id,))
+        if not story:
+            raise LookupError("Story not found")
+        if acquisition_method not in {"linked", "manual"}:
+            raise ValueError("Unsupported evidence acquisition method")
+        normalized = normalize_public_https_url(url)
+        if acquisition_method == "linked":
+            linked = self.database.one(
+                """
+                SELECT 1 FROM source_item
+                WHERE story_id = ? AND source_role = 'Discovery'
+                  AND COALESCE(canonical_url, url) = ?
+                """,
+                (story_id, normalized),
+            )
+            if not linked:
+                raise ValueError("Linked inspection must use a stored Discovery URL")
+        now = utc_now()
+        key = "evidence:" + story_id + ":" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        with self.database.transaction() as connection:
+            existing = connection.execute(
+                "SELECT * FROM evidence_source WHERE story_id = ? AND canonical_url = ?",
+                (story_id, normalized),
+            ).fetchone()
+            if existing and existing["status"] == "confirmed":
+                return int(existing["id"]), "confirmed"
+            if existing:
+                evidence_id = int(existing["id"])
+                connection.execute(
+                    """
+                    UPDATE evidence_source SET requested_url = ?, acquisition_method = ?,
+                        status = 'queued', error_class = NULL, excluded_at = NULL, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (normalized, acquisition_method, now, evidence_id),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO evidence_source(
+                        story_id, requested_url, canonical_url, publisher_key,
+                        acquisition_method, status, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, 'queued', ?, ?)
+                    """,
+                    (story_id, normalized, normalized, publisher_key(normalized), acquisition_method, now, now),
+                )
+                evidence_id = int(cursor.lastrowid)
+            payload = Database.json({"schema_version": 1, "evidence_source_id": evidence_id})
+            connection.execute(
+                """
+                INSERT INTO work_item(
+                    kind, story_id, status, priority, payload_json, created_at,
+                    updated_at, idempotency_key, available_at
+                ) VALUES('evidence_enrichment', ?, 'queued', 95, ?, ?, ?, ?, ?)
+                ON CONFLICT(idempotency_key) WHERE idempotency_key IS NOT NULL DO UPDATE SET
+                    status = 'queued', payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at, available_at = excluded.available_at,
+                    last_error_class = NULL
+                """,
+                (story_id, payload, now, now, key, now),
+            )
+            connection.execute(
+                """
+                INSERT INTO review_action(story_id, action, reason, created_at, approval_snapshot_json)
+                VALUES(?, 'inspect_evidence', ?, ?, ?)
+                """,
+                (story_id, normalized, now, Database.json({"evidence_source_id": evidence_id, "method": acquisition_method})),
+            )
+        if self.run_callback:
+            self.run_callback()
+        return evidence_id, "queued"
+
+    def confirm_evidence(
+        self,
+        story_id: str,
+        evidence_id: int,
+        role: str,
+        relationships: dict[int, str],
+        *,
+        first_party: bool = False,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        if role not in ALLOWED_ROLES:
+            raise ValueError("Choose Event, Reporting, or Discovery")
+        evidence = self.database.one(
+            "SELECT * FROM evidence_source WHERE id = ? AND story_id = ?",
+            (evidence_id, story_id),
+        )
+        if not evidence:
+            raise LookupError("Evidence source not found")
+        if evidence["status"] not in {"fetched", "confirmed"}:
+            raise ValueError("Evidence must be fetched successfully before confirmation")
+        if role == "Event" and not first_party:
+            raise ValueError("Event evidence requires first-party confirmation")
+        if role in {"Event", "Reporting"} and not relationships:
+            raise ValueError("Map at least one claim before confirming qualifying evidence")
+        if any(value not in ALLOWED_RELATIONSHIPS for value in relationships.values()):
+            raise ValueError("Unsupported claim relationship")
+        claim_ids = set(relationships)
+        if claim_ids:
+            placeholders = ",".join("?" for _ in claim_ids)
+            rows = self.database.query(
+                f"SELECT id FROM claim WHERE story_id = ? AND id IN ({placeholders})",
+                (story_id, *sorted(claim_ids)),
+            )
+            if {int(row["id"]) for row in rows} != claim_ids:
+                raise ValueError("Claim mapping crossed the story boundary")
+        now = utc_now()
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE evidence_source SET confirmed_role = ?, first_party_confirmed = ?,
+                    confirmation_reason = ?, status = 'confirmed', confirmed_at = ?,
+                    excluded_at = NULL, updated_at = ? WHERE id = ?
+                """,
+                (role, int(first_party), reason.strip(), now, now, evidence_id),
+            )
+            connection.execute(
+                "DELETE FROM evidence_source_claim WHERE evidence_source_id = ?",
+                (evidence_id,),
+            )
+            connection.executemany(
+                """
+                INSERT INTO evidence_source_claim(evidence_source_id, claim_id, relationship)
+                VALUES(?, ?, ?)
+                """,
+                [(evidence_id, claim_id, relationship) for claim_id, relationship in relationships.items()],
+            )
+            connection.execute(
+                """
+                INSERT INTO review_action(story_id, action, reason, created_at, approval_snapshot_json)
+                VALUES(?, 'confirm_evidence', ?, ?, ?)
+                """,
+                (
+                    story_id, reason.strip(), now,
+                    Database.json({
+                        "evidence_source_id": evidence_id, "role": role,
+                        "first_party": bool(first_party), "relationships": relationships,
+                    }),
+                ),
+            )
+        recalculate_claim_statuses(self.database, story_id)
+        return recalculate_story_qualification(self.database, story_id)
+
+    def exclude_evidence(self, story_id: str, evidence_id: int, reason: str = "") -> dict[str, Any]:
+        evidence = self.database.one(
+            "SELECT id FROM evidence_source WHERE id = ? AND story_id = ?",
+            (evidence_id, story_id),
+        )
+        if not evidence:
+            raise LookupError("Evidence source not found")
+        now = utc_now()
+        with self.database.transaction() as connection:
+            connection.execute(
+                "UPDATE evidence_source SET status = 'excluded', excluded_at = ?, updated_at = ? WHERE id = ?",
+                (now, now, evidence_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO review_action(story_id, action, reason, created_at, approval_snapshot_json)
+                VALUES(?, 'exclude_evidence', ?, ?, ?)
+                """,
+                (story_id, reason.strip(), now, Database.json({"evidence_source_id": evidence_id})),
+            )
+        recalculate_claim_statuses(self.database, story_id)
+        return recalculate_story_qualification(self.database, story_id)
+
+    def qualify_story(self, story_id: str, reason: str = "") -> str:
+        state = recalculate_story_qualification(self.database, story_id)
+        if not state["evidence_gate"]:
+            raise ValueError("Evidence must pass before manual qualification")
+        now = utc_now()
+        reason_value = reason.strip()
+        if not state["automated_importance"] and not state["importance_override"] and not reason_value:
+            raise ValueError("A recorded reason is required to override automated importance")
+        with self.database.transaction() as connection:
+            action = "qualify" if state["automated_importance"] or state["importance_override"] else "override_importance"
+            cursor = connection.execute(
+                """
+                INSERT INTO review_action(story_id, action, reason, created_at, approval_snapshot_json)
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (story_id, action, reason_value, now, Database.json(state)),
+            )
+            if not state["automated_importance"] and not state["importance_override"]:
+                connection.execute(
+                    """
+                    UPDATE candidate SET importance_override = 1, importance_override_reason = ?,
+                        importance_overridden_at = ?, importance_override_action_id = ?,
+                        qualified_at = COALESCE(qualified_at, ?) WHERE story_id = ?
+                    """,
+                    (reason_value, now, int(cursor.lastrowid), now, story_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE candidate SET qualified_at = COALESCE(qualified_at, ?) WHERE story_id = ?",
+                    (now, story_id),
+                )
+            connection.execute(
+                "UPDATE story_cluster SET status = 'candidate', updated_at = ? WHERE id = ?",
+                (now, story_id),
+            )
+        return "candidate"
 
     def list_drafts(self) -> list[dict[str, Any]]:
         return self.database.query(
@@ -203,6 +501,7 @@ class DashboardService:
         )
         if draft:
             draft["sources"] = json.loads(draft.get("sources_json") or "[]")
+            draft["source_rows"] = [self._source_parts(source) for source in draft["sources"]]
             draft["history"] = self.database.query(
                 "SELECT id, version, status, updated_at FROM draft WHERE story_id = ? ORDER BY version DESC",
                 (draft["story_id"],),
@@ -244,7 +543,7 @@ class DashboardService:
         return draft
 
     def review(self, story_id: str, action: str, reason: str = "") -> str:
-        allowed = {"accept", "research", "archive", "approve_neutral", "approve_lens", "withdraw"}
+        allowed = {"archive", "approve_neutral", "approve_lens", "withdraw"}
         if action not in allowed:
             raise ValueError("Unsupported review action")
         story = self.database.one("SELECT * FROM story_cluster WHERE id = ?", (story_id,))
@@ -257,13 +556,13 @@ class DashboardService:
         work_payload: dict[str, Any] = {"reason": reason.strip(), "requested_at": now}
         if action == "archive":
             new_status = "archived"
-        elif action == "research":
-            work_kind = "research"
-        elif action == "accept":
-            new_status = "candidate"
         elif action == "withdraw":
             new_status = "withdrawn"
         elif action in {"approve_neutral", "approve_lens"}:
+            qualification = recalculate_story_qualification(self.database, story_id)
+            story = self.database.one("SELECT * FROM story_cluster WHERE id = ?", (story_id,)) or story
+            if not qualification["qualified"]:
+                raise ValueError("Evidence and importance qualification must pass before drafting")
             if story["status"] not in {"candidate", "draft_ready", "approved"}:
                 raise ValueError("Only verified candidates can be approved for drafting")
             if story["status"] == "approved":
@@ -303,13 +602,7 @@ class DashboardService:
                     "SELECT id, status, volatility FROM claim WHERE story_id = ? ORDER BY id",
                     (story_id,),
                 ),
-                "sources": self.database.query(
-                    """
-                    SELECT id, source_role, url, published_at, verification_status
-                    FROM source_item WHERE story_id = ? ORDER BY id
-                    """,
-                    (story_id,),
-                ),
+                "sources": self._draft_sources(story_id),
             }
         with self.database.transaction() as connection:
             connection.execute(
@@ -388,6 +681,13 @@ class DashboardService:
         rows = self.database.query(
             "SELECT * FROM source_registry ORDER BY family, name"
         )
+        for row in rows:
+            try:
+                definition = json.loads(str(row.get("definition_json") or "{}"))
+            except json.JSONDecodeError:
+                definition = {}
+            row["validation_status"] = definition.get("validation_status", "unknown")
+            row["operational_status"] = row["health"] if row["enabled"] else row["validation_status"]
         enabled_rows = [row for row in rows if bool(row["enabled"])]
         health_counts = {
             health: sum(1 for row in enabled_rows if row["health"] == health)
@@ -433,11 +733,17 @@ class DashboardService:
             """
         ) or {"background": 0, "draft": 0}
         today = datetime.now(UTC).date()
+        schedule_active = self.database.get_state("schedule_status", "not_installed") == "active"
+        next_scan = (
+            next_scheduled_run().isoformat().replace("+00:00", "Z")
+            if schedule_active
+            else "Not scheduled"
+        )
         return {
             "installed": self.database.get_state("schedule_installed", "false") == "true",
             "status": self.database.get_state("schedule_status", "not_installed"),
             "last_scan_at": self.database.get_state("last_scan_at", "Never"),
-            "next_scan_at": self.database.get_state("next_scan_at", "Not scheduled"),
+            "next_scan_at": next_scan,
             "assistance_enabled": self.database.get_state("assistance_enabled", "false") == "true",
             "shadow_mode": self.database.get_state("shadow_mode", "true") == "true",
             "background_units": int(usage["background"] or 0),
@@ -613,9 +919,10 @@ class DashboardService:
         return {
             "schema_version": 1,
             "exported_at": utc_now(),
-            "story": {key: value for key, value in story.items() if key not in {"sources", "claims", "actions", "drafts"}},
+            "story": {key: value for key, value in story.items() if key not in {"sources", "evidence_sources", "claims", "actions", "drafts"}},
             "claims": story["claims"],
             "sources": story["sources"],
+            "enriched_evidence_sources": story["evidence_sources"],
             "review_actions": story["actions"],
         }
 
@@ -627,5 +934,61 @@ class DashboardService:
         if draft["lens"]:
             sections.extend(["", "## Open-Source Lens", "", draft["lens"]])
         sections.extend(["", "## Sources", ""])
-        sections.extend(f"- {source}" for source in draft["sources"])
+        sections.extend(f"- {self._source_markdown(source)}" for source in draft["sources"])
         return "\n".join(sections).strip() + "\n"
+
+    @staticmethod
+    def _source_parts(source: Any) -> dict[str, str]:
+        if isinstance(source, dict):
+            title = " ".join(str(source.get("title") or source.get("name") or "Source").split())[:500]
+            role = " ".join(str(source.get("role") or source.get("source_role") or "").split())[:80]
+            raw_url = str(source.get("url") or "").strip()
+        else:
+            title = " ".join(str(source).split())[:500] or "Source"
+            role = ""
+            raw_url = ""
+        parsed = urlsplit(raw_url)
+        safe_url = raw_url if parsed.scheme == "https" and bool(parsed.hostname) and not parsed.username and not parsed.password else ""
+        return {"title": title, "role": role, "url": safe_url}
+
+    @classmethod
+    def _source_markdown(cls, source: Any) -> str:
+        parts = cls._source_parts(source)
+        title = parts["title"].replace("[", "\\[").replace("]", "\\]")
+        url = parts["url"].replace("<", "%3C").replace(">", "%3E")
+        rendered = f"[{title}](<{url}>)" if url else title
+        return f"{rendered} — {parts['role']}" if parts["role"] else rendered
+
+    @classmethod
+    def _source_html(cls, source: Any) -> str:
+        parts = cls._source_parts(source)
+        title = html.escape(parts["title"])
+        if parts["url"]:
+            rendered = (
+                f'<a href="{html.escape(parts["url"], quote=True)}" '
+                f'rel="noreferrer noopener">{title}</a>'
+            )
+        else:
+            rendered = title
+        if parts["role"]:
+            rendered += f" — {html.escape(parts['role'])}"
+        return rendered
+
+    def draft_html(self, draft_id: int) -> str:
+        draft = self.get_draft(draft_id)
+        if not draft:
+            raise LookupError("Draft not found")
+        body = "".join(
+            f"<p>{html.escape(paragraph)}</p>" for paragraph in str(draft["body"]).split("\n\n")
+        )
+        lens = ""
+        if draft["lens"]:
+            lens = f"<h2>Open-Source Lens</h2><p>{html.escape(str(draft['lens']))}</p>"
+        sources = "".join(f"<li>{self._source_html(source)}</li>" for source in draft["sources"])
+        headline = html.escape(str(draft["headline"]))
+        metadata = html.escape(str(draft["metadata"]))
+        return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>{headline}</title>
+<style>body{{font:17px/1.65 system-ui;max-width:760px;margin:7vh auto;padding:0 24px;color:#17201d}}h1{{font:700 42px/1.08 Georgia,serif}}.meta{{color:#61706a}}h2{{margin-top:2.4rem}}</style>
+</head><body><article><h1>{headline}</h1><p class="meta">{metadata}</p>{body}{lens}<h2>Sources</h2><ul>{sources}</ul></article></body></html>"""

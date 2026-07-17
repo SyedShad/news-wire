@@ -206,6 +206,33 @@ def validate_result(packet: dict[str, Any], result: dict[str, Any]) -> None:
             raise AssistanceError("Neutral draft returned an unauthorized open-source lens")
 
 
+def _story_sources(database: Database, story_id: str) -> list[dict[str, Any]]:
+    sources = database.query(
+        """
+        SELECT 'registry:' || id AS evidence_key, source_role, title, url,
+               published_at, language, verification_status, passage
+        FROM source_item WHERE story_id = ? ORDER BY published_at, id
+        """,
+        (story_id,),
+    )
+    sources.extend(
+        database.query(
+            """
+            SELECT 'enriched:' || id AS evidence_key, confirmed_role AS source_role,
+                   title, final_url AS url, published_at, language,
+                   CASE confirmed_role WHEN 'Event' THEN 'supports'
+                       WHEN 'Reporting' THEN 'supports' ELSE 'trace' END AS verification_status,
+                   passage
+            FROM evidence_source
+            WHERE story_id = ? AND status = 'confirmed'
+            ORDER BY COALESCE(published_at, fetched_at), id
+            """,
+            (story_id,),
+        )
+    )
+    return sources
+
+
 def build_packet(database: Database, work_item_id: int) -> dict[str, Any]:
     work = database.one("SELECT * FROM work_item WHERE id = ?", (work_item_id,))
     if not work or not work.get("story_id"):
@@ -224,14 +251,7 @@ def build_packet(database: Database, work_item_id: int) -> dict[str, Any]:
         "SELECT id, text, status, volatility FROM claim WHERE story_id = ? ORDER BY id",
         (story["id"],),
     )
-    sources = database.query(
-        """
-        SELECT id, source_role, title, url, published_at, language,
-               verification_status, passage
-        FROM source_item WHERE story_id = ? ORDER BY published_at, id
-        """,
-        (story["id"],),
-    )
+    sources = _story_sources(database, str(story["id"]))
     if operation.startswith("draft_") and story["status"] != "approved":
         raise AssistanceError("Draft generation requires an approved story")
     return {
@@ -279,13 +299,12 @@ def _revalidate_approval(
             invalid = True
             break
     current_sources = {
-        int(row["id"]): str(row["verification_status"])
-        for row in database.query(
-            "SELECT id, verification_status FROM source_item WHERE story_id = ?", (story["id"],)
-        )
+        str(row["evidence_key"]): str(row["verification_status"])
+        for row in _story_sources(database, str(story["id"]))
     }
     for source in payload.get("sources", []):
-        if current_sources.get(int(source["id"])) != str(source["verification_status"]):
+        key = str(source.get("evidence_key") or f"registry:{source.get('id')}")
+        if current_sources.get(key) != str(source["verification_status"]):
             invalid = True
             break
     if invalid:

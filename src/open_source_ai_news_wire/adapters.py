@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -62,7 +63,15 @@ def parse_public_time(value: str | None, fallback: str) -> str:
         try:
             moment = parsedate_to_datetime(raw)
         except (TypeError, ValueError, OverflowError) as error:
-            raise AdapterError(f"Invalid publication time: {raw}") from error
+            moment = None
+            for pattern in ("%b %d, %Y", "%B %d, %Y", "%A, %b %d, %Y", "%A, %B %d, %Y"):
+                try:
+                    moment = datetime.strptime(raw, pattern).replace(tzinfo=UTC)
+                    break
+                except ValueError:
+                    continue
+            if moment is None:
+                raise AdapterError(f"Invalid publication time: {raw}") from error
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=UTC)
     return moment.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -240,6 +249,218 @@ def parse_html_listing(payload: bytes, *, source_url: str, observed_at: str, lim
     return observations
 
 
+_ANCHOR_PATTERN = re.compile(
+    r"<a\b(?P<attrs>[^>]*)href=[\"'](?P<href>[^\"']+)[\"'](?P<tail>[^>]*)>(?P<body>.*?)</a>",
+    re.IGNORECASE | re.DOTALL,
+)
+_TIME_PATTERN = re.compile(
+    r"<time\b(?P<attrs>[^>]*)>(?P<label>.*?)</time>",
+    re.IGNORECASE | re.DOTALL,
+)
+_HUMAN_DATE_PATTERN = re.compile(
+    r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December|"
+    r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}\b",
+    re.IGNORECASE,
+)
+
+
+def _plain_html(value: str) -> str:
+    without_comments = re.sub(r"<!--.*?-->", " ", value, flags=re.DOTALL)
+    without_tags = re.sub(r"<[^>]+>", " ", without_comments)
+    return " ".join(html.unescape(without_tags).split())
+
+
+def _nearest_public_time(text: str, position: int, observed_at: str) -> str:
+    candidates: list[tuple[int, str]] = []
+    for match in _TIME_PATTERN.finditer(text, max(0, position - 1200), min(len(text), position + 1200)):
+        datetime_attribute = re.search(r"datetime=[\"']([^\"']+)[\"']", match.group("attrs"), re.IGNORECASE)
+        value = datetime_attribute.group(1) if datetime_attribute else _plain_html(match.group("label"))
+        if value:
+            distance = abs(match.start() - position)
+            candidates.append((max(0, distance - 100) if datetime_attribute else distance, value))
+    for match in _HUMAN_DATE_PATTERN.finditer(text, max(0, position - 1000), min(len(text), position + 1000)):
+        candidates.append((abs(match.start() - position), match.group(0)))
+    for _distance, value in sorted(candidates):
+        try:
+            return parse_public_time(value, observed_at)
+        except AdapterError:
+            continue
+    return observed_at
+
+
+def _parse_dated_links(
+    payload: bytes,
+    *,
+    source_url: str,
+    observed_at: str,
+    accepted_path: re.Pattern[str],
+    limit: int = 200,
+) -> list[Observation]:
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise AdapterError("HTML listing is not UTF-8") from error
+    selected: dict[str, Observation] = {}
+    for match in _ANCHOR_PATTERN.finditer(text):
+        try:
+            item_url = canonical_url(html.unescape(match.group("href")), source_url)
+        except AdapterError:
+            continue
+        if not accepted_path.search(urlsplit(item_url).path):
+            continue
+        body = match.group("body")
+        title = _plain_html(body)
+        heading = re.search(r"<h[1-4]\b[^>]*>(.*?)</h[1-4]>", body, re.IGNORECASE | re.DOTALL)
+        if heading:
+            title = _plain_html(heading.group(1))
+        else:
+            titled = re.search(
+                r"<(?:span|div)\b[^>]*class=[\"'][^\"']*(?:title|headline)[^\"']*[\"'][^>]*>(.*?)</(?:span|div)>",
+                body,
+                re.IGNORECASE | re.DOTALL,
+            )
+            if titled:
+                title = _plain_html(titled.group(1))
+        aria = re.search(r"aria-label=[\"'](?:Read\s+)?([^\"']+)[\"']", match.group("attrs") + match.group("tail"), re.IGNORECASE)
+        if aria and len(_plain_html(aria.group(1))) > len(title):
+            title = _plain_html(aria.group(1))
+        if len(title) < 12 or title.lower() in {"featured", "read more", "learn more"}:
+            continue
+        item = Observation(
+            external_id=item_url,
+            title=title[:500],
+            url=item_url,
+            published_at=_nearest_public_time(text, match.start(), observed_at),
+        )
+        previous = selected.get(item_url)
+        if previous is None or len(item.title) >= len(previous.title):
+            selected[item_url] = item
+        if len(selected) >= limit:
+            break
+    return list(selected.values())
+
+
+def parse_anthropic_newsroom(payload: bytes, *, source_url: str, observed_at: str) -> list[Observation]:
+    return _parse_dated_links(
+        payload,
+        source_url=source_url,
+        observed_at=observed_at,
+        accepted_path=re.compile(r"^/news/[^/?#]+/?$"),
+    )
+
+
+def parse_meta_ai_blog(payload: bytes, *, source_url: str, observed_at: str) -> list[Observation]:
+    return _parse_dated_links(
+        payload,
+        source_url=source_url,
+        observed_at=observed_at,
+        accepted_path=re.compile(r"^/blog/[^/?#]+/?$"),
+    )
+
+
+def parse_cisa_advisories(payload: bytes, *, source_url: str, observed_at: str) -> list[Observation]:
+    return _parse_dated_links(
+        payload,
+        source_url=source_url,
+        observed_at=observed_at,
+        accepted_path=re.compile(r"^/news-events/(?:cybersecurity-advisories|alerts)/.+"),
+    )
+
+
+def parse_huggingnews(payload: bytes, *, source_url: str, observed_at: str, limit: int = 200) -> list[Observation]:
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise AdapterError("HuggingNews listing is not UTF-8") from error
+    token_pattern = re.compile(
+        r"<h2\b[^>]*class=[\"'][^\"']*day-date[^\"']*[\"'][^>]*>(?P<date>.*?)</h2>|"
+        r"<a\b(?P<attrs>[^>]*)class=[\"'][^\"']*story-row-link[^\"']*[\"'][^>]*href=[\"'](?P<href>[^\"']+)[\"'][^>]*>(?P<body>.*?)</a>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    current_date = observed_at
+    observations: list[Observation] = []
+    seen: set[str] = set()
+    for match in token_pattern.finditer(text):
+        if match.group("date") is not None:
+            current_date = parse_public_time(_plain_html(match.group("date")), observed_at)
+            continue
+        try:
+            item_url = canonical_url(html.unescape(match.group("href")), source_url)
+        except AdapterError:
+            continue
+        if item_url in seen or not re.match(r"^/(?:ai|cybersecurity|tech|startups|earnings)/", urlsplit(item_url).path):
+            continue
+        body = match.group("body")
+        title_match = re.search(r"class=[\"'][^\"']*story-title[^\"']*[\"'][^>]*>(.*?)</div>", body, re.IGNORECASE | re.DOTALL)
+        title = _plain_html(title_match.group(1) if title_match else body)
+        if len(title) < 12:
+            continue
+        rank_match = re.search(r"class=[\"'][^\"']*story-rank[^\"']*[\"'][^>]*>(.*?)</div>", body, re.IGNORECASE | re.DOTALL)
+        signal_match = re.search(r"class=[\"'][^\"']*meta-signal[^\"']*[\"'][^>]*>(.*?)</span>", body, re.IGNORECASE | re.DOTALL)
+        metadata = []
+        if rank_match:
+            metadata.append(f"rank {_plain_html(rank_match.group(1))}")
+        if signal_match:
+            metadata.append(f"momentum {_plain_html(signal_match.group(1))}")
+        summary = "Discovery signal metadata"
+        if metadata:
+            summary += ": " + "; ".join(metadata)
+        summary += ". Popularity is not evidence."
+        observations.append(Observation(item_url, title[:500], item_url, current_date, summary))
+        seen.add(item_url)
+        if len(observations) >= limit:
+            break
+    return observations
+
+
+def parse_mastodon_signal(payload: bytes, *, source_url: str, observed_at: str, limit: int = 200) -> list[Observation]:
+    try:
+        root = ET.fromstring(payload)
+    except ET.ParseError as error:
+        raise AdapterError("Malformed Mastodon RSS feed") from error
+    signal_terms = re.compile(
+        r"\b(model|release|research|paper|policy|regulation|benchmark|safety|security|incident|"
+        r"open[ -](?:source|weight)|funding|acqui(?:res|red|sition)|agent(?:ic|s)?|llm|agi|"
+        r"artificial general intelligence)\b",
+        re.IGNORECASE,
+    )
+    ai_context = re.compile(
+        r"\b(ai|artificial intelligence|machine learning|model(?:s|ing)?|llm|agi|"
+        r"artificial general intelligence|agentic|open[ -](?:source|weight))\b",
+        re.IGNORECASE,
+    )
+    noise_terms = re.compile(r"\b(commissions?|for sale|subscribe|prompt pack|daily horoscope|nft)\b", re.IGNORECASE)
+    observations: list[Observation] = []
+    for entry in [node for node in root.iter() if node.tag.rsplit("}", 1)[-1].lower() == "item"]:
+        description = _text(entry, ("description", "content"))
+        plain = _plain_html(description)
+        context = re.sub(r"#\s*[\w-]+", " ", plain)
+        if (
+            len(context) < 40
+            or not ai_context.search(context)
+            or not signal_terms.search(context)
+            or noise_terms.search(context)
+        ):
+            continue
+        link = _text(entry, ("link",))
+        if not link:
+            continue
+        item_url = canonical_url(link, source_url)
+        title = re.split(r"(?:\n|(?<=[.!?])\s+)", plain, maxsplit=1)[0].strip()
+        observations.append(
+            Observation(
+                external_id=_text(entry, ("guid", "id")) or item_url,
+                title=title[:500],
+                url=item_url,
+                published_at=parse_public_time(_text(entry, ("pubdate", "published", "updated")), observed_at),
+                summary=plain[:4000],
+            )
+        )
+        if len(observations) >= limit:
+            break
+    return observations
+
+
 def parse_source(
     adapter: str,
     payload: bytes,
@@ -255,4 +476,14 @@ def parse_source(
         return parse_sitemap(payload, source_url=source_url, observed_at=observed_at)
     if adapter == "html_listing":
         return parse_html_listing(payload, source_url=source_url, observed_at=observed_at)
+    if adapter == "anthropic_newsroom":
+        return parse_anthropic_newsroom(payload, source_url=source_url, observed_at=observed_at)
+    if adapter == "meta_ai_blog":
+        return parse_meta_ai_blog(payload, source_url=source_url, observed_at=observed_at)
+    if adapter == "cisa_advisories":
+        return parse_cisa_advisories(payload, source_url=source_url, observed_at=observed_at)
+    if adapter == "huggingnews":
+        return parse_huggingnews(payload, source_url=source_url, observed_at=observed_at)
+    if adapter == "mastodon_signal":
+        return parse_mastodon_signal(payload, source_url=source_url, observed_at=observed_at)
     raise AdapterError(f"Unsupported adapter: {adapter}")

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_date": "2026-07-14",
+  "checked_date": "2026-07-17",
   "sources": [
     {
       "id": "openai-news",
@@ -165,16 +165,16 @@
       "name": "CISA Advisories — AI-filtered",
       "family": "Safety and security",
       "monitoring_role": "Event",
-      "adapter": "feed",
-      "url": "https://www.cisa.gov/cybersecurity-advisories/all.xml",
+      "adapter": "cisa_advisories",
+      "url": "https://www.cisa.gov/news-events/cybersecurity-advisories",
       "base_hosts": ["www.cisa.gov"],
       "enabled_by_default": false,
-      "parser_version": 1,
+      "parser_version": 2,
       "minimum_interval_minutes": 60,
       "include_terms": ["AI", "artificial intelligence", "machine learning", "language model", "LLM", "model context protocol"],
-      "validation_status": "disabled-access",
+      "validation_status": "validated-unavailable",
       "evidence_use": "primary",
-      "detail": "The feed is public, but the pilot client received an access rejection during the live parser check."
+      "detail": "The dedicated dated parser passes fixtures, but the declared product client received HTTP 403 on 2026-07-17. It remains disabled without user-agent disguise or access bypass."
     },
     {
       "id": "mit-technology-review-ai",
@@ -237,45 +237,45 @@
       "name": "Mastodon Artificial Intelligence Tag",
       "family": "Accessible social signals",
       "monitoring_role": "Discovery",
-      "adapter": "feed",
+      "adapter": "mastodon_signal",
       "url": "https://mastodon.social/tags/artificialintelligence.rss",
       "base_hosts": ["mastodon.social"],
-      "enabled_by_default": false,
-      "parser_version": 1,
+      "enabled_by_default": true,
+      "parser_version": 2,
       "minimum_interval_minutes": 60,
-      "validation_status": "disabled-policy",
+      "validation_status": "live-validated",
       "evidence_use": "discovery-only",
-      "detail": "Public and no-login, but disabled until shadow-run noise and rate stability are reviewed."
+      "detail": "Public no-login RSS passed a bounded live check on 2026-07-17; deterministic AI-context and event-term filters keep it discovery-only."
     },
     {
       "id": "anthropic-newsroom",
       "name": "Anthropic Newsroom",
       "family": "Official AI organizations",
       "monitoring_role": "Event",
-      "adapter": "html_listing",
+      "adapter": "anthropic_newsroom",
       "url": "https://www.anthropic.com/news",
       "base_hosts": ["www.anthropic.com"],
-      "enabled_by_default": false,
-      "parser_version": 1,
+      "enabled_by_default": true,
+      "parser_version": 2,
       "minimum_interval_minutes": 30,
-      "validation_status": "disabled-parser",
+      "validation_status": "live-validated",
       "evidence_use": "primary",
-      "detail": "No publisher RSS feed was confirmed; disabled until a dedicated dated listing parser passes fixtures and live review."
+      "detail": "Dedicated dated newsroom parser passed fixture and no-login live checks on 2026-07-17."
     },
     {
       "id": "meta-ai-blog",
       "name": "Meta AI Blog",
       "family": "Official AI organizations",
       "monitoring_role": "Event",
-      "adapter": "feed",
-      "url": "https://ai.meta.com/blog/rss/",
+      "adapter": "meta_ai_blog",
+      "url": "https://ai.meta.com/blog/",
       "base_hosts": ["ai.meta.com"],
-      "enabled_by_default": false,
-      "parser_version": 1,
+      "enabled_by_default": true,
+      "parser_version": 2,
       "minimum_interval_minutes": 30,
-      "validation_status": "disabled-access",
+      "validation_status": "live-validated",
       "evidence_use": "primary",
-      "detail": "The former public feed returned 404 during the 2026-07-14 validation."
+      "detail": "The former RSS address was replaced by a dedicated dated public-blog parser, live-validated without login on 2026-07-17."
     },
     {
       "id": "sec-ai-company-filings",
@@ -288,24 +288,24 @@
       "enabled_by_default": false,
       "parser_version": 1,
       "minimum_interval_minutes": 60,
-      "validation_status": "disabled-access",
+      "validation_status": "excluded-by-operator",
       "evidence_use": "primary",
-      "detail": "Disabled because the public endpoint rejected the local pilot client and filings need entity-aware enrichment."
+      "detail": "Excluded by operator choice on 2026-07-17. This release makes no SEC requests."
     },
     {
       "id": "hugging-news",
       "name": "HuggingNews",
       "family": "Aggregation",
       "monitoring_role": "Discovery",
-      "adapter": "html_listing",
+      "adapter": "huggingnews",
       "url": "https://huggingnews.com/",
       "base_hosts": ["huggingnews.com"],
-      "enabled_by_default": false,
-      "parser_version": 1,
+      "enabled_by_default": true,
+      "parser_version": 2,
       "minimum_interval_minutes": 30,
-      "validation_status": "disabled-parser",
+      "validation_status": "live-validated",
       "evidence_use": "discovery-only",
-      "detail": "Disabled until the HTML parser fixture and live access review pass."
+      "detail": "Dedicated dated discovery parser passed fixture and no-login live checks on 2026-07-17; popularity remains non-evidentiary metadata."
     }
   ]
 }

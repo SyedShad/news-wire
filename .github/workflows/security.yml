@@ -35,12 +35,19 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Explain private-repository fallback
+        if: github.event.repository.private
+        run: |
+          echo "::notice::GitHub dependency review requires Advanced Security for private repositories. The locked graph is enforced by the separate uv dependency-audit job."
+
       - name: Checkout
+        if: ${{ !github.event.repository.private }}
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
       - name: Review dependency changes
+        if: ${{ !github.event.repository.private }}
         uses: actions/dependency-review-action@3b139cfc5fae8b618d3eae3675e383bb1769c019 # v4.5.0
 
   secret-scan:
