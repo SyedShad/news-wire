@@ -382,6 +382,49 @@ def test_collector_is_incremental_and_creates_verified_candidate(tmp_path: Path)
     assert database.one("SELECT kind FROM alert WHERE kind='correction'") == {"kind": "correction"}
 
 
+def test_collector_collapses_republished_fingerprint_and_advances_cursor(tmp_path: Path) -> None:
+    database = _database_with_one_source(tmp_path)
+    title = "Open-source AI model release improves inference security"
+    payload = {
+        "body": f"""<rss><channel><item><guid>original-item</guid><title>{title}</title>
+        <link>https://openai.com/news/original-item</link>
+        <pubDate>Tue, 14 Jul 2026 09:30:00 GMT</pubDate>
+        <description>Original discovery metadata</description></item></channel></rss>""".encode()
+    }
+
+    def factory(source: dict[str, object]) -> SafeHttpClient:
+        return SafeHttpClient(
+            allowed_hosts=set(json.loads(str(source["base_hosts_json"]))),
+            resolver=PUBLIC_IP,
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    content=payload["body"],
+                    headers={"content-type": "application/rss+xml"},
+                    request=request,
+                )
+            ),
+        )
+
+    collector = Collector(database, client_factory=factory, now=lambda: "2026-07-14T10:00:00Z")
+    first = collector.scan(trigger="manual")
+    payload["body"] = f"""<rss><channel><item><guid>republished-item</guid><title>{title}</title>
+    <link>https://openai.com/news/republished-item</link>
+    <pubDate>Tue, 14 Jul 2026 09:45:00 GMT</pubDate>
+    <description>Changed popularity metadata from the republished item</description>
+    </item></channel></rss>""".encode()
+    second = collector.scan(trigger="manual")
+
+    assert first.result == "success"
+    assert second.result == "success"
+    assert second.discovered_count == 0
+    assert database.one("SELECT COUNT(*) AS count FROM raw_observation") == {"count": 1}
+    assert database.one("SELECT COUNT(*) AS count FROM story_cluster") == {"count": 1}
+    assert json.loads(
+        database.one("SELECT cursor FROM source_state WHERE source_id = 'openai-news'")["cursor"]
+    )["external_id"] == "republished-item"
+
+
 def test_deadline_backlog_and_recovered_source_notice(tmp_path: Path) -> None:
     database = _database_with_one_source(tmp_path)
     past_deadline = datetime(2026, 7, 14, 9, tzinfo=UTC)

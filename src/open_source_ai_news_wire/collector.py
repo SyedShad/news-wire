@@ -364,9 +364,22 @@ class Collector:
             recovered = str(source.get("state_health") or "") == "degraded" or int(source.get("state_failure_streak") or 0) >= 3
             for observation in observations:
                 prior = connection.execute(
-                    "SELECT content_hash FROM raw_observation WHERE source_id = ? AND external_id = ?",
-                    (source["id"], observation.external_id),
+                    """
+                    SELECT external_id, content_hash FROM raw_observation
+                    WHERE source_id = ? AND (external_id = ? OR fingerprint = ?)
+                    ORDER BY CASE WHEN external_id = ? THEN 0 ELSE 1 END
+                    LIMIT 1
+                    """,
+                    (
+                        source["id"], observation.external_id,
+                        observation.fingerprint, observation.external_id,
+                    ),
                 ).fetchone()
+                # Some discovery feeds republish the same headline under a new
+                # item ID. Preserve the first stored observation, advance the
+                # source cursor below, and do not replay the story or evidence.
+                if prior and prior["external_id"] != observation.external_id:
+                    continue
                 material_update = bool(prior and prior["content_hash"] != observation.content_hash)
                 connection.execute(
                     """
