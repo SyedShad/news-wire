@@ -158,7 +158,7 @@ def test_v3_migration_preserves_data_and_supersedes_legacy_research(tmp_path: Pa
         connection.commit()
 
     database = Database(paths)
-    assert database.migrate() == 3
+    assert database.migrate() == 4
     assert database.one("SELECT headline FROM story_cluster WHERE id = 'story-one'") == {
         "headline": "AI event"
     }
@@ -169,6 +169,71 @@ def test_v3_migration_preserves_data_and_supersedes_legacy_research(tmp_path: Pa
     assert database.one(
         "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'evidence_source'"
     ) == {"count": 1}
+
+
+def test_v4_migration_requires_reporting_origin_review_and_preserves_draft(tmp_path: Path) -> None:
+    paths = resolve_runtime_paths(tmp_path / "wire-data")
+    ensure_runtime_layout(paths)
+    now = "2026-07-21T08:00:00Z"
+    with sqlite3.connect(paths.database) as connection:
+        connection.executescript(SCHEMA_V1)
+        for version in (2, 3):
+            for statement in MIGRATIONS[version]:
+                connection.execute(statement)
+        connection.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', '3')")
+        connection.execute(
+            """
+            INSERT INTO story_cluster(
+                id, slug, headline, summary, lane, openness_class, status, priority,
+                priority_score, freshness, first_public_at, detected_at, created_at, updated_at
+            ) VALUES('story-reporting', 'reporting', 'Syndicated report', 'Summary',
+                     'Broader AI News', 'not stated', 'draft_ready', 'High', 75, 'Breaking',
+                     ?, ?, ?, ?)
+            """,
+            (now, now, now, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO candidate(story_id, evidence_gate, importance_gate, score, score_json, qualified_at)
+            VALUES('story-reporting', 1, 1, 75, '{}', ?)
+            """,
+            (now,),
+        )
+        for host in ("yahoo.com", "indiatimes.com"):
+            connection.execute(
+                """
+                INSERT INTO evidence_source(
+                    story_id, requested_url, final_url, canonical_url, publisher_key,
+                    acquisition_method, title, confirmed_role, status, confirmed_at,
+                    created_at, updated_at
+                ) VALUES('story-reporting', ?, ?, ?, ?, 'manual', 'Axios report',
+                         'Reporting', 'confirmed', ?, ?, ?)
+                """,
+                (f"https://{host}/report", f"https://{host}/report", f"https://{host}/report", host, now, now, now),
+            )
+        connection.execute(
+            """
+            INSERT INTO draft(
+                story_id, mode, status, version, headline, metadata, body, lens,
+                sources_json, created_at, updated_at
+            ) VALUES('story-reporting', 'Neutral News Brief', 'Current', 1,
+                     'Existing draft', 'Breaking', 'Preserve me', '', '[]', ?, ?)
+            """,
+            (now, now),
+        )
+        connection.commit()
+
+    database = Database(paths)
+    assert database.migrate() == 4
+    assert database.query(
+        "SELECT DISTINCT origin_status FROM evidence_source ORDER BY origin_status"
+    ) == [{"origin_status": "needs_review"}]
+    assert database.one("SELECT evidence_gate FROM candidate") == {"evidence_gate": 0}
+    assert database.one("SELECT status FROM story_cluster") == {"status": "signal"}
+    assert database.one("SELECT status, body FROM draft") == {
+        "status": "Needs Review",
+        "body": "Preserve me",
+    }
 
 
 def test_storage_pressure_levels_can_be_forced(tmp_path: Path) -> None:

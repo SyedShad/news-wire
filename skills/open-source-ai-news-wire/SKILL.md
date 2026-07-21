@@ -17,13 +17,14 @@ Operate the local, destination-neutral AI news-monitoring and editorial-review s
 ## Choose the workflow
 
 - For current coverage, source health, queue state, or usage: inspect `status`, `sources health`, or launch `dashboard`.
-- For a signal the human wants to select: inspect its linked public page or attach a public HTTPS source, confirm the source role and claim relationships, then qualify it. Evidence still requires one first-party Event source or two independent Reporting publishers; only automated importance may be overridden, with a recorded reason.
+- For a signal the human wants to select: inspect its linked public page or attach a public HTTPS source, confirm the source role and claim relationships, then qualify it. Reporting evidence also requires a human-confirmed original publisher and provenance type; syndications or citations of one origin count once. Evidence still requires one first-party Event source or two independent original reporting publishers; only automated importance may be overridden, with a recorded reason.
 - For fresh retrieval: use `schedule run-now` or `scan --trigger manual`. Do not create parallel scans; the worker coalesces overlap.
 - For missed awake/offline time: let scheduled recovery apply the default 72-hour cap. Use `catch-up --start YYYY-MM-DD --end YYYY-MM-DD` only when the user selects an older interval.
 - For schedule lifecycle: use `schedule install|pause|resume|status|uninstall`. Explain that locked-and-awake works; sleep, logout, shutdown, and offline time pause work.
 - For the V1 pilot: complete one real human-approved revised draft, run `pilot notification-canary`, then `pilot extend-validation --auto-activate`. Use `pilot readiness` for exact blockers; never deliver alerts older than the activation watermark.
 - For ChatGPT assistance: run the isolation check before enabling it. If isolation fails, keep assistance disabled and continue deterministic monitoring.
 - For drafting: require an explicit human approval already recorded in the Wire. Approval starts generation immediately; the durable queue and half-hour worker are recovery fallbacks. Never infer approval from viewing, discussing, or accepting a story.
+- For draft attribution: name the confirmed original publication naturally and use the generated portable Markdown link. When only a republication URL is available, label it `Original Publisher, via Host`. Discovery links may remain in the grouped source list but never support a factual claim.
 - For failed drafting: inspect the visible work state and retry the preserved approval only after its evidence snapshot still passes. Never create a duplicate approval or work item.
 - For deletion: create a purge preview first. Execute only the exact returned plan ID after explicit human confirmation; there is no backup or undo.
 

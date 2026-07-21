@@ -11,7 +11,7 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>Headline<input name="headline" value="{{ draft.headline }}" required maxlength="240"></label>
     <label>Metadata<input name="metadata" value="{{ draft.metadata }}" maxlength="500"></label>
-    <label>Factual brief<textarea name="body" rows="14" required>{{ draft.body }}</textarea></label>
+    <label>Factual brief <span>confirmed source links use portable Markdown</span><textarea name="body" rows="14" required>{{ draft.body }}</textarea></label>
     {% if draft.mode == 'Open-Source Lens Brief' %}
     <label>Open-source lens <span>approved analysis section</span><textarea name="lens" rows="6">{{ draft.lens }}</textarea></label>
     {% else %}

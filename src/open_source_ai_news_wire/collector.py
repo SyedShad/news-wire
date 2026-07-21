@@ -16,7 +16,6 @@ import httpx
 from .adapters import AdapterError, Observation, parse_source
 from .network import FetchResult, NetworkUnavailable, ResponseTooLarge, SafeHttpClient, UnsafeRequest
 from .qualification import Qualification, qualify
-from .evidence import publisher_key
 from .settings import load_settings
 from .source_registry import synchronize_sources
 from .storage import Database
@@ -649,7 +648,7 @@ class Collector:
         ).fetchall()
         manual_evidence = connection.execute(
             """
-            SELECT confirmed_role, publisher_key FROM evidence_source
+            SELECT confirmed_role, reporting_origin_key, origin_status FROM evidence_source
             WHERE story_id = ? AND status = 'confirmed'
             """,
             (story_id,),
@@ -658,15 +657,12 @@ class Collector:
             row["confirmed_role"] == "Event" for row in manual_evidence
         )
         reporting_publishers = {
-            publisher_key(str(row["canonical_url"] or row["url"]))
-            for row in legacy_evidence
-            if row["source_role"] == "Reporting"
-        }
-        reporting_publishers.update(
-            str(row["publisher_key"])
+            str(row["reporting_origin_key"])
             for row in manual_evidence
             if row["confirmed_role"] == "Reporting"
-        )
+            and row["origin_status"] == "confirmed"
+            and row["reporting_origin_key"]
+        }
         evidence_gate = event_count >= 1 or len(reporting_publishers) >= 2
         current = connection.execute("SELECT status, priority_score FROM story_cluster WHERE id = ?", (story_id,)).fetchone()
         new_status = current["status"]

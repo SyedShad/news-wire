@@ -87,7 +87,7 @@
       <div class="gate-grid">
         <div class="gate-card {{ 'gate-pass' if story.qualification.evidence_gate else 'gate-locked' }}">
           <small>Evidence gate</small><strong>{{ 'Passed' if story.qualification.evidence_gate else 'Locked' }}</strong>
-          <p>{{ story.qualification.event_count }} Event · {{ story.qualification.reporting_count }} independent Reporting</p>
+          <p>{{ story.qualification.event_count }} Event · {{ story.qualification.reporting_count }} confirmed reporting origin{{ '' if story.qualification.reporting_count == 1 else 's' }}{% if not story.qualification.evidence_gate and story.qualification.reporting_count %} · {{ story.qualification.reporting_needed }} more required{% endif %}</p>
         </div>
         <div class="gate-card {{ 'gate-pass' if story.qualification.effective_importance else 'gate-locked' }}">
           <small>Importance gate</small><strong>{{ 'Passed' if story.qualification.effective_importance else 'Needs your decision' }}</strong>
@@ -98,12 +98,12 @@
       <div class="evidence-workbench">
         <div class="workbench-heading"><div><h3>Investigate evidence</h3><p>Inspect public pages first, then confirm what each source actually proves.</p></div></div>
         <div class="linked-evidence-list">
-        {% for source in story.sources if source.source_role == 'Discovery' %}
+        {% for source in story.sources if source.source_role in ['Discovery', 'Reporting'] %}
           <form action="{{ url_for('inspect_story_evidence', story_id=story.id) }}" method="post" class="linked-evidence-row">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="url" value="{{ source.canonical_url or source.url }}">
             <input type="hidden" name="acquisition_method" value="linked">
-            <span><small>Linked from {{ source.source_name }}</small><strong>{{ source.canonical_url or source.url }}</strong></span>
+            <span><small>{{ 'Linked from' if source.source_role == 'Discovery' else 'Reporting page from' }} {{ source.source_name }}</small><strong>{{ source.canonical_url or source.url }}</strong></span>
             <button type="submit">Inspect linked source</button>
           </form>
         {% endfor %}
@@ -119,7 +119,7 @@
         <div class="evidence-proposals">
         {% for evidence in story.evidence_sources %}
           <article class="evidence-proposal status-{{ evidence.status }}">
-            <div class="proposal-heading"><div><small>{{ evidence.acquisition_method }} evidence · {{ evidence.status }}</small><h3>{{ evidence.title or evidence.canonical_url }}</h3></div><span>{{ evidence.confirmed_role or evidence.proposed_role or 'Pending' }}</span></div>
+            <div class="proposal-heading"><div><small>{{ evidence.acquisition_method }} evidence · {{ evidence.status }}</small><h3>{{ evidence.title or evidence.canonical_url }}</h3><p class="source-provenance-line">Hosted by {{ evidence.hosting_publisher_name }}</p></div><span>{{ evidence.confirmed_role or evidence.proposed_role or 'Pending' }}</span></div>
             {% if evidence.passage %}<p>{{ evidence.passage }}</p>{% endif %}
             {% if evidence.status == 'failed' %}<p class="inline-error">Inspection failed safely: {{ evidence.error_class }}. You may retry the URL.</p>{% endif %}
             {% if evidence.status == 'queued' %}<p class="muted">Queued for bounded public-page inspection.</p>{% endif %}
@@ -133,14 +133,27 @@
                 <option value="Discovery">Discovery only</option>
               </select></label>
               <label class="check-label"><input type="checkbox" name="first_party" value="yes"> I confirm this is a first-party source for the event</label>
-              <div class="claim-mapping"><strong>Map this source to claims</strong><small>Use “attributes” when an official page proves only that an announcement or promotional claim was made.</small>
+              <div class="reporting-provenance-fields">
+                <strong>Original reporting publisher</strong><small>Required for Reporting sources. A suggestion never counts until you confirm it.</small>
+                <label>Publication name<input type="text" name="origin_name" maxlength="120" value="{{ evidence.reporting_origin_name or evidence.proposed_origin_name or evidence.hosting_publisher_name }}" placeholder="Axios"></label>
+                <label>Relationship to the hosted page<select name="provenance_type">
+                  <option value="unknown">Choose provenance</option>
+                  {% set proposed_provenance = evidence.provenance_type if evidence.origin_status == 'confirmed' else evidence.proposed_provenance_type %}
+                  <option value="original" {{ 'selected' if proposed_provenance == 'original' else '' }}>Original reporting</option>
+                  <option value="syndicated" {{ 'selected' if proposed_provenance == 'syndicated' else '' }}>Syndicated or republished</option>
+                  <option value="cites" {{ 'selected' if proposed_provenance == 'cites' else '' }}>Cites another publisher</option>
+                </select></label>
+                <label>Original article URL <span>optional</span><input type="url" name="origin_url" value="{{ evidence.reporting_origin_url or evidence.proposed_origin_url or '' }}" placeholder="https://original-publisher.example/article"></label>
+              </div>
+              <div class="claim-mapping"><strong>Map this source to claims</strong><small>Choose “Reports or attributes” when a page establishes that an announcement or claim was made without independently proving it.</small>
               {% for claim in story.claims %}
                 <label><span>{{ claim.text }}</span><select name="claim_{{ claim.id }}">
                   <option value="">No relationship</option>
-                  <option value="attributes">Attributes the announcement or claim</option>
-                  <option value="supports">Directly supports the claim</option>
-                  <option value="contradicts">Contradicts the claim</option>
-                  <option value="context">Context only</option>
+                  {% set relationship = evidence.claim_relationships.get(claim.id, '') %}
+                  <option value="attributes" {{ 'selected' if relationship == 'attributes' else '' }}>Reports or attributes the claim</option>
+                  <option value="supports" {{ 'selected' if relationship == 'supports' else '' }}>Directly supports the claim</option>
+                  <option value="contradicts" {{ 'selected' if relationship == 'contradicts' else '' }}>Contradicts the claim</option>
+                  <option value="context" {{ 'selected' if relationship == 'context' else '' }}>Context only</option>
                 </select></label>
               {% endfor %}
               </div>
@@ -148,8 +161,40 @@
               <button class="button button-primary" type="submit">Confirm evidence</button>
             </form>
             {% elif evidence.status == 'confirmed' %}
-              <div class="confirmed-evidence"><strong>Confirmed as {{ evidence.confirmed_role }}</strong><span>{{ evidence.publisher_key }}</span></div>
-              {% for link in evidence.claim_links %}<p class="claim-link"><b>{{ link.relationship }}</b> · {{ link.text }}</p>{% endfor %}
+              <div class="confirmed-evidence"><strong>Confirmed as {{ evidence.confirmed_role }}</strong><span>Hosted by {{ evidence.hosting_publisher_name }}</span>{% if evidence.confirmed_role == 'Reporting' %}<span>Original reporting: {{ evidence.reporting_origin_name or 'Needs review' }}</span><span>{{ evidence.provenance_type|replace('_', ' ')|title }} · {{ evidence.origin_status|replace('_', ' ') }}</span>{% endif %}</div>
+              {% for link in evidence.claim_links %}<p class="claim-link"><b>{{ link.relationship_label }}</b> · {{ link.text }}</p>{% endfor %}
+              {% if evidence.confirmed_role == 'Reporting' %}
+              <details class="provenance-review" {{ 'open' if evidence.origin_review_required else '' }}>
+                <summary>{{ 'Confirm original publisher' if evidence.origin_review_required else 'Correct publisher provenance or claim mapping' }}</summary>
+                <form action="{{ url_for('confirm_story_evidence', story_id=story.id, evidence_id=evidence.id) }}" method="post" class="confirm-evidence-form">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <input type="hidden" name="role" value="Reporting">
+                  <label>Original reporting publication<input type="text" name="origin_name" maxlength="120" required value="{{ evidence.reporting_origin_name or evidence.proposed_origin_name or evidence.hosting_publisher_name }}"></label>
+                  <label>Relationship to the hosted page<select name="provenance_type" required>
+                    {% set active_provenance = evidence.provenance_type if evidence.origin_status == 'confirmed' else evidence.proposed_provenance_type %}
+                    <option value="">Choose provenance</option>
+                    <option value="original" {{ 'selected' if active_provenance == 'original' else '' }}>Original reporting</option>
+                    <option value="syndicated" {{ 'selected' if active_provenance == 'syndicated' else '' }}>Syndicated or republished</option>
+                    <option value="cites" {{ 'selected' if active_provenance == 'cites' else '' }}>Cites another publisher</option>
+                  </select></label>
+                  <label>Original article URL <span>optional</span><input type="url" name="origin_url" value="{{ evidence.reporting_origin_url or evidence.proposed_origin_url or '' }}"></label>
+                  <div class="claim-mapping"><strong>Claim relationships</strong><small>These mappings remain part of the human-confirmed evidence record.</small>
+                  {% for claim in story.claims %}
+                    {% set relationship = evidence.claim_relationships.get(claim.id, '') %}
+                    <label><span>{{ claim.text }}</span><select name="claim_{{ claim.id }}">
+                      <option value="">No relationship</option>
+                      <option value="attributes" {{ 'selected' if relationship == 'attributes' else '' }}>Reports or attributes the claim</option>
+                      <option value="supports" {{ 'selected' if relationship == 'supports' else '' }}>Directly supports the claim</option>
+                      <option value="contradicts" {{ 'selected' if relationship == 'contradicts' else '' }}>Contradicts the claim</option>
+                      <option value="context" {{ 'selected' if relationship == 'context' else '' }}>Context only</option>
+                    </select></label>
+                  {% endfor %}
+                  </div>
+                  <label>Confirmation note <span>optional</span><textarea name="reason" rows="2" placeholder="Why this publisher provenance is appropriate"></textarea></label>
+                  <button class="button button-primary" type="submit">Confirm publisher provenance</button>
+                </form>
+              </details>
+              {% endif %}
               <form action="{{ url_for('exclude_story_evidence', story_id=story.id, evidence_id=evidence.id) }}" method="post" class="exclude-evidence-form">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="text" name="reason" placeholder="Reason for excluding this evidence">
@@ -171,7 +216,7 @@
           <textarea name="reason" rows="2" {{ 'required' if not story.qualification.automated_importance else '' }} placeholder="Why this development deserves a brief"></textarea>
         </label>
         <button class="button button-primary" type="submit" {{ 'disabled' if not story.qualification.evidence_gate else '' }}>Qualify as candidate</button>
-        {% if not story.qualification.evidence_gate %}<p class="muted">Qualification remains locked until the evidence gate passes.</p>{% endif %}
+        {% if not story.qualification.evidence_gate %}<p class="muted">Qualification remains locked until one Event source or two independent original reporting publishers are confirmed.</p>{% endif %}
       </form>
       {% else %}
       <div class="qualified-state"><strong>Candidate qualification recorded</strong><p>Drafting still requires the separate human approval checkpoint.</p></div>

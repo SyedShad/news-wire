@@ -8,7 +8,11 @@ from open_source_ai_news_wire.demo import seed_demo_data
 from open_source_ai_news_wire.evidence import (
     EvidenceEnricher,
     extract_page,
+    normalize_optional_public_https_url,
+    normalize_publisher_name,
     normalize_public_https_url,
+    publisher_display_name,
+    publisher_identity_key,
     publisher_key,
     qualification_state,
     recalculate_claim_statuses,
@@ -143,7 +147,12 @@ def test_two_reporting_sources_must_have_independent_publishers(tmp_path) -> Non
     ):
         evidence_id = _inspect(database, service, story_id, url)
         service.confirm_evidence(
-            story_id, evidence_id, "Reporting", {claim_id: "supports"}
+            story_id,
+            evidence_id,
+            "Reporting",
+            {claim_id: "supports"},
+            provenance_type="cites",
+            origin_name="Axios",
         )
     state = qualification_state(database, story_id)
     assert state["reporting_count"] == 1
@@ -151,13 +160,91 @@ def test_two_reporting_sources_must_have_independent_publishers(tmp_path) -> Non
 
     evidence_id = _inspect(database, service, story_id, "https://independent.example.org/report")
     state = service.confirm_evidence(
-        story_id, evidence_id, "Reporting", {claim_id: "supports"}
+        story_id,
+        evidence_id,
+        "Reporting",
+        {claim_id: "supports"},
+        provenance_type="original",
+        origin_name="Independent Example",
     )
     assert state["reporting_count"] == 2
     assert state["evidence_gate"] is True
     assert database.one("SELECT status FROM claim WHERE id = ?", (claim_id,)) == {
         "status": "verified"
     }
+
+
+def test_reporting_origin_suggestion_needs_confirmation_and_can_be_corrected(tmp_path) -> None:
+    database, service = _service(tmp_path)
+    story_id = "story-demo-watch-003"
+    claim_id = int(database.one("SELECT id FROM claim WHERE story_id = ?", (story_id,))["id"])
+    evidence_ids: list[int] = []
+    for url, host_name in (
+        ("https://yahoo.example.org/report", "Yahoo"),
+        ("https://times.example.net/report", "Economic Times"),
+    ):
+        evidence_id, _ = service.queue_evidence_inspection(story_id, url, "manual")
+        EvidenceEnricher(
+            database,
+            client_factory=_client_factory(
+                (
+                    f"<html><head><title>Policy update, Axios reports</title>"
+                    f"<meta property='og:site_name' content='{host_name}'></head>"
+                    "<body>Details</body></html>"
+                ).encode()
+            ),
+        ).process_next()
+        evidence_ids.append(evidence_id)
+
+    proposed = database.one(
+        "SELECT proposed_origin_name, proposed_provenance_type, origin_status FROM evidence_source WHERE id = ?",
+        (evidence_ids[0],),
+    )
+    assert proposed == {
+        "proposed_origin_name": "Axios",
+        "proposed_provenance_type": "cites",
+        "origin_status": "suggested",
+    }
+    assert qualification_state(database, story_id)["reporting_count"] == 0
+
+    for evidence_id in evidence_ids:
+        service.confirm_evidence(
+            story_id,
+            evidence_id,
+            "Reporting",
+            {claim_id: "supports"},
+            provenance_type="cites",
+            origin_name="Axios",
+        )
+    assert qualification_state(database, story_id)["reporting_count"] == 1
+    assert qualification_state(database, story_id)["evidence_gate"] is False
+
+    service.confirm_evidence(
+        story_id,
+        evidence_ids[1],
+        "Reporting",
+        {claim_id: "supports"},
+        provenance_type="cites",
+        origin_name="Reuters",
+    )
+    corrected = qualification_state(database, story_id)
+    assert corrected["reporting_count"] == 2
+    assert corrected["evidence_gate"] is True
+    assert database.one(
+        "SELECT reporting_origin_key, origin_status FROM evidence_source WHERE id = ?",
+        (evidence_ids[1],),
+    ) == {"reporting_origin_key": "name:reuters", "origin_status": "confirmed"}
+
+    with pytest.raises(ValueError, match="hosting publisher"):
+        service.confirm_evidence(
+            story_id,
+            evidence_ids[1],
+            "Reporting",
+            {claim_id: "supports"},
+            provenance_type="original",
+            origin_name="Reuters",
+            origin_url="https://unrelated.example.com/report",
+        )
 
 
 def test_manual_evidence_service_rejects_invalid_transitions_and_reuses_urls(tmp_path) -> None:
@@ -202,14 +289,28 @@ def test_manual_evidence_service_rejects_invalid_transitions_and_reuses_urls(tmp
     with pytest.raises(ValueError, match="Map at least one claim"):
         service.confirm_evidence(story_id, evidence_id, "Reporting", {})
     with pytest.raises(ValueError, match="Unsupported claim relationship"):
-        service.confirm_evidence(story_id, evidence_id, "Reporting", {claim_id: "copies"})
+        service.confirm_evidence(
+            story_id,
+            evidence_id,
+            "Reporting",
+            {claim_id: "copies"},
+            provenance_type="original",
+            origin_name="Example",
+        )
     other_claim = int(
         database.one(
             "SELECT id FROM claim WHERE story_id != ? ORDER BY id LIMIT 1", (story_id,)
         )["id"]
     )
     with pytest.raises(ValueError, match="crossed the story boundary"):
-        service.confirm_evidence(story_id, evidence_id, "Reporting", {other_claim: "supports"})
+        service.confirm_evidence(
+            story_id,
+            evidence_id,
+            "Reporting",
+            {other_claim: "supports"},
+            provenance_type="original",
+            origin_name="Example",
+        )
 
     service.confirm_evidence(story_id, evidence_id, "Discovery", {})
     assert service.queue_evidence_inspection(
@@ -336,6 +437,13 @@ def test_url_normalization_publisher_grouping_and_page_extraction() -> None:
         publisher_key("https://\ud800.example/news")
     assert publisher_key("https://briefs.news.example.com/item") == "example.com"
     assert publisher_key("https://93.184.216.34/item") == "93.184.216.34"
+    assert publisher_display_name("https://tomshardware.com/news") == "Tomshardware"
+    assert normalize_publisher_name("  Axios  ") == "Axios"
+    assert publisher_identity_key("AXIOS") == "name:axios"
+    assert normalize_optional_public_https_url("") is None
+    with pytest.raises(ValueError, match="original reporting publication"):
+        normalize_publisher_name("  ")
+    assert publisher_identity_key("新聞").startswith("name:u-")
 
     plain = extract_page(b"  public   release notes  ", "text/plain")
     assert plain.passage == "public release notes"
@@ -353,6 +461,30 @@ def test_url_normalization_publisher_grouping_and_page_extraction() -> None:
     assert page.passage == "A & B Visible details"
     assert page.published_at is None
     assert page.language == "en-US"
+
+    attributed = extract_page(
+        b"<html><head><title>Policy changes, Axios reports</title>"
+        b"<meta property='og:site_name' content='Yahoo News'></head>"
+        b"<body>Details</body></html>",
+        "text/html",
+    )
+    assert attributed.hosting_publisher_name == "Yahoo News"
+    assert attributed.proposed_origin_name == "Axios"
+    assert attributed.proposed_provenance_type == "cites"
+
+    jsonld = extract_page(
+        b"<html><head><title>Republished report</title>"
+        b"<script type='application/ld+json'>{bad json</script>"
+        b"<script type='application/ld+json'>"
+        b'{"@type":"NewsArticle","publisher":{"name":"Yahoo News"},'
+        b'"isBasedOn":{"publisher":{"name":"Axios"},"url":"https://axios.example/original"}}'
+        b"</script></head><body>Details</body></html>",
+        "text/html",
+    )
+    assert jsonld.hosting_publisher_name == "Yahoo News"
+    assert jsonld.proposed_origin_name == "Axios"
+    assert jsonld.proposed_origin_url == "https://axios.example/original"
+    assert jsonld.proposed_provenance_type == "syndicated"
 
 
 def test_enricher_fails_stale_redirected_and_empty_evidence_safely(tmp_path) -> None:
@@ -447,7 +579,12 @@ def test_qualification_creation_claim_states_and_repeat_invalidation(tmp_path) -
     )
     contradictory_id = _inspect(database, service, story_id, "https://factcheck.example.net/item")
     service.confirm_evidence(
-        story_id, contradictory_id, "Reporting", {claim_id: "contradicts"}
+        story_id,
+        contradictory_id,
+        "Reporting",
+        {claim_id: "contradicts"},
+        provenance_type="original",
+        origin_name="Fact Check",
     )
     assert database.one("SELECT status FROM claim WHERE id = ?", (claim_id,)) == {
         "status": "disputed"
@@ -490,7 +627,7 @@ def test_web_routes_fail_closed_and_show_gate_reasons(tmp_path) -> None:
 
     rendered = client.get(f"/stories/{story_id}")
     assert b"Evidence and qualification" in rendered.data
-    assert b"Qualification remains locked until the evidence gate passes" in rendered.data
+    assert b"Qualification remains locked until one Event source or two independent original reporting publishers are confirmed" in rendered.data
     assert b"Investigate evidence" in rendered.data
 
     response = client.post(
@@ -573,3 +710,46 @@ def test_web_evidence_routes_complete_qualification_lifecycle(tmp_path) -> None:
     assert database.one("SELECT status FROM evidence_source WHERE id = ?", (evidence_id,)) == {
         "status": "excluded"
     }
+
+
+def test_web_reporting_confirmation_records_server_derived_origin_identity(tmp_path) -> None:
+    app = create_app(
+        data_root=tmp_path / "wire-data",
+        auth_required=False,
+        test_config={"TESTING": True, "SECRET_KEY": "test-secret"},
+    )
+    database = app.config["DATABASE"]
+    seed_demo_data(database)
+    client = app.test_client()
+    client.get("/")
+    with client.session_transaction() as session:
+        token = session["csrf_token"]
+    story_id = "story-demo-watch-003"
+    claim_id = int(database.one("SELECT id FROM claim WHERE story_id = ?", (story_id,))["id"])
+    evidence_id = _inspect(database, app.config["DASHBOARD_SERVICE"], story_id, "https://news.example.org/report")
+
+    response = client.post(
+        f"/stories/{story_id}/evidence/{evidence_id}/confirm",
+        data={
+            "csrf_token": token,
+            "role": "Reporting",
+            f"claim_{claim_id}": "attributes",
+            "provenance_type": "cites",
+            "origin_name": "Axios",
+            "origin_key": "forged:publisher",
+            "origin_url": "",
+            "reason": "The hosted report explicitly credits Axios.",
+        },
+    )
+    assert response.status_code == 303
+    assert database.one(
+        "SELECT reporting_origin_name, reporting_origin_key, origin_status FROM evidence_source WHERE id = ?",
+        (evidence_id,),
+    ) == {
+        "reporting_origin_name": "Axios",
+        "reporting_origin_key": "name:axios",
+        "origin_status": "confirmed",
+    }
+    rendered = client.get(f"/stories/{story_id}")
+    assert b"Original reporting: Axios" in rendered.data
+    assert b"Reports or attributes the claim" in rendered.data

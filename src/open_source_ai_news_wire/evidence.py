@@ -6,6 +6,7 @@ import hashlib
 import html
 import json
 import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -21,6 +22,7 @@ from .storage import Database
 
 ALLOWED_ROLES = {"Event", "Reporting", "Discovery"}
 ALLOWED_RELATIONSHIPS = {"supports", "attributes", "contradicts", "context"}
+ALLOWED_PROVENANCE_TYPES = {"original", "syndicated", "cites", "unknown"}
 
 
 def utc_now() -> str:
@@ -54,12 +56,43 @@ def publisher_key(value: str) -> str:
     return ".".join(labels[-2:])
 
 
+def publisher_display_name(value: str) -> str:
+    """Return a bounded human label when page metadata does not name the host."""
+    key = publisher_key(value)
+    label = key.split(".", 1)[0].replace("-", " ").strip()
+    return label.title()[:120] or key[:120]
+
+
+def normalize_publisher_name(value: str) -> str:
+    name = " ".join(value.split()).strip(" ,;:-")[:120]
+    if not name or any(ord(character) < 32 for character in name):
+        raise ValueError("Enter the original reporting publication")
+    return name
+
+
+def publisher_identity_key(value: str) -> str:
+    name = normalize_publisher_name(value)
+    normalized = unicodedata.normalize("NFKC", name).casefold()
+    collapsed = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
+    if not collapsed:
+        collapsed = "u-" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+    return f"name:{collapsed[:100]}"
+
+
+def normalize_optional_public_https_url(value: str) -> str | None:
+    return normalize_public_https_url(value) if value.strip() else None
+
+
 @dataclass(frozen=True, slots=True)
 class ExtractedPage:
     title: str
     passage: str
     published_at: str | None
     language: str
+    hosting_publisher_name: str
+    proposed_origin_name: str
+    proposed_origin_url: str | None
+    proposed_provenance_type: str
 
 
 class _PageParser(HTMLParser):
@@ -69,8 +102,11 @@ class _PageParser(HTMLParser):
         self.text_parts: list[str] = []
         self.description = ""
         self.published = ""
+        self.site_name = ""
         self.language = "und"
         self._in_title = False
+        self._in_json_ld = False
+        self._json_ld_parts: list[str] = []
         self._ignored_depth = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -80,6 +116,8 @@ class _PageParser(HTMLParser):
             self.language = attributes["lang"][:16]
         if lowered == "title":
             self._in_title = True
+        if lowered == "script" and attributes.get("type", "").lower() == "application/ld+json":
+            self._in_json_ld = True
         if lowered in {"script", "style", "noscript", "svg"}:
             self._ignored_depth += 1
         if lowered == "meta":
@@ -89,11 +127,15 @@ class _PageParser(HTMLParser):
                 self.description = content
             if key in {"article:published_time", "date", "datepublished", "publishdate"} and not self.published:
                 self.published = content
+            if key in {"og:site_name", "application-name"} and not self.site_name:
+                self.site_name = content
 
     def handle_endtag(self, tag: str) -> None:
         lowered = tag.lower()
         if lowered == "title":
             self._in_title = False
+        if lowered == "script" and self._in_json_ld:
+            self._in_json_ld = False
         if lowered in {"script", "style", "noscript", "svg"} and self._ignored_depth:
             self._ignored_depth -= 1
 
@@ -103,8 +145,74 @@ class _PageParser(HTMLParser):
             return
         if self._in_title:
             self.title_parts.append(clean)
+        if self._in_json_ld:
+            self._json_ld_parts.append(data)
         if not self._ignored_depth:
             self.text_parts.append(clean)
+
+
+def _jsonld_publisher_metadata(blobs: list[str]) -> tuple[str, str, str | None, str]:
+    hosting = ""
+    origin = ""
+    origin_url: str | None = None
+    provenance = "unknown"
+
+    def named_source(value: Any) -> tuple[str, str | None]:
+        if isinstance(value, str):
+            return "", value if value.startswith("https://") else None
+        if not isinstance(value, dict):
+            return "", None
+        organization = value.get("publisher") or value.get("sourceOrganization") or value
+        if not isinstance(organization, dict):
+            return "", None
+        name = str(organization.get("name") or value.get("name") or "")
+        candidate_url = value.get("url") or value.get("@id") or organization.get("url")
+        url = candidate_url if isinstance(candidate_url, str) and candidate_url.startswith("https://") else None
+        return name, url
+
+    for blob in blobs[:12]:
+        try:
+            decoded = json.loads(blob)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        roots = decoded if isinstance(decoded, list) else [decoded]
+        if isinstance(decoded, dict) and isinstance(decoded.get("@graph"), list):
+            roots.extend(decoded["@graph"])
+        for root in roots:
+            if not isinstance(root, dict):
+                continue
+            if not hosting:
+                hosting, _ = named_source(root.get("publisher"))
+            based_on = root.get("isBasedOn") or root.get("isBasedOnUrl") or root.get("citation")
+            candidates = based_on if isinstance(based_on, list) else [based_on]
+            for candidate in candidates:
+                candidate_name, candidate_url = named_source(candidate)
+                origin = origin or candidate_name
+                origin_url = origin_url or candidate_url
+                if origin or origin_url:
+                    provenance = "syndicated"
+            if not origin:
+                origin, origin_url = named_source(root.get("sourceOrganization"))
+                if origin:
+                    provenance = "syndicated"
+    return hosting, origin, origin_url, provenance
+
+
+def _text_origin_suggestion(value: str) -> str:
+    patterns = (
+        r"\baccording to\s+([A-Z][A-Za-z0-9&.'-]*(?:\s+[A-Z][A-Za-z0-9&.'-]*){0,4})",
+        r"\breported by\s+([A-Z][A-Za-z0-9&.'-]*(?:\s+[A-Z][A-Za-z0-9&.'-]*){0,4})",
+        r"\bvia\s+([A-Z][A-Za-z0-9&.'-]*(?:\s+[A-Z][A-Za-z0-9&.'-]*){0,4})",
+        r",\s*([A-Z][A-Za-z0-9&.'-]{1,50})\s+reports?\b",
+        r"\b([A-Z][A-Za-z0-9&.'-]{1,50})\s+reports?\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, value[:5000])
+        if match:
+            candidate = " ".join(match.group(1).split()).strip(" ,.;:-")
+            if 2 <= len(candidate) <= 120:
+                return candidate
+    return ""
 
 
 def extract_page(payload: bytes, content_type: str) -> ExtractedPage:
@@ -114,7 +222,7 @@ def extract_page(payload: bytes, content_type: str) -> ExtractedPage:
         raise ValueError("Evidence page is not valid UTF-8 text") from error
     if "html" not in content_type.lower():
         passage = " ".join(text.split())[:4000]
-        return ExtractedPage("", passage, None, "und")
+        return ExtractedPage("", passage, None, "und", "", "", None, "unknown")
     parser = _PageParser()
     parser.feed(text)
     title = html.unescape(" ".join(parser.title_parts).strip())[:500]
@@ -126,7 +234,21 @@ def extract_page(payload: bytes, content_type: str) -> ExtractedPage:
             published = parse_public_time(parser.published, utc_now())
         except ValueError:
             published = None
-    return ExtractedPage(title, passage, published, parser.language)
+    hosting, origin, origin_url, provenance = _jsonld_publisher_metadata(parser._json_ld_parts)
+    if not origin:
+        origin = _text_origin_suggestion(f"{title}. {passage}")
+        if origin:
+            provenance = "cites"
+    return ExtractedPage(
+        title,
+        passage,
+        published,
+        parser.language,
+        " ".join((parser.site_name or hosting).split())[:120],
+        " ".join(origin.split())[:120],
+        origin_url,
+        provenance,
+    )
 
 
 ClientFactory = Callable[[str], SafeHttpClient]
@@ -183,6 +305,21 @@ class EvidenceEnricher:
             extracted = extract_page(fetched.body, content_type)
             if not extracted.title and not extracted.passage:
                 raise ValueError("Evidence page did not contain usable public text")
+            hosting_name = extracted.hosting_publisher_name or publisher_display_name(final)
+            proposed_origin_name = extracted.proposed_origin_name or hosting_name
+            proposed_origin_url = normalize_optional_public_https_url(
+                extracted.proposed_origin_url or ""
+            )
+            proposed_provenance = extracted.proposed_provenance_type
+            if (
+                publisher_identity_key(proposed_origin_name)
+                == publisher_identity_key(hosting_name)
+                or (
+                    proposed_origin_url
+                    and publisher_key(proposed_origin_url) == publisher_key(final)
+                )
+            ):
+                proposed_provenance = "original"
             stored = ContentStore(self.database.paths.content).put(
                 fetched.body, category="primary-snapshots"
             )
@@ -199,13 +336,25 @@ class EvidenceEnricher:
                 connection.execute(
                     """
                     UPDATE evidence_source SET final_url = ?, canonical_url = ?, publisher_key = ?,
-                        title = ?, passage = ?, published_at = ?, language = ?, proposed_role = ?,
+                        title = ?, passage = ?, published_at = ?, language = ?,
+                        proposed_role = COALESCE(proposed_role, ?),
+                        hosting_publisher_name = ?, proposed_origin_name = ?,
+                        proposed_origin_url = ?, proposed_provenance_type = ?,
+                        origin_status = CASE
+                            WHEN COALESCE(proposed_role, ?) = 'Reporting' THEN 'suggested'
+                            ELSE 'not_applicable'
+                        END,
                         status = 'fetched', content_digest = ?, content_type = ?, fetched_at = ?,
                         error_class = NULL, updated_at = ? WHERE id = ?
                     """,
                     (
                         final, final, publisher_key(final), extracted.title or final,
                         extracted.passage, extracted.published_at, extracted.language,
+                        "Event" if evidence["acquisition_method"] == "linked" else "Reporting",
+                        hosting_name,
+                        proposed_origin_name,
+                        proposed_origin_url,
+                        proposed_provenance,
                         "Event" if evidence["acquisition_method"] == "linked" else "Reporting",
                         stored.digest, content_type, now, now, evidence_id,
                     ),
@@ -241,36 +390,33 @@ class EvidenceEnricher:
             )
 
 
-def _legacy_evidence(database: Database, story_id: str) -> tuple[bool, set[str]]:
+def _legacy_evidence(database: Database, story_id: str) -> bool:
     rows = database.query(
         "SELECT source_role, canonical_url, url FROM source_item WHERE story_id = ?",
         (story_id,),
     )
     has_event = any(row["source_role"] == "Event" for row in rows)
-    reporting = {
-        publisher_key(str(row.get("canonical_url") or row["url"]))
-        for row in rows
-        if row["source_role"] == "Reporting"
-    }
-    return has_event, reporting
+    return has_event
 
 
 def qualification_state(database: Database, story_id: str) -> dict[str, Any]:
     candidate = database.one("SELECT * FROM candidate WHERE story_id = ?", (story_id,)) or {}
-    legacy_event, reporting = _legacy_evidence(database, story_id)
+    legacy_event = _legacy_evidence(database, story_id)
     confirmed = database.query(
         """
-        SELECT confirmed_role, publisher_key FROM evidence_source
+        SELECT confirmed_role, reporting_origin_key, origin_status FROM evidence_source
         WHERE story_id = ? AND status = 'confirmed'
         """,
         (story_id,),
     )
     has_event = legacy_event or any(row["confirmed_role"] == "Event" for row in confirmed)
-    reporting.update(
-        str(row["publisher_key"])
+    reporting = {
+        str(row["reporting_origin_key"])
         for row in confirmed
         if row["confirmed_role"] == "Reporting"
-    )
+        and row["origin_status"] == "confirmed"
+        and row["reporting_origin_key"]
+    }
     evidence_gate = has_event or len(reporting) >= 2
     automated_importance = bool(candidate.get("importance_gate"))
     importance_override = bool(candidate.get("importance_override"))
@@ -279,6 +425,7 @@ def qualification_state(database: Database, story_id: str) -> dict[str, Any]:
         "evidence_gate": evidence_gate,
         "event_count": int(has_event),
         "reporting_count": len(reporting),
+        "reporting_needed": max(0, 2 - len(reporting)),
         "automated_importance": automated_importance,
         "importance_override": importance_override,
         "importance_override_reason": candidate.get("importance_override_reason", ""),
@@ -368,7 +515,8 @@ def recalculate_claim_statuses(database: Database, story_id: str) -> None:
             ).fetchall()
             manual = connection.execute(
                 """
-                SELECT es.confirmed_role AS source_role, es.publisher_key, esc.relationship
+                SELECT es.confirmed_role AS source_role, es.reporting_origin_key,
+                       es.origin_status, esc.relationship
                 FROM evidence_source_claim esc JOIN evidence_source es ON es.id = esc.evidence_source_id
                 WHERE esc.claim_id = ? AND es.status = 'confirmed'
                 """,
@@ -386,15 +534,12 @@ def recalculate_claim_statuses(database: Database, story_id: str) -> None:
                     for row in manual
                 )
                 reporting_publishers = {
-                    publisher_key(str(row["canonical_url"] or row["url"]))
-                    for row in legacy
-                    if row["source_role"] == "Reporting" and row["relationship"] == "supports"
-                }
-                reporting_publishers.update(
-                    str(row["publisher_key"])
+                    str(row["reporting_origin_key"])
                     for row in manual
                     if row["source_role"] == "Reporting" and row["relationship"] == "supports"
-                )
+                    and row["origin_status"] == "confirmed"
+                    and row["reporting_origin_key"]
+                }
                 attributed = event_attribution or any(
                     row["relationship"] == "attributes" for row in manual
                 )
