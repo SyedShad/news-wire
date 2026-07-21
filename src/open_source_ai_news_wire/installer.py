@@ -9,11 +9,11 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import __version__
 from .config import RuntimePaths
 from .storage import SCHEMA_VERSION
 
@@ -76,11 +76,27 @@ class LocalInstaller:
                 digest.update(path.read_bytes())
         return digest.hexdigest()[:12]
 
+    def _source_version(self) -> str:
+        project_file = self.source_root / "pyproject.toml"
+        try:
+            project = tomllib.loads(project_file.read_text(encoding="utf-8"))
+            version = project["project"]["version"]
+        except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError) as error:
+            raise InstallationError(
+                "The incoming source does not declare a valid project version"
+            ) from error
+        if not isinstance(version, str) or not version.strip():
+            raise InstallationError(
+                "The incoming source does not declare a valid project version"
+            )
+        return version.strip()
+
     def install(self) -> InstalledRelease:
         uv = shutil.which("uv")
         if not uv:
             raise InstallationError("uv is required to build the pinned local release")
-        release_id = f"{__version__}-{self._source_digest()}"
+        source_version = self._source_version()
+        release_id = f"{source_version}-{self._source_digest()}"
         destination = self.releases / release_id
         self.releases.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.binary_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -111,7 +127,7 @@ class LocalInstaller:
                     raise InstallationError("Installed release did not create its CLI launcher")
                 manifest = {
                     "release_id": release_id,
-                    "version": __version__,
+                    "version": source_version,
                     "schema_version": SCHEMA_VERSION,
                     "python": "3.12.13",
                     "runtime_root": str(self.runtime_paths.root),
@@ -137,7 +153,9 @@ class LocalInstaller:
             self.source_root,
         )
         self._switch(destination)
-        return InstalledRelease(release_id, destination, True, __version__, SCHEMA_VERSION)
+        return InstalledRelease(
+            release_id, destination, True, source_version, SCHEMA_VERSION
+        )
 
     def list_releases(self) -> list[InstalledRelease]:
         active = self.current.resolve() if self.current.exists() else None

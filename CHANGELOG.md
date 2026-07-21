@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - LaunchAgent draft generation now resolves the ChatGPT-bundled Codex executable without relying on the interactive shell `PATH`.
 - Missing or shallow Codex paths fail safely instead of resolving to `/` and raising `IndexError`.
 - Exact-item atomic claiming prevents immediate and scheduled workers from generating the same approved draft twice.
+- Immutable upgrades take their release label from the incoming source, so an older launcher cannot mislabel a newer package.
 
 ## [0.3.1] - 2026-07-17
 

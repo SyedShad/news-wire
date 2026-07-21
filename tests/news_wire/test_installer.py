@@ -74,6 +74,28 @@ def test_rollback_rejects_schema_incompatible_release(tmp_path: Path) -> None:
         installer.rollback("old")
 
 
+def test_installer_labels_release_from_incoming_source_not_running_package(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "incoming"
+    source.mkdir()
+    (source / "pyproject.toml").write_text(
+        '[project]\nname = "incoming-wire"\nversion = "9.8.7"\n',
+        encoding="utf-8",
+    )
+    (source / "uv.lock").write_text("", encoding="utf-8")
+    database = Database(resolve_runtime_paths(tmp_path / "runtime"))
+    database.initialize()
+    installer = LocalInstaller(
+        source,
+        database.paths,
+        application_root=tmp_path / "app",
+        binary_root=tmp_path / "bin",
+    )
+
+    assert installer._source_version() == "9.8.7"
+
+
 def test_installer_rebuilds_incomplete_content_addressed_release(tmp_path: Path) -> None:
     source = Path(__file__).parents[2]
     database = Database(resolve_runtime_paths(tmp_path / "runtime"))
