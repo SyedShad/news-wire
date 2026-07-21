@@ -2,7 +2,7 @@
 
 ## Evidence
 
-- Promote a signal only with one identifiable primary/Event source or two genuinely independent Reporting sources.
+- Promote a signal only with one identifiable primary/Event source or two genuinely independent original Reporting publishers. Syndicated copies and articles citing the same original report count once.
 - Treat an official announcement as proof that the announcement was made, not independent proof of performance, safety, comparison, or impact claims inside it.
 - Treat aggregators, newsletters, link feeds, public social posts, and momentum as discovery unless they contribute original evidence.
 - Keep high-potential but unverified signals as visibly labelled watches. Do not draft them.
@@ -26,6 +26,8 @@ Use a compact, scannable, evidence-forward structure:
 4. What is verified, attributed, or uncertain
 5. Neutral explanation of why it matters
 6. Grouped evidence links
+
+Name publications naturally in prose and link the first meaningful mention with portable Markdown. Avoid mechanical phrases such as “Reporting attributes” when a confirmed publisher is available. If an original article URL is unavailable, identify the accessible copy as `Original Publisher, via Host`.
 
 Default to a Neutral News Brief. Add an Open-Source Lens section only when:
 

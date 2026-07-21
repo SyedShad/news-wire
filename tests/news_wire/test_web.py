@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -332,7 +333,7 @@ def test_draft_exposes_copy_to_clipboard_output(client) -> None:
 def test_exports_are_sanitized_and_self_contained(client) -> None:
     evidence = client.get("/stories/story-demo-runtime-001/evidence.json")
     assert evidence.status_code == 200
-    assert evidence.json["schema_version"] == 1
+    assert evidence.json["schema_version"] == 2
     assert "attachment" in evidence.headers["Content-Disposition"]
 
     markdown = client.get("/drafts/1/export.md")
@@ -344,6 +345,50 @@ def test_exports_are_sanitized_and_self_contained(client) -> None:
     assert document.status_code == 200
     assert b"<script" not in document.data.lower()
     assert b"http://" not in document.data.lower()
+
+
+def test_confirmed_markdown_links_render_safely_in_exports_and_revisions(app: Flask, client) -> None:
+    source_url = "https://news.yahoo.example/report"
+    body = (
+        f"According to [Axios, via Yahoo](<{source_url}>), the policy proposal is under discussion.\n\n"
+        "No final order has been issued."
+    )
+    app.config["DATABASE"].execute(
+        "UPDATE draft SET body = ?, sources_json = ? WHERE id = 1",
+        (
+            body,
+            json.dumps(
+                [
+                    {
+                        "display_label": "Axios, via Yahoo",
+                        "title": "Hosted Axios report",
+                        "url": source_url,
+                        "role": "Reporting",
+                    }
+                ]
+            ),
+        ),
+    )
+
+    markdown = client.get("/drafts/1/export.md")
+    assert b"[Axios, via Yahoo](<https://news.yahoo.example/report>)" in markdown.data
+    document = client.get("/drafts/1/export.html")
+    assert b'<a href="https://news.yahoo.example/report"' in document.data
+    assert b"[Axios, via Yahoo]" not in document.data
+
+    token = csrf(client)
+    rejected = client.post(
+        "/drafts/1/save",
+        data={
+            "csrf_token": token,
+            "headline": "Safe headline",
+            "metadata": "Fresh",
+            "body": "According to [Unknown](<https://evil.example/report>), this happened.",
+            "lens": "",
+        },
+    )
+    assert rejected.status_code == 303
+    assert app.config["DATABASE"].one("SELECT COUNT(*) AS count FROM draft") == {"count": 1}
 
 
 def test_purge_confirmation_is_deliberate(app: Flask, client) -> None:

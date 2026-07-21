@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
+import re
 import secrets
 import shutil
 import socketserver
@@ -19,8 +21,16 @@ from datetime import UTC, datetime, timedelta
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
+from .evidence import publisher_display_name
 from .storage import Database
+
+
+PROMPT_VERSION = "v2"
+CITATION_TOKEN_RE = re.compile(r"\[\[source:([A-Za-z0-9:_-]{1,120})\]\]")
+RAW_MARKDOWN_LINK_RE = re.compile(r"\[[^\]\n]+\]\([^\)\n]+\)")
+RAW_HTML_RE = re.compile(r"</?[A-Za-z][^>]*>")
 
 
 class AssistanceError(RuntimeError):
@@ -191,6 +201,12 @@ class CodexInvoker:
             prompt = (
                 "Process only the supplied Open Source AI News Wire packet. "
                 "Do not add facts, URLs, or claims. Do not access files or networks for evidence. "
+                "For a draft, write a compact two-paragraph factual brief: first say what happened, "
+                "then give context and clearly state remaining uncertainty. Attribute claims naturally "
+                "to named publications. Never write 'Reporting attributes' or 'the reporting says'. "
+                "On the first meaningful source mention, insert only its supplied citation_token; "
+                "do not write raw URLs, Markdown links, HTML, or tokens for Discovery-only sources. "
+                "Keep reporting neutral unless the packet explicitly authorizes a separate lens. "
                 "Return exactly one JSON object matching the supplied schema.\nPACKET:\n"
                 + packet_text
             )
@@ -255,13 +271,143 @@ def validate_result(packet: dict[str, Any], result: dict[str, Any]) -> None:
             raise AssistanceError("A draft requires a headline, factual brief, and supported claims")
         if packet["operation"] == "draft_neutral" and result["lens"].strip():
             raise AssistanceError("Neutral draft returned an unauthorized open-source lens")
+        _validate_generated_citations(packet, result)
+
+
+def _safe_https_url(value: str) -> str:
+    try:
+        parsed = urlsplit(value.strip())
+        safe = (
+            parsed.scheme == "https"
+            and bool(parsed.hostname)
+            and not parsed.username
+            and not parsed.password
+            and parsed.port in {None, 443}
+        )
+    except ValueError:
+        return ""
+    return value.strip() if safe else ""
+
+
+def _markdown_label(value: str) -> str:
+    return " ".join(value.split()).replace("[", "\\[").replace("]", "\\]")[:160]
+
+
+def _validate_generated_citations(packet: dict[str, Any], result: dict[str, Any]) -> None:
+    allowed = {
+        str(source["evidence_key"]): source
+        for source in packet.get("sources", [])
+        if source.get("citation_allowed")
+        and _safe_https_url(str(source.get("citation_url") or ""))
+    }
+    headline = str(result["headline"])
+    if CITATION_TOKEN_RE.search(headline) or RAW_MARKDOWN_LINK_RE.search(headline) or RAW_HTML_RE.search(headline):
+        raise AssistanceError("Draft headlines cannot contain citation markup or HTML")
+    all_tokens: list[str] = []
+    for field in ("factual_brief", "lens"):
+        value = str(result[field])
+        lowered = value.casefold()
+        if "reporting attributes" in lowered or "the reporting says" in lowered:
+            raise AssistanceError("Draft uses artificial unnamed reporting attribution")
+        if RAW_HTML_RE.search(value):
+            raise AssistanceError("Draft output contains unsafe HTML")
+        if re.search(r"https?://", value, re.I) or RAW_MARKDOWN_LINK_RE.search(value):
+            raise AssistanceError("Draft output must use supplied citation tokens instead of URLs")
+        tokens = CITATION_TOKEN_RE.findall(value)
+        if "[[source:" in CITATION_TOKEN_RE.sub("", value):
+            raise AssistanceError("Draft output contains a malformed citation token")
+        if any(token not in allowed for token in tokens):
+            raise AssistanceError("Draft cites a source that is not confirmed for attribution")
+        all_tokens.extend(tokens)
+    if allowed and not CITATION_TOKEN_RE.findall(str(result["factual_brief"])):
+        raise AssistanceError("Draft must attribute its factual brief to a confirmed source")
+    if len(all_tokens) != len(set(all_tokens)):
+        raise AssistanceError("Draft repeats an inline source citation")
+
+
+def render_citation_tokens(packet: dict[str, Any], value: str) -> str:
+    allowed = {
+        str(source["evidence_key"]): source
+        for source in packet.get("sources", [])
+        if source.get("citation_allowed")
+    }
+
+    def replace(match: re.Match[str]) -> str:
+        source = allowed.get(match.group(1))
+        if not source:
+            raise AssistanceError("Draft cites a source that is not confirmed for attribution")
+        label = _markdown_label(str(source.get("citation_label") or "Source"))
+        url = _safe_https_url(str(source.get("citation_url") or ""))
+        if not label or not url:
+            raise AssistanceError("Draft citation metadata is unsafe or incomplete")
+        return f"[{label}](<{url.replace('<', '%3C').replace('>', '%3E')}>)"
+
+    return CITATION_TOKEN_RE.sub(replace, value)
+
+
+def _citation_fields(source: dict[str, Any]) -> dict[str, Any]:
+    role = str(source.get("source_role") or "")
+    url = _safe_https_url(str(source.get("url") or ""))
+    hosting = " ".join(
+        str(source.get("hosting_publisher_name") or source.get("source_name") or "").split()
+    )[:120]
+    if hosting and hosting == str(source.get("publisher_key") or "") and url:
+        hosting = publisher_display_name(url)
+    origin = " ".join(str(source.get("reporting_origin_name") or "").split())[:120]
+    origin_url = _safe_https_url(str(source.get("reporting_origin_url") or ""))
+    provenance = str(source.get("provenance_type") or "unknown")
+    origin_status = str(source.get("origin_status") or "not_applicable")
+    if role == "Reporting" and origin_status == "confirmed" and origin:
+        citation_url = origin_url or url
+        if origin_url or provenance == "original" or origin.casefold() == hosting.casefold():
+            label = origin
+        else:
+            label = f"{origin}, via {hosting or 'the accessible publisher'}"
+        allowed = bool(citation_url)
+        dedupe_key = f"reporting:{source.get('reporting_origin_key') or origin.casefold()}"
+    elif role == "Event":
+        label = hosting or str(source.get("source_name") or source.get("title") or "Event source")
+        citation_url = url
+        allowed = bool(citation_url)
+        dedupe_key = f"event:{source.get('publisher_key') or citation_url}"
+    else:
+        label = str(source.get("source_name") or source.get("title") or hosting or "Source")
+        citation_url = url
+        allowed = False
+        dedupe_key = f"discovery:{citation_url or source.get('evidence_key')}"
+    signature_payload = {
+        "role": role,
+        "url": url,
+        "origin": origin,
+        "origin_url": origin_url,
+        "origin_status": origin_status,
+        "provenance": provenance,
+    }
+    return {
+        "hosting_publisher_name": hosting,
+        "citation_label": label[:160],
+        "citation_url": citation_url,
+        "citation_allowed": allowed,
+        "dedupe_key": dedupe_key,
+        "citation_token": f"[[source:{source['evidence_key']}]]" if allowed else "",
+        "evidence_signature": hashlib.sha256(
+            json.dumps(signature_payload, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+    }
 
 
 def _story_sources(database: Database, story_id: str) -> list[dict[str, Any]]:
     sources = database.query(
         """
-        SELECT 'registry:' || id AS evidence_key, source_role, title, url,
-               published_at, language, verification_status, passage
+        SELECT 'registry:' || id AS evidence_key, source_name, source_role, title, url,
+               published_at, language, verification_status, passage,
+               COALESCE(canonical_url, url) AS canonical_url,
+               '' AS reporting_origin_name, NULL AS reporting_origin_key,
+               NULL AS reporting_origin_url,
+               CASE source_role WHEN 'Event' THEN 'original' ELSE 'unknown' END AS provenance_type,
+               CASE source_role WHEN 'Event' THEN 'not_applicable' ELSE 'unconfirmed' END AS origin_status,
+               source_name AS hosting_publisher_name,
+               NULL AS publisher_key
         FROM source_item WHERE story_id = ? ORDER BY published_at, id
         """,
         (story_id,),
@@ -273,7 +419,10 @@ def _story_sources(database: Database, story_id: str) -> list[dict[str, Any]]:
                    title, final_url AS url, published_at, language,
                    CASE confirmed_role WHEN 'Event' THEN 'supports'
                        WHEN 'Reporting' THEN 'supports' ELSE 'trace' END AS verification_status,
-                   passage
+                   passage, final_url AS canonical_url, hosting_publisher_name,
+                   reporting_origin_name, reporting_origin_key, reporting_origin_url,
+                   provenance_type, origin_status, publisher_key,
+                   hosting_publisher_name AS source_name
             FROM evidence_source
             WHERE story_id = ? AND status = 'confirmed'
             ORDER BY COALESCE(published_at, fetched_at), id
@@ -281,7 +430,66 @@ def _story_sources(database: Database, story_id: str) -> list[dict[str, Any]]:
             (story_id,),
         )
     )
+    for source in sources:
+        source["claim_relationships"] = database.query(
+            """
+            SELECT esc.claim_id, esc.relationship
+            FROM evidence_source_claim esc
+            WHERE esc.evidence_source_id = ?
+            ORDER BY esc.claim_id
+            """,
+            (int(str(source["evidence_key"]).partition(":")[2]),),
+        ) if str(source["evidence_key"]).startswith("enriched:") else database.query(
+            """
+            SELECT el.claim_id, el.relationship
+            FROM evidence_link el
+            WHERE el.source_item_id = ?
+            ORDER BY el.claim_id
+            """,
+            (int(str(source["evidence_key"]).partition(":")[2]),),
+        )
+        source.update(_citation_fields(source))
     return sources
+
+
+def _draft_source_rows(packet: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    qualifying_urls = {
+        str(source.get("citation_url") or "")
+        for source in packet.get("sources", [])
+        if source.get("citation_allowed")
+    }
+    ordered = sorted(
+        packet.get("sources", []),
+        key=lambda source: (not bool(source.get("citation_allowed")), str(source.get("evidence_key"))),
+    )
+    for source in ordered:
+        source_url = str(source.get("citation_url") or source.get("url") or "")
+        if source.get("source_role") == "Discovery" and source_url in qualifying_urls:
+            continue
+        key = str(source.get("dedupe_key") or source.get("evidence_key"))
+        if key in seen_keys:
+            continue
+        safe_url = _safe_https_url(source_url)
+        label = str(
+            source.get("citation_label")
+            if source.get("citation_allowed")
+            else source.get("title") or source.get("source_name") or "Source"
+        )
+        rows.append(
+            {
+                "display_label": " ".join(label.split())[:160],
+                "title": " ".join(str(source.get("title") or label).split())[:500],
+                "url": safe_url,
+                "role": str(source.get("source_role") or "")[:80],
+                "hosting_publisher_name": str(source.get("hosting_publisher_name") or "")[:120],
+                "reporting_origin_name": str(source.get("reporting_origin_name") or "")[:120],
+                "provenance_type": str(source.get("provenance_type") or "unknown")[:20],
+            }
+        )
+        seen_keys.add(key)
+    return rows
 
 
 def build_packet(database: Database, work_item_id: int) -> dict[str, Any]:
@@ -306,7 +514,7 @@ def build_packet(database: Database, work_item_id: int) -> dict[str, Any]:
     if operation.startswith("draft_") and story["status"] != "approved":
         raise AssistanceError("Draft generation requires an approved story")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": operation,
         "story": {
             "id": story["id"],
@@ -326,6 +534,9 @@ def build_packet(database: Database, work_item_id: int) -> dict[str, Any]:
             "neutral_first": True,
             "lens_separate": operation == "draft_lens",
             "unsupported_claims_prohibited": True,
+            "natural_named_attribution": True,
+            "citation_token_format": "[[source:<evidence_key>]]",
+            "discovery_sources_cannot_support_claims": True,
         },
     }
 
@@ -350,12 +561,20 @@ def _revalidate_approval(
             invalid = True
             break
     current_sources = {
-        str(row["evidence_key"]): str(row["verification_status"])
+        str(row["evidence_key"]): (
+            str(row["verification_status"]), str(row.get("evidence_signature") or "")
+        )
         for row in _story_sources(database, str(story["id"]))
     }
     for source in payload.get("sources", []):
         key = str(source.get("evidence_key") or f"registry:{source.get('id')}")
-        if current_sources.get(key) != str(source["verification_status"]):
+        current = current_sources.get(key)
+        expected_signature = str(source.get("evidence_signature") or "")
+        if (
+            not current
+            or current[0] != str(source["verification_status"])
+            or (expected_signature and current[1] != expected_signature)
+        ):
             invalid = True
             break
     if invalid:
@@ -476,6 +695,7 @@ class AssistanceService:
         try:
             packet = build_packet(self.database, int(work["id"]))
             result = self.invoker.invoke(packet)
+            validate_result(packet, result.payload)
             return self._store_result(work, packet, result, category, effort)
         except (ApprovalInvalidated, AssistanceLeaseLost):
             raise
@@ -584,16 +804,19 @@ class AssistanceService:
                 INSERT INTO assistance_result(
                     work_item_id, operation, schema_version, prompt_version,
                     model, status, result_json, created_at
-                ) VALUES(?, ?, 1, 'v1', ?, 'accepted', ?, ?)
+                ) VALUES(?, ?, 1, ?, ?, 'accepted', ?, ?)
                 """,
-                (work["id"], packet["operation"], result.model, Database.json(result.payload), now),
+                (
+                    work["id"], packet["operation"], PROMPT_VERSION, result.model,
+                    Database.json(result.payload), now,
+                ),
             )
             connection.execute(
                 """
                 INSERT INTO usage_ledger(
                     category, operation, effort_units, model, result, created_at,
                     prompt_version, input_size, output_size, retry_count
-                ) VALUES(?, ?, ?, ?, 'accepted', ?, 'v1', ?, ?, ?)
+                ) VALUES(?, ?, ?, ?, 'accepted', ?, ?, ?, ?, ?)
                 """,
                 (
                     category,
@@ -601,6 +824,7 @@ class AssistanceService:
                     effort,
                     result.model,
                     now,
+                    PROMPT_VERSION,
                     result.input_size,
                     result.output_size,
                     max(0, int(work.get("attempt_count") or 1) - 1),
@@ -613,10 +837,11 @@ class AssistanceService:
                     (story_id,),
                 ).fetchone()
                 version = int(version_row["version"]) + 1
-                sources_json = Database.json([
-                    {"title": source["title"], "url": source["url"], "role": source["source_role"]}
-                    for source in packet["sources"]
-                ])
+                sources_json = Database.json(_draft_source_rows(packet))
+                rendered_body = render_citation_tokens(
+                    packet, str(result.payload["factual_brief"])
+                )
+                rendered_lens = render_citation_tokens(packet, str(result.payload["lens"]))
                 draft_cursor = connection.execute(
                     """
                     INSERT INTO draft(
@@ -629,9 +854,9 @@ class AssistanceService:
                         "Open-Source Lens Brief" if packet["operation"] == "draft_lens" else "Neutral News Brief",
                         version, result.payload["headline"],
                         f"{packet['story']['freshness']} · {packet['story']['lane']}",
-                        result.payload["factual_brief"], result.payload["lens"], sources_json,
+                        rendered_body, rendered_lens, sources_json,
                         now, now,
-                        Database.json({"assistance_result_id": int(result_cursor.lastrowid), "model": result.model, "prompt_version": "v1"}),
+                        Database.json({"assistance_result_id": int(result_cursor.lastrowid), "model": result.model, "prompt_version": PROMPT_VERSION}),
                         work["payload_json"],
                     ),
                 )

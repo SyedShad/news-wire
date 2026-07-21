@@ -8,7 +8,7 @@ from typing import Callable
 
 from .notifications import NativeNotifier
 from .settings import load_settings
-from .storage import Database
+from .storage import Database, SCHEMA_VERSION
 
 
 class PilotGateError(RuntimeError):
@@ -126,7 +126,11 @@ class PilotManager:
         gate("validation_started", validation_started is not None, "Extended validation has not started")
         gate("validation_window", validation_started is not None and elapsed >= 72, "The additional 72-hour validation window is incomplete")
         gate("database_integrity", self.database.integrity_check() == "ok", "Database integrity did not pass")
-        gate("schema", self.database.schema_version() == 3, "The runtime schema is not version 3")
+        gate(
+            "schema",
+            self.database.schema_version() == SCHEMA_VERSION,
+            f"The runtime schema is not version {SCHEMA_VERSION}",
+        )
         gate(
             "scheduler",
             self.database.get_state("schedule_installed", "false") == "true"

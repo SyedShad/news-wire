@@ -15,7 +15,7 @@ from typing import Any
 from .config import RuntimePaths, ensure_runtime_layout
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class MigrationRequired(RuntimeError):
@@ -425,6 +425,20 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "CREATE INDEX idx_evidence_source_story ON evidence_source(story_id, status)",
         "CREATE INDEX idx_evidence_source_publisher ON evidence_source(publisher_key, confirmed_role, status)",
     ),
+    4: (
+        "ALTER TABLE evidence_source ADD COLUMN hosting_publisher_name TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE evidence_source ADD COLUMN proposed_origin_name TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE evidence_source ADD COLUMN proposed_origin_url TEXT",
+        "ALTER TABLE evidence_source ADD COLUMN proposed_provenance_type TEXT NOT NULL DEFAULT 'unknown'",
+        "ALTER TABLE evidence_source ADD COLUMN reporting_origin_name TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE evidence_source ADD COLUMN reporting_origin_key TEXT",
+        "ALTER TABLE evidence_source ADD COLUMN reporting_origin_url TEXT",
+        "ALTER TABLE evidence_source ADD COLUMN provenance_type TEXT NOT NULL DEFAULT 'unknown'",
+        "ALTER TABLE evidence_source ADD COLUMN origin_status TEXT NOT NULL DEFAULT 'not_applicable'",
+        "ALTER TABLE evidence_source ADD COLUMN origin_confirmed_at TEXT",
+        "ALTER TABLE evidence_source ADD COLUMN origin_confirmation_action_id INTEGER REFERENCES review_action(id)",
+        "CREATE INDEX idx_evidence_source_origin ON evidence_source(reporting_origin_key, origin_status, confirmed_role, status)",
+    ),
 }
 
 
@@ -553,6 +567,120 @@ class Database:
                                 "Cancelled legacy research requests superseded by evidence enrichment.",
                                 now,
                                 self.json({"cancelled_work_items": cancelled}),
+                            ),
+                        )
+                if version == 3:
+                    now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                    reporting_review_count = int(
+                        connection.execute(
+                            """
+                            SELECT COUNT(*) AS count FROM evidence_source
+                            WHERE confirmed_role = 'Reporting' AND status = 'confirmed'
+                            """
+                        ).fetchone()["count"]
+                    )
+                    connection.execute(
+                        """
+                        UPDATE evidence_source
+                        SET hosting_publisher_name = CASE
+                                WHEN hosting_publisher_name = '' THEN publisher_key
+                                ELSE hosting_publisher_name
+                            END,
+                            origin_status = CASE
+                                WHEN confirmed_role = 'Reporting' AND status = 'confirmed'
+                                    THEN 'needs_review'
+                                ELSE 'not_applicable'
+                            END,
+                            provenance_type = CASE
+                                WHEN confirmed_role = 'Event' AND status = 'confirmed'
+                                    THEN 'original'
+                                ELSE provenance_type
+                            END,
+                            updated_at = ?
+                        """,
+                        (now,),
+                    )
+                    affected = [
+                        str(row["story_id"])
+                        for row in connection.execute(
+                            """
+                            SELECT c.story_id
+                            FROM candidate c
+                            WHERE c.evidence_gate = 1
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM source_item si
+                                  WHERE si.story_id = c.story_id AND si.source_role = 'Event'
+                              )
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM evidence_source es
+                                  WHERE es.story_id = c.story_id
+                                    AND es.status = 'confirmed'
+                                    AND es.confirmed_role = 'Event'
+                              )
+                            """
+                        ).fetchall()
+                    ]
+                    for story_id in affected:
+                        connection.execute(
+                            "UPDATE candidate SET evidence_gate = 0 WHERE story_id = ?",
+                            (story_id,),
+                        )
+                        current = connection.execute(
+                            "SELECT status, headline FROM story_cluster WHERE id = ?",
+                            (story_id,),
+                        ).fetchone()
+                        if not current or current["status"] not in {"candidate", "approved", "draft_ready"}:
+                            continue
+                        active_watch = connection.execute(
+                            "SELECT 1 FROM watch_notice WHERE story_id = ? AND status = 'active'",
+                            (story_id,),
+                        ).fetchone()
+                        next_status = "watch" if active_watch else "signal"
+                        connection.execute(
+                            "UPDATE story_cluster SET status = ?, material_update = 1, updated_at = ? WHERE id = ?",
+                            (next_status, now, story_id),
+                        )
+                        connection.execute(
+                            """
+                            UPDATE work_item
+                            SET status = 'needs_reapproval', last_error_class = 'publisher_provenance_review',
+                                updated_at = ?
+                            WHERE story_id = ? AND kind = 'draft'
+                              AND status IN ('pending', 'queued', 'running', 'generating', 'waiting')
+                            """,
+                            (now, story_id),
+                        )
+                        changed_drafts = connection.execute(
+                            "UPDATE draft SET status = 'Needs Review', updated_at = ? WHERE story_id = ? AND status = 'Current'",
+                            (now, story_id),
+                        ).rowcount
+                        if changed_drafts:
+                            already_alerted = connection.execute(
+                                "SELECT 1 FROM alert WHERE story_id = ? AND kind = 'correction' AND read_at IS NULL",
+                                (story_id,),
+                            ).fetchone()
+                            if not already_alerted:
+                                connection.execute(
+                                    """
+                                    INSERT INTO alert(story_id, kind, severity, title, body, created_at)
+                                    VALUES(?, 'correction', 'high', ?,
+                                           'Reporting provenance needs confirmation before this draft can be replaced.', ?)
+                                    """,
+                                    (story_id, current["headline"], now),
+                                )
+                    if reporting_review_count or affected:
+                        connection.execute(
+                            """
+                            INSERT INTO diagnostic_event(level, event_type, message, created_at, detail_json)
+                            VALUES('info', 'migration', ?, ?, ?)
+                            """,
+                            (
+                                "Reporting evidence now requires a human-confirmed original publisher.",
+                                now,
+                                self.json({
+                                    "reporting_sources_needing_review": reporting_review_count,
+                                    "affected_story_count": len(affected),
+                                }),
                             ),
                         )
                 connection.execute(

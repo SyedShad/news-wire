@@ -336,6 +336,9 @@ def create_app(
                 relationships,
                 first_party=request.form.get("first_party") == "yes",
                 reason=request.form.get("reason", ""),
+                provenance_type=request.form.get("provenance_type", "unknown"),
+                origin_name=request.form.get("origin_name", ""),
+                origin_url=request.form.get("origin_url", ""),
             )
         except (ValueError, LookupError) as error:
             flash(str(error), "error")

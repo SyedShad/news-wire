@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import html
+import re
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -14,14 +15,24 @@ from .storage import Database, database_size
 from .source_registry import set_source_enabled
 from .scheduler import next_scheduled_run
 from .evidence import (
+    ALLOWED_PROVENANCE_TYPES,
     ALLOWED_RELATIONSHIPS,
     ALLOWED_ROLES,
+    normalize_optional_public_https_url,
+    normalize_publisher_name,
     normalize_public_https_url,
+    publisher_display_name,
+    publisher_identity_key,
     publisher_key,
     qualification_state,
     recalculate_claim_statuses,
     recalculate_story_qualification,
 )
+
+
+INLINE_SOURCE_LINK_RE = re.compile(r"\[([^\]\n]{1,200})\]\(<(https://[^>\n]{1,2048})>\)")
+ANY_MARKDOWN_LINK_RE = re.compile(r"\[[^\]\n]+\]\([^\)\n]+\)")
+RAW_HTML_RE = re.compile(r"</?[A-Za-z][^>]*>")
 
 
 def utc_now() -> str:
@@ -207,9 +218,31 @@ class DashboardService:
                 """,
                 (evidence["id"],),
             )
+            evidence["claim_relationships"] = {
+                int(link["claim_id"]): str(link["relationship"])
+                for link in evidence["claim_links"]
+            }
+            for link in evidence["claim_links"]:
+                link["relationship_label"] = {
+                    "attributes": "reports or attributes",
+                    "supports": "directly supports",
+                    "contradicts": "contradicts",
+                    "context": "context",
+                }.get(str(link["relationship"]), str(link["relationship"]))
+            stored_hosting_name = str(evidence.get("hosting_publisher_name") or "")
+            evidence["hosting_publisher_name"] = (
+                publisher_display_name(str(evidence.get("final_url") or evidence["canonical_url"]))
+                if not stored_hosting_name or stored_hosting_name == str(evidence["publisher_key"])
+                else stored_hosting_name
+            )
+            evidence["origin_review_required"] = bool(
+                evidence.get("confirmed_role") == "Reporting"
+                and evidence.get("origin_status") != "confirmed"
+            )
         manual_links = self.database.query(
             """
-            SELECT esc.claim_id, esc.relationship, es.title, es.final_url
+            SELECT esc.claim_id, esc.relationship, es.title, es.final_url,
+                   es.confirmed_role, es.reporting_origin_name, es.origin_status
             FROM evidence_source_claim esc JOIN evidence_source es ON es.id = esc.evidence_source_id
             WHERE es.story_id = ? AND es.status = 'confirmed'
             ORDER BY es.id
@@ -221,12 +254,28 @@ class DashboardService:
             claim = claims_by_id.get(int(link["claim_id"]))
             if not claim:
                 continue
-            source_name = str(link["title"] or link["final_url"] or "Confirmed evidence")
+            source_name = str(
+                link["reporting_origin_name"]
+                if link["confirmed_role"] == "Reporting"
+                and link["origin_status"] == "confirmed"
+                and link["reporting_origin_name"]
+                else link["title"] or link["final_url"] or "Confirmed evidence"
+            )
             claim["evidence_sources"] = " · ".join(
                 part for part in (claim.get("evidence_sources"), source_name) if part
             )
             claim["evidence_relationships"] = " · ".join(
-                part for part in (claim.get("evidence_relationships"), link["relationship"]) if part
+                part
+                for part in (
+                    claim.get("evidence_relationships"),
+                    {
+                        "attributes": "reports or attributes",
+                        "supports": "directly supports",
+                        "contradicts": "contradicts",
+                        "context": "context",
+                    }.get(str(link["relationship"]), str(link["relationship"])),
+                )
+                if part
             )
         story["candidate"] = self.database.one(
             "SELECT * FROM candidate WHERE story_id = ?", (story_id,)
@@ -241,7 +290,14 @@ class DashboardService:
         state = story["qualification"]
         reasons: list[str] = []
         if not state["evidence_gate"]:
-            reasons.append("Confirm one Event source or two independent Reporting sources.")
+            if state["reporting_count"]:
+                reasons.append(
+                    f"Confirm {state['reporting_needed']} more independent original reporting publisher."
+                    if state["reporting_needed"] == 1
+                    else f"Confirm {state['reporting_needed']} more independent original reporting publishers."
+                )
+            else:
+                reasons.append("Confirm one Event source or two independent original reporting publishers.")
         if not state["effective_importance"]:
             reasons.append("Automated importance did not pass; a recorded human reason is required.")
         if story["status"] not in {"candidate", "draft_ready", "approved"}:
@@ -251,29 +307,9 @@ class DashboardService:
         return reasons
 
     def _draft_sources(self, story_id: str) -> list[dict[str, Any]]:
-        sources = self.database.query(
-            """
-            SELECT 'registry:' || id AS evidence_key, source_role, title, url,
-                   published_at, language, verification_status, passage
-            FROM source_item WHERE story_id = ?
-            """,
-            (story_id,),
-        )
-        sources.extend(
-            self.database.query(
-                """
-                SELECT 'enriched:' || id AS evidence_key, confirmed_role AS source_role,
-                       title, final_url AS url, published_at, language,
-                       CASE confirmed_role WHEN 'Event' THEN 'supports'
-                           WHEN 'Reporting' THEN 'supports' ELSE 'trace' END AS verification_status,
-                       passage
-                FROM evidence_source
-                WHERE story_id = ? AND status = 'confirmed'
-                """,
-                (story_id,),
-            )
-        )
-        return sources
+        from .assistance import _story_sources
+
+        return _story_sources(self.database, story_id)
 
     def queue_evidence_inspection(
         self, story_id: str, url: str, acquisition_method: str
@@ -287,14 +323,17 @@ class DashboardService:
         if acquisition_method == "linked":
             linked = self.database.one(
                 """
-                SELECT 1 FROM source_item
-                WHERE story_id = ? AND source_role = 'Discovery'
+                SELECT id, source_role FROM source_item
+                WHERE story_id = ? AND source_role IN ('Discovery', 'Reporting')
                   AND COALESCE(canonical_url, url) = ?
                 """,
                 (story_id, normalized),
             )
             if not linked:
-                raise ValueError("Linked inspection must use a stored Discovery URL")
+                raise ValueError("Linked inspection must use a stored Discovery or Reporting URL")
+            proposed_role = "Reporting" if linked["source_role"] == "Reporting" else "Event"
+        else:
+            proposed_role = "Reporting"
         now = utc_now()
         key = "evidence:" + story_id + ":" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
         with self.database.transaction() as connection:
@@ -308,21 +347,24 @@ class DashboardService:
                 evidence_id = int(existing["id"])
                 connection.execute(
                     """
-                    UPDATE evidence_source SET requested_url = ?, acquisition_method = ?,
+                    UPDATE evidence_source SET requested_url = ?, acquisition_method = ?, proposed_role = ?,
                         status = 'queued', error_class = NULL, excluded_at = NULL, updated_at = ?
                     WHERE id = ?
                     """,
-                    (normalized, acquisition_method, now, evidence_id),
+                    (normalized, acquisition_method, proposed_role, now, evidence_id),
                 )
             else:
                 cursor = connection.execute(
                     """
                     INSERT INTO evidence_source(
                         story_id, requested_url, canonical_url, publisher_key,
-                        acquisition_method, status, created_at, updated_at
-                    ) VALUES(?, ?, ?, ?, ?, 'queued', ?, ?)
+                        acquisition_method, proposed_role, status, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, 'queued', ?, ?)
                     """,
-                    (story_id, normalized, normalized, publisher_key(normalized), acquisition_method, now, now),
+                    (
+                        story_id, normalized, normalized, publisher_key(normalized),
+                        acquisition_method, proposed_role, now, now,
+                    ),
                 )
                 evidence_id = int(cursor.lastrowid)
             payload = Database.json({"schema_version": 1, "evidence_source_id": evidence_id})
@@ -359,6 +401,9 @@ class DashboardService:
         *,
         first_party: bool = False,
         reason: str = "",
+        provenance_type: str = "unknown",
+        origin_name: str = "",
+        origin_url: str = "",
     ) -> dict[str, Any]:
         if role not in ALLOWED_ROLES:
             raise ValueError("Choose Event, Reporting, or Discovery")
@@ -376,6 +421,31 @@ class DashboardService:
             raise ValueError("Map at least one claim before confirming qualifying evidence")
         if any(value not in ALLOWED_RELATIONSHIPS for value in relationships.values()):
             raise ValueError("Unsupported claim relationship")
+        reporting_origin_name = ""
+        reporting_origin_key: str | None = None
+        reporting_origin_url: str | None = None
+        origin_status = "not_applicable"
+        effective_provenance = "original" if role == "Event" else "unknown"
+        stored_hosting_name = str(evidence.get("hosting_publisher_name") or "")
+        hosting_publisher_name = (
+            publisher_display_name(str(evidence.get("final_url") or evidence["canonical_url"]))
+            if not stored_hosting_name or stored_hosting_name == str(evidence["publisher_key"])
+            else stored_hosting_name
+        )
+        if role == "Reporting":
+            if provenance_type not in ALLOWED_PROVENANCE_TYPES - {"unknown"}:
+                raise ValueError("Choose whether this reporting is original, syndicated, or citing another publisher")
+            reporting_origin_name = normalize_publisher_name(origin_name)
+            reporting_origin_key = publisher_identity_key(reporting_origin_name)
+            reporting_origin_url = normalize_optional_public_https_url(origin_url)
+            if provenance_type == "original":
+                if reporting_origin_url and publisher_key(reporting_origin_url) != str(evidence["publisher_key"]):
+                    raise ValueError("An original-reporting URL must use the hosting publisher's domain")
+                reporting_origin_url = reporting_origin_url or str(
+                    evidence.get("final_url") or evidence["canonical_url"]
+                )
+            origin_status = "confirmed"
+            effective_provenance = provenance_type
         claim_ids = set(relationships)
         if claim_ids:
             placeholders = ",".join("?" for _ in claim_ids)
@@ -388,14 +458,6 @@ class DashboardService:
         now = utc_now()
         with self.database.transaction() as connection:
             connection.execute(
-                """
-                UPDATE evidence_source SET confirmed_role = ?, first_party_confirmed = ?,
-                    confirmation_reason = ?, status = 'confirmed', confirmed_at = ?,
-                    excluded_at = NULL, updated_at = ? WHERE id = ?
-                """,
-                (role, int(first_party), reason.strip(), now, now, evidence_id),
-            )
-            connection.execute(
                 "DELETE FROM evidence_source_claim WHERE evidence_source_id = ?",
                 (evidence_id,),
             )
@@ -406,7 +468,7 @@ class DashboardService:
                 """,
                 [(evidence_id, claim_id, relationship) for claim_id, relationship in relationships.items()],
             )
-            connection.execute(
+            action = connection.execute(
                 """
                 INSERT INTO review_action(story_id, action, reason, created_at, approval_snapshot_json)
                 VALUES(?, 'confirm_evidence', ?, ?, ?)
@@ -416,7 +478,37 @@ class DashboardService:
                     Database.json({
                         "evidence_source_id": evidence_id, "role": role,
                         "first_party": bool(first_party), "relationships": relationships,
+                        "provenance_type": effective_provenance,
+                        "reporting_origin_name": reporting_origin_name,
+                        "reporting_origin_url": reporting_origin_url,
                     }),
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE evidence_source SET confirmed_role = ?, first_party_confirmed = ?,
+                    confirmation_reason = ?, status = 'confirmed', confirmed_at = ?,
+                    hosting_publisher_name = ?,
+                    reporting_origin_name = ?, reporting_origin_key = ?, reporting_origin_url = ?,
+                    provenance_type = ?, origin_status = ?, origin_confirmed_at = ?,
+                    origin_confirmation_action_id = ?, excluded_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    role,
+                    int(first_party),
+                    reason.strip(),
+                    now,
+                    hosting_publisher_name,
+                    reporting_origin_name,
+                    reporting_origin_key,
+                    reporting_origin_url,
+                    effective_provenance,
+                    origin_status,
+                    now if role == "Reporting" else None,
+                    int(action.lastrowid) if role == "Reporting" else None,
+                    now,
+                    evidence_id,
                 ),
             )
         recalculate_claim_statuses(self.database, story_id)
@@ -914,6 +1006,8 @@ class DashboardService:
         lens_value = lens.replace("\r\n", "\n").replace("\r", "\n").strip()
         if not headline_value or not body_value:
             raise ValueError("Headline and factual brief are required")
+        self._validate_draft_links(body_value, original["sources"])
+        self._validate_draft_links(lens_value, original["sources"])
         if lens_value and original["mode"] != "Open-Source Lens Brief":
             raise ValueError("Open-source lens text requires an approved lens brief")
         if lens_value:
@@ -1189,7 +1283,7 @@ class DashboardService:
         if not story:
             raise LookupError("Story not found")
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "exported_at": utc_now(),
             "story": {key: value for key, value in story.items() if key not in {"sources", "evidence_sources", "claims", "actions", "drafts"}},
             "claims": story["claims"],
@@ -1212,16 +1306,75 @@ class DashboardService:
     @staticmethod
     def _source_parts(source: Any) -> dict[str, str]:
         if isinstance(source, dict):
-            title = " ".join(str(source.get("title") or source.get("name") or "Source").split())[:500]
+            title = " ".join(
+                str(
+                    source.get("display_label")
+                    or source.get("title")
+                    or source.get("name")
+                    or "Source"
+                ).split()
+            )[:500]
             role = " ".join(str(source.get("role") or source.get("source_role") or "").split())[:80]
             raw_url = str(source.get("url") or "").strip()
         else:
             title = " ".join(str(source).split())[:500] or "Source"
             role = ""
             raw_url = ""
-        parsed = urlsplit(raw_url)
-        safe_url = raw_url if parsed.scheme == "https" and bool(parsed.hostname) and not parsed.username and not parsed.password else ""
+        try:
+            parsed = urlsplit(raw_url)
+            safe_url = (
+                raw_url
+                if parsed.scheme == "https"
+                and bool(parsed.hostname)
+                and not parsed.username
+                and not parsed.password
+                and parsed.port in {None, 443}
+                else ""
+            )
+        except ValueError:
+            safe_url = ""
         return {"title": title, "role": role, "url": safe_url}
+
+    @classmethod
+    def _validate_draft_links(cls, value: str, sources: list[Any]) -> None:
+        if RAW_HTML_RE.search(value):
+            raise ValueError("Draft text cannot contain raw HTML")
+        allowed_urls = {
+            cls._source_parts(source)["url"]
+            for source in sources
+            if cls._source_parts(source)["url"]
+        }
+        for match in INLINE_SOURCE_LINK_RE.finditer(value):
+            if match.group(2) not in allowed_urls:
+                raise ValueError("Draft links must use URLs from the confirmed evidence snapshot")
+        without_links = INLINE_SOURCE_LINK_RE.sub("", value)
+        if ANY_MARKDOWN_LINK_RE.search(without_links):
+            raise ValueError("Draft links must use safe source Markdown")
+        if re.search(r"https?://", without_links, re.I):
+            raise ValueError("Draft URLs must be linked to a confirmed source name")
+
+    @classmethod
+    def _inline_markdown_html(cls, value: str, sources: list[Any]) -> str:
+        allowed_urls = {
+            cls._source_parts(source)["url"]
+            for source in sources
+            if cls._source_parts(source)["url"]
+        }
+        output: list[str] = []
+        position = 0
+        for match in INLINE_SOURCE_LINK_RE.finditer(value):
+            output.append(html.escape(value[position:match.start()]))
+            label, url = match.groups()
+            if url in allowed_urls:
+                output.append(
+                    f'<a href="{html.escape(url, quote=True)}" rel="noreferrer noopener">'
+                    f"{html.escape(label)}</a>"
+                )
+            else:
+                output.append(html.escape(match.group(0)))
+            position = match.end()
+        output.append(html.escape(value[position:]))
+        return "".join(output).replace("\n", "<br>")
 
     @classmethod
     def _source_markdown(cls, source: Any) -> str:
@@ -1251,11 +1404,15 @@ class DashboardService:
         if not draft:
             raise LookupError("Draft not found")
         body = "".join(
-            f"<p>{html.escape(paragraph)}</p>" for paragraph in str(draft["body"]).split("\n\n")
+            f"<p>{self._inline_markdown_html(paragraph, draft['sources'])}</p>"
+            for paragraph in str(draft["body"]).split("\n\n")
         )
         lens = ""
         if draft["lens"]:
-            lens = f"<h2>Open-Source Lens</h2><p>{html.escape(str(draft['lens']))}</p>"
+            lens = (
+                "<h2>Open-Source Lens</h2><p>"
+                f"{self._inline_markdown_html(str(draft['lens']), draft['sources'])}</p>"
+            )
         sources = "".join(f"<li>{self._source_html(source)}</li>" for source in draft["sources"])
         headline = html.escape(str(draft["headline"]))
         metadata = html.escape(str(draft["metadata"]))

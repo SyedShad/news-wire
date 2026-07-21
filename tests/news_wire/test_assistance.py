@@ -18,7 +18,9 @@ from open_source_ai_news_wire.assistance import (
     AssistanceTransientError,
     CodexInvoker,
     InvocationResult,
+    _draft_source_rows,
     build_packet,
+    render_citation_tokens,
     run_isolation_canary,
     run_assistance_work,
     sandbox_profile,
@@ -41,12 +43,26 @@ class FakeInvoker:
             raise AssistanceError("blocked")
         claim_ids = [int(item["id"]) for item in packet.get("claims", [])]  # type: ignore[index, union-attr]
         operation = str(packet["operation"])
+        citation = next(
+            (
+                str(source.get("citation_token"))
+                for source in packet.get("sources", [])  # type: ignore[union-attr]
+                if source.get("citation_allowed")
+            ),
+            "",
+        )
+        brief = (
+            f"According to {citation}, the supplied evidence supports this development.\n\n"
+            "The remaining uncertainty is stated separately from the confirmed facts."
+            if operation.startswith("draft_") and citation
+            else "The supplied evidence supports this compact neutral brief."
+        )
         payload = {
             "schema_version": 1,
             "operation": operation,
             "supported_claim_ids": claim_ids[:2],
             "headline": "Evidence-backed AI development",
-            "factual_brief": "The supplied evidence supports this compact neutral brief.",
+            "factual_brief": brief,
             "lens": "A separate, bounded open-source lens with a tradeoff." if operation == "draft_lens" else "",
             "notes": "",
         }
@@ -69,8 +85,10 @@ def test_packet_contains_only_bounded_story_evidence(tmp_path: Path) -> None:
     rendered = json.dumps(packet)
 
     assert packet["operation"] == "draft_neutral"
+    assert packet["schema_version"] == 2
     assert packet["claims"]
     assert packet["sources"]
+    assert any(source["citation_token"] for source in packet["sources"])
     assert str(database.paths.root) not in rendered
     assert "Keep this factual" in rendered
 
@@ -96,6 +114,10 @@ def test_approved_draft_is_generated_versioned_and_accounted(tmp_path: Path) -> 
         "category": "draft",
         "effort_units": 2,
     }
+    draft = database.one("SELECT body, sources_json, provenance_json FROM draft WHERE id = ?", (draft_id,))
+    assert "According to [Demo Runtime Project](<https://example.invalid/runtime/release>)" in draft["body"]
+    assert "[[source:" not in draft["body"]
+    assert '"prompt_version":"v2"' in draft["provenance_json"]
 
 
 def test_lens_draft_requires_and_preserves_separate_approved_mode(tmp_path: Path) -> None:
@@ -422,6 +444,77 @@ def test_neutral_result_cannot_smuggle_a_lens() -> None:
     }
     with pytest.raises(AssistanceError, match="unauthorized"):
         validate_result(packet, result)
+
+
+def test_natural_attribution_tokens_are_validated_rendered_and_deduplicated() -> None:
+    packet = {
+        "schema_version": 2,
+        "operation": "draft_neutral",
+        "claims": [{"id": 1}],
+        "sources": [
+            {
+                "evidence_key": "enriched:1",
+                "source_role": "Reporting",
+                "title": "Hosted Axios report",
+                "url": "https://news.yahoo.example/report",
+                "citation_allowed": True,
+                "citation_label": "Axios, via Yahoo",
+                "citation_url": "https://news.yahoo.example/report",
+                "dedupe_key": "reporting:name:axios",
+                "hosting_publisher_name": "Yahoo",
+                "reporting_origin_name": "Axios",
+                "provenance_type": "syndicated",
+            },
+            {
+                "evidence_key": "enriched:2",
+                "source_role": "Reporting",
+                "title": "Second Axios copy",
+                "url": "https://times.example/report",
+                "citation_allowed": True,
+                "citation_label": "Axios, via Economic Times",
+                "citation_url": "https://times.example/report",
+                "dedupe_key": "reporting:name:axios",
+                "hosting_publisher_name": "Economic Times",
+                "reporting_origin_name": "Axios",
+                "provenance_type": "cites",
+            },
+            {
+                "evidence_key": "registry:3",
+                "source_role": "Discovery",
+                "title": "Discovery copy",
+                "url": "https://news.yahoo.example/report",
+                "citation_allowed": False,
+                "citation_label": "Discovery",
+                "citation_url": "https://news.yahoo.example/report",
+                "dedupe_key": "discovery:3",
+            },
+        ],
+    }
+    result = {
+        "schema_version": 1,
+        "operation": "draft_neutral",
+        "supported_claim_ids": [1],
+        "headline": "Policy proposal returns",
+        "factual_brief": "According to [[source:enriched:1]], the proposal is under discussion.\n\nNo final order has been issued.",
+        "lens": "",
+        "notes": "",
+    }
+    validate_result(packet, result)
+    rendered = render_citation_tokens(packet, result["factual_brief"])
+    assert "[Axios, via Yahoo](<https://news.yahoo.example/report>)" in rendered
+    rows = _draft_source_rows(packet)
+    assert len([row for row in rows if row["role"] == "Reporting"]) == 1
+    assert all(row["role"] != "Discovery" for row in rows)
+
+    for bad_body, message in (
+        ("Reporting attributes the proposal to officials.", "artificial"),
+        ("According to https://news.yahoo.example/report, it happened.", "citation tokens"),
+        ("According to [[source:registry:3]], it happened.", "not confirmed"),
+        ("According to [[source:missing]], it happened.", "not confirmed"),
+        ("According to <script>alert(1)</script>, it happened.", "unsafe HTML"),
+    ):
+        with pytest.raises(AssistanceError, match=message):
+            validate_result(packet, {**result, "factual_brief": bad_body})
 
 
 def test_material_change_invalidates_approval_before_drafting(tmp_path: Path) -> None:

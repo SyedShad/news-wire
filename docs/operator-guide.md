@@ -51,12 +51,15 @@ Tracked definitions update source metadata without overwriting local enablement 
 The story page separates qualification from drafting. For a discovery signal:
 
 1. Use **Inspect linked source** or attach another public HTTPS source.
-2. After the bounded fetch completes, confirm its Event, Reporting, or Discovery role and map it to the claims it supports, attributes, contradicts, or contextualizes.
-3. The evidence gate requires one confirmed first-party Event source or two independent Reporting publishers. It cannot be overridden.
-4. When evidence passes, **Qualify as candidate**. If automated importance did not pass, record the human editorial reason; this changes neither the automated score nor the evidence result.
-5. Separately approve and create a Neutral News Brief or, for a Strong or Moderate opportunity, an Open-Source Lens Brief. The dashboard dispatches that approved draft immediately and opens the editor when generation finishes in the active story tab.
+2. After the bounded fetch completes, confirm its Event, Reporting, or Discovery role and map it to the claims it directly supports, reports or attributes, contradicts, or contextualizes.
+3. For Reporting evidence, confirm whether the hosted page is original, syndicated, or citing another publication. Confirm or correct the suggested original publisher; suggestions never qualify a story by themselves.
+4. The evidence gate requires one confirmed first-party Event source or two independent original reporting publishers. Two hosts repeating the same original report count once. The gate cannot be overridden.
+5. When evidence passes, **Qualify as candidate**. If automated importance did not pass, record the human editorial reason; this changes neither the automated score nor the evidence result.
+6. Separately approve and create a Neutral News Brief or, for a Strong or Moderate opportunity, an Open-Source Lens Brief. The dashboard dispatches that approved draft immediately and opens the editor when generation finishes in the active story tab.
 
-Official pages prove that an announcement was made. Use `attributes` for announcement or promotional claims unless the page directly establishes the factual claim. Excluding evidence preserves the audit record and invalidates qualification or pending drafts when the gate no longer passes.
+Official pages prove that an announcement was made. Use **Reports or attributes the claim** for announcement or promotional claims unless the page directly establishes the factual claim. Excluding evidence preserves the audit record and invalidates qualification or pending drafts when the gate no longer passes.
+
+Drafts name the confirmed publication naturally and link it on first mention. When the original URL is unavailable, the accessible copy is labelled in the form `Original Publisher, via Host`. Markdown exports use portable CommonMark links and HTML exports render only links already present in the confirmed evidence snapshot.
 
 Deterministic monitoring works without ChatGPT assistance. Before enabling assistance, run:
 

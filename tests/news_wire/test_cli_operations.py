@@ -29,7 +29,7 @@ class FakeWorker:
 def test_cli_migrate_scan_and_catch_up(monkeypatch, tmp_path: Path, capsys) -> None:
     root = tmp_path / "runtime"
     assert cli.main(["--data-root", str(root), "migrate"]) == 0
-    assert "version 3" in capsys.readouterr().out
+    assert "version 4" in capsys.readouterr().out
 
     FakeWorker.calls.clear()
     monkeypatch.setattr(cli, "Worker", FakeWorker)

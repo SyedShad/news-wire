@@ -36,7 +36,7 @@ Open the on-demand interface with:
 
 The dashboard binds only to loopback, selects a random port, and requires its one-time process-local access link. See [docs/operator-guide.md](docs/operator-guide.md) for routine operation and recovery.
 
-Release `0.3.2` retains schema version 3. Explicit draft approval starts generation immediately; the half-hour worker remains a recovery fallback. After completing a real evidence-to-revised-draft workflow, run the notification canary and `pilot extend-validation --auto-activate`; `pilot readiness` reports every activation gate.
+Release `0.3.3` uses schema version 4. Reporting qualification now follows the human-confirmed original publisher, so syndications of one report cannot masquerade as independent confirmation. Approved drafts use natural named attribution with safe, portable Markdown source links. Explicit draft approval still starts generation immediately; the half-hour worker remains a recovery fallback. After completing a real evidence-to-revised-draft workflow, run the notification canary and `pilot extend-validation --auto-activate`; `pilot readiness` reports every activation gate.
 
 ## Development and verification
 
