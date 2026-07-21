@@ -44,10 +44,12 @@ class DashboardService:
         *,
         scheduler: Any | None = None,
         run_callback: Callable[[], None] | None = None,
+        draft_callback: Callable[[int], None] | None = None,
     ):
         self.database = database
         self.scheduler = scheduler
         self.run_callback = run_callback
+        self.draft_callback = draft_callback
 
     def overview(self) -> dict[str, Any]:
         counts = self.database.one(
@@ -231,6 +233,7 @@ class DashboardService:
         ) or {}
         story["qualification"] = qualification_state(self.database, story_id)
         story["qualification"]["lock_reasons"] = self._qualification_lock_reasons(story)
+        story["draft_request"] = self.draft_status(story_id)
         return story
 
     @staticmethod
@@ -480,7 +483,7 @@ class DashboardService:
         return "candidate"
 
     def list_drafts(self) -> list[dict[str, Any]]:
-        return self.database.query(
+        drafts = self.database.query(
             """
             SELECT d.*, s.headline AS story_headline, s.lane, s.priority
             FROM draft d
@@ -488,6 +491,163 @@ class DashboardService:
             ORDER BY d.updated_at DESC, d.version DESC
             """
         )
+        for draft in drafts:
+            draft["entry_kind"] = "draft"
+            draft["display_status"] = str(draft["status"])
+
+        requests = self.database.query(
+            """
+            SELECT w.*, s.headline AS story_headline, s.lane, s.priority
+            FROM work_item w
+            JOIN story_cluster s ON s.id = w.story_id
+            WHERE w.kind = 'draft' AND w.status != 'completed'
+            ORDER BY w.updated_at DESC, w.id DESC
+            """
+        )
+        for work in requests:
+            try:
+                payload = json.loads(str(work.get("payload_json") or "{}"))
+            except json.JSONDecodeError:
+                payload = {}
+            status = self._draft_status_view(work)
+            work.update(
+                {
+                    "entry_kind": "request",
+                    "mode": str(payload.get("mode") or "Draft request"),
+                    "display_status": status["label"],
+                    "status_code": status["status"],
+                    "status_message": status["message"],
+                }
+            )
+        return sorted(
+            [*drafts, *requests],
+            key=lambda row: (str(row.get("updated_at") or ""), int(row.get("id") or 0)),
+            reverse=True,
+        )
+
+    @staticmethod
+    def _draft_status_view(work: dict[str, Any]) -> dict[str, Any]:
+        raw_status = str(work.get("status") or "queued")
+        attempts = int(work.get("attempt_count") or 0)
+        error_code = str(work.get("last_error_class") or "")
+        status = raw_status
+        if raw_status in {"pending", "queued"}:
+            status = "retrying" if attempts else "starting"
+        elif raw_status in {"running", "generating"}:
+            status = "generating"
+        elif raw_status == "deferred":
+            status = "failed"
+        elif raw_status == "completed":
+            status = "ready"
+
+        labels = {
+            "starting": "Starting",
+            "generating": "Generating",
+            "waiting": "Waiting",
+            "retrying": "Retrying",
+            "failed": "Failed",
+            "needs_reapproval": "Needs reapproval",
+            "ready": "Draft ready",
+        }
+        messages = {
+            "starting": "Your approval is saved and immediate draft generation is starting.",
+            "generating": "ChatGPT is creating the approved draft now.",
+            "waiting": "Drafting is waiting for a required local prerequisite.",
+            "retrying": "A temporary failure is being retried once.",
+            "failed": "Draft generation could not complete safely. You can retry the same approval.",
+            "needs_reapproval": "The evidence changed after approval. Review and approve the story again.",
+            "ready": "The approved draft is ready for human review.",
+        }
+        if error_code in {"codex_unavailable", "CodexUnavailable"}:
+            messages[status] = "The local ChatGPT drafting command is unavailable. Check the installation, then retry."
+        elif error_code == "codex_authentication_unavailable":
+            messages[status] = "ChatGPT authentication is unavailable. Sign in to Codex, then retry this approval."
+        elif error_code in {"codex_timeout", "codex_process_failed", "codex_result_invalid"}:
+            messages[status] = "The temporary ChatGPT generation attempt did not complete safely. Retry the preserved approval."
+        elif error_code in {"assistance_disabled", "AssistanceDisabled"}:
+            messages[status] = "ChatGPT assistance is disabled. Enable it before retrying this approval."
+        elif error_code in {"isolation_not_passed", "IsolationUnavailable"}:
+            messages[status] = "The local isolation check must pass before this draft can be generated."
+        elif error_code in {"approval_invalidated", "evidence_invalidated", "ApprovalInvalidated"}:
+            status = "needs_reapproval"
+        return {
+            "status": status,
+            "raw_status": raw_status,
+            "label": labels.get(status, status.replace("_", " ").title()),
+            "message": messages.get(status, "Draft generation is awaiting a safe next step."),
+            "attempt_count": attempts,
+            "error_code": error_code,
+            "active": status in {"starting", "generating", "retrying"},
+            "retryable": status in {"failed", "waiting"},
+        }
+
+    def draft_status(self, story_id: str) -> dict[str, Any] | None:
+        work = self.database.one(
+            """
+            SELECT * FROM work_item
+            WHERE story_id = ? AND kind = 'draft'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (story_id,),
+        )
+        if not work:
+            return None
+        status = self._draft_status_view(work)
+        draft = (
+            self.database.one(
+                "SELECT id, status FROM draft WHERE story_id = ? ORDER BY version DESC LIMIT 1",
+                (story_id,),
+            )
+            if status["raw_status"] == "completed"
+            else None
+        )
+        draft_id = int(draft["id"]) if draft else None
+        if status["status"] == "ready" and draft and draft["status"] == "Needs Review":
+            status.update(
+                {
+                    "status": "needs_reapproval",
+                    "label": "Needs reapproval",
+                    "message": "The evidence changed after this draft was created. Requalify and approve a new draft while preserving this version.",
+                    "retryable": False,
+                }
+            )
+        status.update(
+            {
+                "work_item_id": int(work["id"]),
+                "story_id": story_id,
+                "draft_id": draft_id,
+                "updated_at": work["updated_at"],
+            }
+        )
+        if status["status"] == "ready" and not draft:
+            status.update(
+                {
+                    "status": "failed",
+                    "label": "Failed",
+                    "message": "Draft generation finished without a reviewable draft. Retry this approval.",
+                    "retryable": True,
+                }
+            )
+        return status
+
+    def _dispatch_draft(self, work_item_id: int) -> None:
+        if not self.draft_callback:
+            return
+        try:
+            self.draft_callback(work_item_id)
+        except Exception as error:
+            now = utc_now()
+            self.database.execute(
+                """
+                INSERT INTO diagnostic_event(level, event_type, message, created_at, detail_json)
+                VALUES('warning', 'draft_dispatch', ?, ?, ?)
+                """,
+                (
+                    "Immediate draft dispatch could not start; the durable queue was preserved.",
+                    now,
+                    Database.json({"work_item_id": work_item_id, "error_class": type(error).__name__}),
+                ),
+            )
 
     def get_draft(self, draft_id: int) -> dict[str, Any] | None:
         draft = self.database.one(
@@ -553,6 +713,7 @@ class DashboardService:
         mode: str | None = None
         new_status = story["status"]
         work_kind: str | None = None
+        work_item_id: int | None = None
         work_payload: dict[str, Any] = {"reason": reason.strip(), "requested_at": now}
         if action == "archive":
             new_status = "archived"
@@ -565,18 +726,6 @@ class DashboardService:
                 raise ValueError("Evidence and importance qualification must pass before drafting")
             if story["status"] not in {"candidate", "draft_ready", "approved"}:
                 raise ValueError("Only verified candidates can be approved for drafting")
-            if story["status"] == "approved":
-                pending_draft = self.database.one(
-                    """
-                    SELECT id FROM work_item
-                    WHERE story_id = ? AND kind = 'draft'
-                      AND status IN ('pending', 'queued', 'generating')
-                    LIMIT 1
-                    """,
-                    (story_id,),
-                )
-                if pending_draft:
-                    raise ValueError("A draft request is already pending for this story")
             if action == "approve_lens":
                 if story["opportunity_strength"] not in {"Strong", "Moderate"}:
                     raise ValueError("An open-source lens requires a Strong or Moderate opportunity")
@@ -605,19 +754,73 @@ class DashboardService:
                 "sources": self._draft_sources(story_id),
             }
         with self.database.transaction() as connection:
-            connection.execute(
-                "INSERT INTO review_action(story_id, action, reason, draft_mode, created_at) VALUES(?, ?, ?, ?, ?)",
-                (story_id, action, reason.strip(), mode, now),
+            if work_kind:
+                existing = connection.execute(
+                    """
+                    SELECT id, status FROM work_item
+                    WHERE story_id = ? AND kind = 'draft'
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (story_id,),
+                ).fetchone()
+                if existing and existing["status"] not in {"cancelled", "needs_reapproval", "completed"}:
+                    if existing["status"] in {"failed", "deferred", "waiting"}:
+                        raise ValueError("An existing draft request can be retried from this story")
+                    raise ValueError("A draft request is already pending for this story")
+                if existing and existing["status"] == "needs_reapproval":
+                    current_story = connection.execute(
+                        "SELECT status FROM story_cluster WHERE id = ?", (story_id,)
+                    ).fetchone()
+                    if not current_story or current_story["status"] != "candidate":
+                        raise ValueError("Requalify this story before approving a replacement draft")
+                if existing and existing["status"] == "completed":
+                    current_story = connection.execute(
+                        "SELECT status FROM story_cluster WHERE id = ?", (story_id,)
+                    ).fetchone()
+                    latest_draft = connection.execute(
+                        """
+                        SELECT status FROM draft
+                        WHERE story_id = ?
+                        ORDER BY version DESC LIMIT 1
+                        """,
+                        (story_id,),
+                    ).fetchone()
+                    if (
+                        not current_story
+                        or current_story["status"] != "candidate"
+                        or not latest_draft
+                        or latest_draft["status"] != "Needs Review"
+                    ):
+                        raise ValueError(
+                            "A completed draft already exists; revise it from Drafts & history"
+                        )
+            action_cursor = connection.execute(
+                """
+                INSERT INTO review_action(
+                    story_id, action, reason, draft_mode, created_at, approval_snapshot_json
+                ) VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    story_id,
+                    action,
+                    reason.strip(),
+                    mode,
+                    now,
+                    Database.json(work_payload) if work_kind else "{}",
+                ),
             )
             connection.execute(
                 "UPDATE story_cluster SET status = ?, updated_at = ? WHERE id = ?",
                 (new_status, now, story_id),
             )
             if work_kind:
-                connection.execute(
+                work_payload["review_action_id"] = int(action_cursor.lastrowid)
+                work_cursor = connection.execute(
                     """
-                    INSERT INTO work_item(kind, story_id, status, priority, payload_json, created_at, updated_at)
-                    VALUES(?, ?, 'pending', ?, ?, ?, ?)
+                    INSERT INTO work_item(
+                        kind, story_id, status, priority, payload_json, created_at,
+                        updated_at, idempotency_key, available_at
+                    ) VALUES(?, ?, 'queued', ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         work_kind,
@@ -626,9 +829,78 @@ class DashboardService:
                         Database.json(work_payload),
                         now,
                         now,
+                        f"draft-approval:{int(action_cursor.lastrowid)}",
+                        now,
                     ),
                 )
+                work_item_id = int(work_cursor.lastrowid)
+        if work_item_id is not None:
+            self._dispatch_draft(work_item_id)
         return new_status
+
+    def retry_draft(self, story_id: str) -> int:
+        story = self.database.one("SELECT * FROM story_cluster WHERE id = ?", (story_id,))
+        if not story:
+            raise LookupError("Story not found")
+        work = self.database.one(
+            """
+            SELECT * FROM work_item
+            WHERE story_id = ? AND kind = 'draft'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (story_id,),
+        )
+        if not work:
+            raise LookupError("Draft request not found")
+        status = self._draft_status_view(work)
+        if status["status"] == "needs_reapproval":
+            raise ValueError("Evidence changed after approval; review and approve this story again")
+        if not status["retryable"]:
+            raise ValueError("This draft request is not available for retry")
+        try:
+            from .assistance import ApprovalInvalidated, AssistanceError, build_packet
+
+            build_packet(self.database, int(work["id"]))
+        except ApprovalInvalidated as error:
+            raise ValueError(
+                "Evidence changed after approval; review and approve this story again"
+            ) from error
+        except AssistanceError as error:
+            raise ValueError(str(error)) from error
+
+        now = utc_now()
+        with self.database.transaction() as connection:
+            current = connection.execute(
+                "SELECT status FROM work_item WHERE id = ? AND story_id = ? AND kind = 'draft'",
+                (work["id"], story_id),
+            ).fetchone()
+            if not current:
+                raise LookupError("Draft request not found")
+            current_view = self._draft_status_view(dict(current))
+            if not current_view["retryable"]:
+                raise ValueError("This draft request is not available for retry")
+            connection.execute(
+                """
+                UPDATE work_item SET status = 'queued', last_error_class = NULL,
+                    attempt_count = 0, updated_at = ?, available_at = ? WHERE id = ?
+                """,
+                (now, now, work["id"]),
+            )
+            connection.execute(
+                """
+                INSERT INTO review_action(
+                    story_id, action, reason, draft_mode, created_at, approval_snapshot_json
+                ) VALUES(?, 'retry_draft', 'Retried the existing approved draft request.', ?, ?, ?)
+                """,
+                (
+                    story_id,
+                    json.loads(str(work.get("payload_json") or "{}")).get("mode"),
+                    now,
+                    Database.json({"work_item_id": int(work["id"])}),
+                ),
+            )
+        self._dispatch_draft(int(work["id"]))
+        return int(work["id"])
 
     def save_draft(self, draft_id: int, headline: str, metadata: str, body: str, lens: str) -> int:
         original = self.get_draft(draft_id)

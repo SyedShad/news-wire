@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import shutil
@@ -10,9 +11,11 @@ import socketserver
 import subprocess
 import tempfile
 import threading
+import time
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -28,8 +31,20 @@ class AssistanceDeferred(AssistanceError):
     """Raised when a valid task must wait for budget or isolation."""
 
 
+class AssistanceConfigurationError(AssistanceError):
+    """Raised when the local Codex runtime cannot be used safely."""
+
+
+class AssistanceTransientError(AssistanceError):
+    """Raised when one bounded retry may succeed without human action."""
+
+
 class ApprovalInvalidated(AssistanceError):
     """Raised when volatile evidence changed after human draft approval."""
+
+
+class AssistanceLeaseLost(AssistanceError):
+    """Raised when a superseding worker owns the durable work item."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,19 +79,49 @@ def _escaped_profile_path(path: Path) -> str:
     return str(path).replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _safe_process_failure(result: subprocess.CompletedProcess[str]) -> str:
-    detail = (result.stderr or result.stdout).strip()
-    marker = detail.rfind("ERROR:")
-    if marker >= 0:
-        return detail[marker : marker + 1000]
-    if "\n" not in detail and len(detail) <= 240:
-        return detail
-    return f"process exited with status {result.returncode}"
+def _known_codex_binary_paths() -> tuple[Path, ...]:
+    relative = Path("ChatGPT.app/Contents/Resources/codex")
+    return (
+        Path("/Applications") / relative,
+        Path.home() / "Applications" / relative,
+    )
+
+
+def _resolve_codex_binary(explicit: Path | None) -> Path:
+    candidates: list[Path] = []
+    if explicit is not None:
+        candidates.append(explicit.expanduser())
+    path_binary = shutil.which("codex")
+    if path_binary:
+        candidates.append(Path(path_binary))
+    candidates.extend(_known_codex_binary_paths())
+
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if resolved.is_file() and os.access(resolved, os.X_OK):
+            return resolved
+    raise AssistanceConfigurationError(
+        "codex_unavailable: Codex CLI executable was not found"
+    )
+
+
+def _codex_sandbox_rule(codex_binary: Path) -> tuple[str, Path]:
+    for parent in codex_binary.parents:
+        if parent.suffix == ".app":
+            return "subpath", parent
+    executable_directory = codex_binary.parent
+    if executable_directory == Path("/"):
+        return "literal", codex_binary
+    return "subpath", executable_directory
 
 
 def sandbox_profile(task_directory: Path, codex_binary: Path, auth_file: Path) -> str:
     task = _escaped_profile_path(task_directory)
-    codex_root = _escaped_profile_path(codex_binary.parents[2])
+    codex_rule, codex_access_path = _codex_sandbox_rule(codex_binary)
+    codex_access = _escaped_profile_path(codex_access_path)
     auth = _escaped_profile_path(auth_file)
     return f"""(version 1)
 (deny default)
@@ -95,7 +140,7 @@ def sandbox_profile(task_directory: Path, codex_binary: Path, auth_file: Path) -
   (subpath \"/bin\")
   (subpath \"/private/etc\")
   (subpath \"/Library/Apple\")
-  (subpath \"{codex_root}\")
+  ({codex_rule} \"{codex_access}\")
   (subpath \"{task}\")
   (literal \"{auth}\"))
 (allow file-write* (subpath \"{task}\"))
@@ -111,10 +156,7 @@ class CodexInvoker:
         auth_file: Path | None = None,
         runner: CommandRunner = _run_command,
     ):
-        binary = codex_binary or Path(shutil.which("codex") or "")
-        if not binary or not binary.exists():
-            raise AssistanceError("Codex CLI is not installed")
-        self.codex_binary = binary.resolve()
+        self.codex_binary = _resolve_codex_binary(codex_binary)
         self.sandbox_binary = sandbox_binary
         self.auth_file = (auth_file or Path.home() / ".codex" / "auth.json").resolve()
         self.runner = runner
@@ -124,7 +166,9 @@ class CodexInvoker:
         if len(packet_text.encode("utf-8")) > 64_000:
             raise AssistanceError("Processing packet exceeds the 64 KB boundary")
         if not self.auth_file.is_file():
-            raise AssistanceError("Codex authentication is unavailable")
+            raise AssistanceConfigurationError(
+                "codex_authentication_unavailable: Codex authentication is unavailable"
+            )
         with tempfile.TemporaryDirectory(prefix="news-wire-codex-") as temporary:
             task = Path(temporary).resolve()
             isolated_home = task / "home"
@@ -164,16 +208,23 @@ class CodexInvoker:
                 "PATH": "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
                 "TMPDIR": str(task),
             }
-            result = self.runner(arguments, prompt, task, environment)
+            try:
+                result = self.runner(arguments, prompt, task, environment)
+            except subprocess.TimeoutExpired as error:
+                raise AssistanceTransientError(
+                    "codex_timeout: Codex draft generation timed out"
+                ) from error
             if result.returncode != 0:
-                raise AssistanceError(
-                    f"Codex invocation failed: {_safe_process_failure(result)}"
+                raise AssistanceTransientError(
+                    f"codex_process_failed: Codex exited with status {result.returncode}"
                 )
             raw = result_path.read_text(encoding="utf-8") if result_path.exists() else result.stdout
             try:
                 payload = json.loads(raw)
             except json.JSONDecodeError as error:
-                raise AssistanceError("Codex returned malformed JSON") from error
+                raise AssistanceTransientError(
+                    "codex_result_invalid: Codex returned malformed JSON"
+                ) from error
             validate_result(packet, payload)
             model = "account-default"
             return InvocationResult(payload, model, len(packet_text.encode("utf-8")), len(raw.encode("utf-8")))
@@ -322,24 +373,92 @@ def _revalidate_approval(
 
 
 class AssistanceService:
-    def __init__(self, database: Database, invoker: CodexInvoker):
+    def __init__(
+        self,
+        database: Database,
+        invoker: CodexInvoker,
+        *,
+        retry_delay_seconds: int = 15,
+        sleeper: Callable[[float], None] = time.sleep,
+    ):
         self.database = database
         self.invoker = invoker
+        self.retry_delay_seconds = max(0, retry_delay_seconds)
+        self.sleeper = sleeper
 
-    def process_next(self) -> int | None:
-        if self.database.get_state("assistance_isolation_gate", "not_run") != "passed":
-            raise AssistanceDeferred("Packet-only isolation has not passed")
-        if self.database.get_state("assistance_enabled", "false") != "true":
-            raise AssistanceDeferred("ChatGPT assistance is disabled")
-        work = self.database.one(
-            """
-            SELECT * FROM work_item
-            WHERE kind IN ('draft', 'research', 'semantic') AND status IN ('pending', 'queued')
-            ORDER BY priority DESC, created_at LIMIT 1
-            """
-        )
+    def process_next(self, *, drafts_only: bool = False) -> int | None:
+        self._ensure_available()
+        work = self._claim_work(drafts_only=drafts_only)
         if not work:
             return None
+        return self._process_claimed(work)
+
+    def process(self, work_item_id: int) -> int | None:
+        self._ensure_available(work_item_id)
+        work = self._claim_work(work_item_id=work_item_id)
+        if not work:
+            return None
+        return self._process_claimed(work)
+
+    def _ensure_available(self, work_item_id: int | None = None) -> None:
+        if self.database.get_state("assistance_isolation_gate", "not_run") != "passed":
+            if work_item_id is not None:
+                self._mark_waiting(work_item_id, "isolation_not_passed")
+            raise AssistanceDeferred("Packet-only isolation has not passed")
+        if self.database.get_state("assistance_enabled", "false") != "true":
+            if work_item_id is not None:
+                self._mark_waiting(work_item_id, "assistance_disabled")
+            raise AssistanceDeferred("ChatGPT assistance is disabled")
+
+    def _claim_work(
+        self,
+        *,
+        work_item_id: int | None = None,
+        drafts_only: bool = False,
+    ) -> dict[str, Any] | None:
+        now = _now()
+        lease_until = _after(seconds=360)
+        kind_filter = "AND kind = 'draft'" if drafts_only else ""
+        identifier_filter = "AND id = ?" if work_item_id is not None else ""
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                f"""
+                SELECT * FROM work_item
+                WHERE kind IN ('draft', 'research', 'semantic')
+                  {kind_filter}
+                  {identifier_filter}
+                  AND (
+                    (status IN ('pending', 'queued', 'waiting')
+                     AND (available_at IS NULL OR available_at <= ?))
+                    OR (status = 'generating' AND available_at IS NOT NULL AND available_at <= ?)
+                  )
+                ORDER BY CASE WHEN kind = 'draft' THEN 0 ELSE 1 END,
+                         priority DESC, created_at
+                LIMIT 1
+                """,
+                (
+                    (work_item_id, now, now)
+                    if work_item_id is not None
+                    else (now, now)
+                ),
+            ).fetchone()
+            if not row:
+                return None
+            connection.execute(
+                """
+                UPDATE work_item
+                SET status = 'generating', updated_at = ?, available_at = ?,
+                    attempt_count = attempt_count + 1, last_error_class = NULL
+                WHERE id = ?
+                """,
+                (now, lease_until, row["id"]),
+            )
+            claimed = connection.execute(
+                "SELECT * FROM work_item WHERE id = ?", (row["id"],)
+            ).fetchone()
+        return dict(claimed) if claimed else None
+
+    def _process_claimed(self, work: dict[str, Any]) -> int | None:
         category = "draft" if work["kind"] == "draft" else "background"
         effort = 2 if work["kind"] == "draft" else 1
         if category == "background":
@@ -349,27 +468,96 @@ class AssistanceService:
                 WHERE category = 'background' AND created_at >= datetime('now', '-24 hours')
                 """
             )["units"]
-            if int(used) + effort > int(self.database.get_state("background_unit_limit", "8")):
+            if int(used) + effort > int(
+                self.database.get_state("background_unit_limit", "8")
+            ):
+                self._mark_waiting(int(work["id"]), "background_budget_exhausted")
                 raise AssistanceDeferred("Background ChatGPT allowance is exhausted")
-        packet = build_packet(self.database, int(work["id"]))
-        self.database.execute(
-            "UPDATE work_item SET status = 'generating', updated_at = ? WHERE id = ?",
-            (_now(), work["id"]),
-        )
         try:
+            packet = build_packet(self.database, int(work["id"]))
             result = self.invoker.invoke(packet)
             return self._store_result(work, packet, result, category, effort)
-        except ApprovalInvalidated:
+        except (ApprovalInvalidated, AssistanceLeaseLost):
+            raise
+        except AssistanceTransientError as error:
+            if int(work.get("attempt_count") or 0) < 2:
+                self._queue_retry(work, error)
+                self.sleeper(float(self.retry_delay_seconds))
+                return self.process(int(work["id"]))
+            self._mark_failed(work, error)
+            raise
+        except AssistanceDeferred as error:
+            self._mark_waiting(int(work["id"]), _error_code(error))
             raise
         except Exception as error:
-            self.database.execute(
-                """
-                UPDATE work_item SET status = 'deferred', last_error_class = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (type(error).__name__, _now(), work["id"]),
-            )
+            self._mark_failed(work, error)
             raise
+
+    def _queue_retry(self, work: dict[str, Any], error: Exception) -> None:
+        now = _now()
+        available = _after(seconds=self.retry_delay_seconds)
+        code = _error_code(error)
+        self.database.execute(
+            """
+            UPDATE work_item
+            SET status = 'queued', available_at = ?, last_error_class = ?, updated_at = ?
+            WHERE id = ? AND status = 'generating' AND attempt_count = ?
+            """,
+            (available, code, now, work["id"], work["attempt_count"]),
+        )
+        self._record_diagnostic(
+            "info", "Draft generation will retry once after a temporary failure.", work, code
+        )
+
+    def _mark_failed(self, work: dict[str, Any], error: Exception) -> None:
+        code = _error_code(error)
+        now = _now()
+        self.database.execute(
+            """
+            UPDATE work_item
+            SET status = 'failed', available_at = NULL, last_error_class = ?, updated_at = ?
+            WHERE id = ? AND status = 'generating' AND attempt_count = ?
+            """,
+            (code, now, work["id"], work["attempt_count"]),
+        )
+        logging.getLogger(__name__).error(
+            "Assistance work item %s failed safely with %s", work["id"], code
+        )
+        _write_local_traceback(self.database, int(work["id"]), code, error)
+        self._record_diagnostic(
+            "warning", "Draft generation failed safely and requires review.", work, code
+        )
+
+    def _mark_waiting(self, work_item_id: int, code: str) -> None:
+        now = _now()
+        self.database.execute(
+            """
+            UPDATE work_item
+            SET status = 'waiting', available_at = NULL, last_error_class = ?, updated_at = ?
+            WHERE id = ? AND status IN ('pending', 'queued', 'generating', 'waiting')
+            """,
+            (code, now, work_item_id),
+        )
+
+    def _record_diagnostic(
+        self,
+        level: str,
+        message: str,
+        work: dict[str, Any],
+        code: str,
+    ) -> None:
+        self.database.execute(
+            """
+            INSERT INTO diagnostic_event(level, event_type, message, created_at, detail_json)
+            VALUES(?, 'assistance', ?, ?, ?)
+            """,
+            (
+                level,
+                message,
+                _now(),
+                Database.json({"error_class": code, "work_item_id": int(work["id"])}),
+            ),
+        )
 
     def _store_result(
         self,
@@ -381,6 +569,16 @@ class AssistanceService:
     ) -> int:
         now = _now()
         with self.database.transaction() as connection:
+            ownership = connection.execute(
+                "SELECT status, attempt_count FROM work_item WHERE id = ?",
+                (work["id"],),
+            ).fetchone()
+            if (
+                not ownership
+                or ownership["status"] != "generating"
+                or int(ownership["attempt_count"]) != int(work["attempt_count"])
+            ):
+                raise AssistanceLeaseLost("A newer worker owns this assistance request")
             result_cursor = connection.execute(
                 """
                 INSERT INTO assistance_result(
@@ -395,9 +593,18 @@ class AssistanceService:
                 INSERT INTO usage_ledger(
                     category, operation, effort_units, model, result, created_at,
                     prompt_version, input_size, output_size, retry_count
-                ) VALUES(?, ?, ?, ?, 'accepted', ?, 'v1', ?, ?, 0)
+                ) VALUES(?, ?, ?, ?, 'accepted', ?, 'v1', ?, ?, ?)
                 """,
-                (category, packet["operation"], effort, result.model, now, result.input_size, result.output_size),
+                (
+                    category,
+                    packet["operation"],
+                    effort,
+                    result.model,
+                    now,
+                    result.input_size,
+                    result.output_size,
+                    max(0, int(work.get("attempt_count") or 1) - 1),
+                ),
             )
             if work["kind"] == "draft":
                 story_id = str(work["story_id"])
@@ -436,10 +643,145 @@ class AssistanceService:
             else:
                 output_id = int(result_cursor.lastrowid)
             connection.execute(
-                "UPDATE work_item SET status = 'completed', updated_at = ? WHERE id = ?",
+                """
+                UPDATE work_item
+                SET status = 'completed', updated_at = ?, available_at = NULL,
+                    last_error_class = NULL
+                WHERE id = ?
+                """,
                 (now, work["id"]),
             )
         return output_id
+
+
+def _after(*, seconds: int) -> str:
+    return (
+        datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=max(0, seconds))
+    ).isoformat().replace("+00:00", "Z")
+
+
+def _error_code(error: Exception) -> str:
+    prefix = str(error).partition(":")[0].strip()
+    if prefix in {
+        "codex_unavailable",
+        "codex_authentication_unavailable",
+        "codex_timeout",
+        "codex_process_failed",
+        "codex_result_invalid",
+    }:
+        return prefix
+    if isinstance(error, ApprovalInvalidated):
+        return "approval_invalidated"
+    if isinstance(error, AssistanceDeferred):
+        return "assistance_waiting"
+    if isinstance(error, AssistanceTransientError):
+        return "temporary_assistance_failure"
+    if isinstance(error, AssistanceConfigurationError):
+        return "assistance_configuration_error"
+    if isinstance(error, AssistanceError):
+        return "assistance_validation_error"
+    return "unexpected_error"
+
+
+def _write_local_traceback(
+    database: Database, work_item_id: int, code: str, error: Exception
+) -> None:
+    """Keep a local stack trace without persisting exception text or payloads."""
+    try:
+        logs = database.paths.operations / "logs"
+        logs.mkdir(parents=True, exist_ok=True, mode=0o700)
+        destination = logs / "assistance.stderr.log"
+        stack = "".join(
+            f'  File "{frame.filename}", line {frame.lineno}, in {frame.name}\n'
+            for frame in traceback.extract_tb(error.__traceback__)
+        )
+        with destination.open("a", encoding="utf-8") as handle:
+            handle.write(
+                f"[{_now()}] work_item={work_item_id} error_class={code}\n"
+                f"exception_type={type(error).__name__}\n{stack}\n"
+            )
+        destination.chmod(0o600)
+    except OSError:
+        logging.getLogger(__name__).warning(
+            "Could not persist the local assistance traceback for work item %s",
+            work_item_id,
+        )
+
+
+def run_assistance_work(
+    database: Database,
+    work_item_id: int | None = None,
+    *,
+    drafts_only: bool = False,
+) -> int | None:
+    """Process one durable assistance item and make bootstrap failures visible."""
+    now = _now()
+    target = database.one(
+        f"""
+        SELECT * FROM work_item
+        WHERE kind IN ('draft', 'research', 'semantic')
+          {"AND kind = 'draft'" if drafts_only else ""}
+          {"AND id = ?" if work_item_id is not None else ""}
+          AND (
+            (status IN ('pending', 'queued', 'waiting')
+             AND (available_at IS NULL OR available_at <= ?))
+            OR (status = 'generating' AND available_at IS NOT NULL AND available_at <= ?)
+          )
+        ORDER BY CASE WHEN kind = 'draft' THEN 0 ELSE 1 END,
+                 priority DESC, created_at
+        LIMIT 1
+        """,
+        (work_item_id, now, now) if work_item_id is not None else (now, now),
+    )
+    if not target:
+        return None
+    try:
+        invoker = CodexInvoker()
+    except Exception as error:
+        code = _error_code(error)
+        now = _now()
+        with database.transaction() as connection:
+            updated = connection.execute(
+                """
+                UPDATE work_item
+                SET status = 'failed', available_at = NULL,
+                    last_error_class = ?, updated_at = ?
+                WHERE id = ? AND status = ? AND attempt_count = ?
+                  AND available_at IS ?
+                """,
+                (
+                    code,
+                    now,
+                    target["id"],
+                    target["status"],
+                    target["attempt_count"],
+                    target["available_at"],
+                ),
+            )
+            if updated.rowcount != 1:
+                return None
+            connection.execute(
+                """
+                INSERT INTO diagnostic_event(
+                    level, event_type, message, created_at, detail_json
+                ) VALUES('warning', 'assistance', ?, ?, ?)
+                """,
+                (
+                    "Draft generation could not start and requires review.",
+                    now,
+                    Database.json(
+                        {"error_class": code, "work_item_id": int(target["id"])}
+                    ),
+                ),
+            )
+        logging.getLogger(__name__).error(
+            "Assistance work item %s could not initialize safely with %s",
+            target["id"],
+            code,
+        )
+        _write_local_traceback(database, int(target["id"]), code, error)
+        raise
+    return AssistanceService(database, invoker).process(int(target["id"]))
 
 
 def _now() -> str:

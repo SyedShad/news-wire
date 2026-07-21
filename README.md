@@ -12,7 +12,7 @@ Reporting is neutral by default. A separately labelled open-source lens is avail
 - Local SQLite and content-addressed evidence storage outside Git, with explicit migration, diagnostics, integrity, storage-pressure, and purge operations.
 - User-level macOS LaunchAgent at minute `00` and `30`, plus login/load recovery. It runs while the Mac is locked and awake, but does not prevent sleep or change power policy.
 - Packet-only Codex assistance behind a mandatory isolation canary and local usage budget. No API key or paid fallback is supported.
-- Approval-only drafting, versioned evidence and guidance history, production-safe Markdown/HTML source exports, and native notices protected by a 72-hour fail-closed automatic activation gate and historical-alert watermark.
+- Approval-only immediate drafting with durable recovery, visible generation and retry states, versioned evidence and guidance history, production-safe Markdown/HTML source exports, and native notices protected by a 72-hour fail-closed automatic activation gate and historical-alert watermark.
 
 ## Install locally
 
@@ -36,7 +36,7 @@ Open the on-demand interface with:
 
 The dashboard binds only to loopback, selects a random port, and requires its one-time process-local access link. See [docs/operator-guide.md](docs/operator-guide.md) for routine operation and recovery.
 
-Release `0.3.1` retains schema version 3. After completing a real evidence-to-revised-draft workflow, run the notification canary and `pilot extend-validation --auto-activate`; `pilot readiness` reports every activation gate.
+Release `0.3.2` retains schema version 3. Explicit draft approval starts generation immediately; the half-hour worker remains a recovery fallback. After completing a real evidence-to-revised-draft workflow, run the notification canary and `pilot extend-validation --auto-activate`; `pilot readiness` reports every activation gate.
 
 ## Development and verification
 

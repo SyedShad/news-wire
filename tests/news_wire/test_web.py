@@ -133,8 +133,9 @@ def test_review_action_and_source_toggle_are_functional(app: Flask, client) -> N
     )
     assert story["status"] == "approved"
     approved_page = client.get("/stories/story-demo-runtime-001")
-    assert b"Draft request queued" in approved_page.data
-    assert b"Approve neutral brief" not in approved_page.data
+    assert b"Draft generation" in approved_page.data
+    assert b"Starting" in approved_page.data
+    assert b"Approve and create neutral draft" not in approved_page.data
 
     source_before = app.config["DATABASE"].one(
         "SELECT enabled FROM source_registry WHERE id = 'hacker-news'"
@@ -184,6 +185,139 @@ def test_draft_edit_creates_new_version(app: Flask, client) -> None:
     assert b"Version comparison" in comparison.data
     assert b"v2" in comparison.data and b"v1" in comparison.data
     assert b"Open previous version" in comparison.data
+
+
+def test_approval_exposes_live_status_and_retry_of_same_request(tmp_path: Path) -> None:
+    dispatched: list[int] = []
+    application = create_app(
+        data_root=tmp_path / "wire-data",
+        auth_required=False,
+        draft_callback=dispatched.append,
+        test_config={"TESTING": True, "SECRET_KEY": "test-secret"},
+    )
+    seed_demo_data(application.config["DATABASE"])
+    browser = application.test_client()
+    token = csrf(browser)
+
+    approved = browser.post(
+        "/stories/story-demo-runtime-001/review",
+        data={"csrf_token": token, "action": "approve_neutral", "reason": "Facts first."},
+    )
+    assert approved.status_code == 303
+    assert approved.headers["Location"].endswith(
+        "/stories/story-demo-runtime-001?draft_started=1"
+    )
+    assert len(dispatched) == 1
+    work_id = dispatched[0]
+    status = browser.get("/stories/story-demo-runtime-001/draft-status.json")
+    assert status.status_code == 200
+    assert status.json["status"] == "starting"
+    assert status.json["active"] is True
+    assert status.json["draft_url"] is None
+
+    application.config["DATABASE"].execute(
+        "UPDATE work_item SET status = 'failed', attempt_count = 2, last_error_class = 'codex_timeout' WHERE id = ?",
+        (work_id,),
+    )
+    failed_page = browser.get("/stories/story-demo-runtime-001")
+    assert b"Failed" in failed_page.data
+    assert b"Retry generation" in failed_page.data
+    retried = browser.post(
+        "/stories/story-demo-runtime-001/draft/retry",
+        data={"csrf_token": token},
+    )
+    assert retried.status_code == 303
+    assert dispatched == [work_id, work_id]
+    assert application.config["DATABASE"].one(
+        "SELECT COUNT(*) AS count FROM work_item WHERE kind = 'draft'"
+    )["count"] == 1
+    assert application.config["DATABASE"].one(
+        "SELECT COUNT(*) AS count FROM review_action WHERE action = 'approve_neutral'"
+    )["count"] == 1
+
+
+def test_draft_status_and_retry_enforce_story_boundary_and_csrf(app: Flask, client) -> None:
+    token = csrf(client)
+    assert client.get("/stories/missing/draft-status.json").status_code == 404
+    assert client.post("/stories/story-demo-runtime-001/draft/retry").status_code == 400
+    assert client.post(
+        "/stories/missing/draft/retry", data={"csrf_token": token}
+    ).status_code == 404
+
+
+def test_draft_polling_opens_only_a_continuously_visible_story_tab(client) -> None:
+    javascript = client.get("/static/app.js")
+
+    assert javascript.status_code == 200
+    assert b"draftTabWasHidden" in javascript.data
+    assert b"draftAutoOpen" in javascript.data
+    assert b"draftAutoOpen && status.status === 'ready'" in javascript.data
+    assert b"!draftTabWasHidden && !document.hidden" in javascript.data
+
+
+def test_fast_completed_approval_still_marks_original_tab_for_auto_open(tmp_path: Path) -> None:
+    holder: dict[str, object] = {}
+
+    def complete_immediately(work_item_id: int) -> None:
+        database = holder["database"]
+        now = "2026-07-14T12:00:00Z"
+        database.execute(
+            """
+            INSERT INTO draft(
+                story_id, mode, status, version, headline, metadata, body,
+                lens, sources_json, created_at, updated_at
+            ) VALUES(
+                'story-demo-runtime-001', 'Neutral News Brief', 'Current', 1,
+                'Immediate draft', 'Fresh', 'Ready before redirect.', '', '[]', ?, ?
+            )
+            """,
+            (now, now),
+        )
+        database.execute(
+            "UPDATE work_item SET status = 'completed', updated_at = ? WHERE id = ?",
+            (now, work_item_id),
+        )
+        database.execute(
+            "UPDATE story_cluster SET status = 'draft_ready', updated_at = ? WHERE id = 'story-demo-runtime-001'",
+            (now,),
+        )
+
+    application = create_app(
+        data_root=tmp_path / "wire-data",
+        auth_required=False,
+        draft_callback=complete_immediately,
+        test_config={"TESTING": True, "SECRET_KEY": "test-secret"},
+    )
+    holder["database"] = application.config["DATABASE"]
+    seed_demo_data(application.config["DATABASE"])
+    browser = application.test_client()
+    token = csrf(browser)
+
+    approved = browser.post(
+        "/stories/story-demo-runtime-001/review",
+        data={"csrf_token": token, "action": "approve_neutral"},
+    )
+    rendered = browser.get(approved.headers["Location"])
+
+    assert b'data-draft-active="false"' in rendered.data
+    assert b'data-draft-auto-open="true"' in rendered.data
+    assert b"Draft ready" in rendered.data
+    assert b'href="/drafts/2"' in rendered.data
+
+
+def test_drafts_history_shows_failed_request_without_draft(app: Flask, client) -> None:
+    token = csrf(client)
+    client.post(
+        "/stories/story-demo-runtime-001/review",
+        data={"csrf_token": token, "action": "approve_neutral"},
+    )
+    app.config["DATABASE"].execute(
+        "UPDATE work_item SET status = 'failed', last_error_class = 'codex_timeout' WHERE story_id = 'story-demo-runtime-001'"
+    )
+    rendered = client.get("/drafts")
+    assert b"Request" in rendered.data
+    assert b"Failed" in rendered.data
+    assert b"Transparent inference runtime" in rendered.data
 
 
 def test_draft_exposes_copy_to_clipboard_output(client) -> None:

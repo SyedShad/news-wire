@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .collector import Collector, ScanSummary, utc_now
-from .assistance import AssistanceDeferred, AssistanceService, CodexInvoker
+from .assistance import AssistanceDeferred, run_assistance_work
 from .evidence import EvidenceEnricher
 from .notifications import NativeNotifier
 from .pilot import PilotManager
@@ -84,6 +84,7 @@ class Worker:
             return WorkerResult("coalesced", None, True)
         try:
             deadline = datetime.now(UTC) + timedelta(minutes=25)
+            self._process_assistance(drafts_only=True)
             actual_trigger, start, end = self._recovery_interval(
                 trigger, interval_start, interval_end
             )
@@ -108,7 +109,10 @@ class Worker:
                 )
             self._maintain_watches()
             self._process_evidence(deadline)
-            if datetime.now(UTC) < deadline - timedelta(minutes=2):
+            # A draft may need two five-minute Codex attempts plus its retry
+            # delay. Do not start end-of-run assistance unless that full bound
+            # fits inside the worker's 25-minute deadline.
+            if datetime.now(UTC) < deadline - timedelta(minutes=11):
                 self._process_assistance()
             PilotManager(self.database).try_auto_activate()
             NativeNotifier(self.database).dispatch_pending()
@@ -124,21 +128,15 @@ class Worker:
                 return
             processed += 1
 
-    def _process_assistance(self) -> None:
+    def _process_assistance(self, *, drafts_only: bool = False) -> None:
         if self.database.get_state("assistance_enabled", "false") != "true":
             return
         try:
-            AssistanceService(self.database, CodexInvoker()).process_next()
+            run_assistance_work(self.database, drafts_only=drafts_only)
         except AssistanceDeferred:
             return
-        except Exception as error:
-            self.database.execute(
-                """
-                INSERT INTO diagnostic_event(level, event_type, message, created_at, detail_json)
-                VALUES('warning', 'assistance', 'A queued assistance task was deferred after a validated local failure.', ?, ?)
-                """,
-                (utc_now(), Database.json({"error_class": type(error).__name__})),
-            )
+        except Exception:
+            return
 
     def _maintain_watches(self) -> None:
         now = datetime.now(UTC).replace(microsecond=0)

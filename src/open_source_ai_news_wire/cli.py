@@ -9,7 +9,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 from .config import resolve_runtime_paths
-from .assistance import AssistanceService, CodexInvoker, run_isolation_canary
+from .assistance import CodexInvoker, run_assistance_work, run_isolation_canary
 from .demo import seed_demo_data
 from .installer import LocalInstaller
 from .operations import create_purge_plan, execute_purge_plan, export_diagnostics
@@ -321,7 +321,7 @@ def main(argv: list[str] | None = None) -> int:
         elif arguments.action == "disable":
             database.set_state("assistance_enabled", "false", now)
         elif arguments.action == "run-pending":
-            output_id = AssistanceService(database, CodexInvoker()).process_next()
+            output_id = run_assistance_work(database)
             print(json.dumps({"output_id": output_id}, indent=2))
             return 0
         print(json.dumps({

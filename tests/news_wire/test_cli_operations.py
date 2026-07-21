@@ -173,14 +173,7 @@ def test_cli_assistance_and_pilot(monkeypatch, tmp_path: Path, capsys) -> None:
     assert cli.main(["--data-root", str(root), "assistance", "disable"]) == 0
     capsys.readouterr()
 
-    class FakeAssistance:
-        def __init__(self, _database, _invoker):
-            pass
-
-        def process_next(self):
-            return 42
-
-    monkeypatch.setattr(cli, "AssistanceService", FakeAssistance)
+    monkeypatch.setattr(cli, "run_assistance_work", lambda _database: 42)
     assert cli.main(["--data-root", str(root), "assistance", "run-pending"]) == 0
     assert json.loads(capsys.readouterr().out)["output_id"] == 42
 
