@@ -1,12 +1,12 @@
 # Open Source AI News Wire — V1 Implementation Plan
 
-Status: V1 implementation complete in release 0.3.1; additional 72-hour repair validation pending live human workflow checkpoint
+Status: V1 implementation complete in release 0.3.2; additional 72-hour repair validation pending live human workflow checkpoint
 
 Planning date: 2026-07-14
 
 Completion update: 2026-07-17
 
-Release 0.3.1 retains schema 3 and completes deterministic collection, DNS-aware whole-Mac outage grouping, half-hour schedule reporting, evidence-first qualification, production-safe draft exports, five dedicated non-SEC source adapters, native notification watermarking, and fail-closed automatic pilot activation. SEC access remains excluded by operator choice. The remaining rollout work is operational: install the immutable release, perform one human-approved live draft and notification canary, begin the additional 72-hour validation epoch, and let the worker activate notifications only after all readiness gates pass.
+Release 0.3.2 retains schema 3 and completes deterministic collection, DNS-aware whole-Mac outage grouping, half-hour schedule reporting, evidence-first qualification, production-safe draft exports, five dedicated non-SEC source adapters, immediate human-approved drafting with durable recovery, native notification watermarking, and fail-closed automatic pilot activation. SEC access remains excluded by operator choice. The remaining rollout work is operational: install the immutable release, verify the two preserved approvals complete without duplication, perform the notification canary, begin the additional 72-hour validation epoch, and let the worker activate notifications only after all readiness gates pass.
 
 Target environment: one local macOS user account
 
@@ -465,7 +465,7 @@ codex exec --ephemeral --ignore-user-config --sandbox read-only \
 
 Read-only mode alone may not prove that unrelated readable files are invisible. Before scheduled assistance is enabled, implementation must run an adversarial canary test showing that the process cannot read the repository, runtime root, home-directory test secrets, or private network resources. Use a restricted outer macOS execution profile or equivalent isolation around the temporary task directory if required.
 
-This is a hard gate: if packet-only filesystem and network access cannot be demonstrated, scheduled ChatGPT assistance remains disabled. The deterministic scout continues and items become deferred or Human Classification Needed. V1 must not solve this by granting broader access, using an API key, or enabling a paid service.
+This is a hard gate: if packet-only filesystem and network access cannot be demonstrated, scheduled ChatGPT assistance remains disabled. The deterministic scout continues and draft work remains visibly waiting while other items require human classification. V1 must not solve this by granting broader access, using an API key, or enabling a paid service.
 
 Ephemeral CLI execution is a local-state control, not a promise that OpenAI retains nothing. The interface must explain that selected packets go to OpenAI and that account-level data controls govern remote retention and model-improvement settings.
 
@@ -509,7 +509,7 @@ Use the supported account-default Codex model and record the actual model. Use l
 2. Human may accept, edit facts/notes, request more research, archive, or approve drafting.
 3. Draft approval explicitly selects a mode.
 4. The system stores the approval snapshot and revalidates it.
-5. State moves `Pending` → `Generating` → `Draft Ready`, or to a visible failure/deferred state.
+5. State moves `Starting` → `Generating` → `Draft Ready`, or to a visible Waiting, Retrying, Failed, or Needs Reapproval state.
 6. Revisions create new versions and require explicit revision approval when responding to a correction.
 
 ### Draft modes
@@ -898,7 +898,7 @@ Before writing application code:
 - [x] Provision a pinned Python 3.12 runtime and locked environment.
 - [x] Confirm the default runtime root is outside Git and cloud-synchronized folders.
 - [x] Preserve the local runtime corpus with no backup or synchronization feature.
-- [x] Implement and verify the V1 application through release 0.3.1.
+- [x] Implement and verify the V1 application through release 0.3.2.
 
 ## 24. Reference decisions and current documentation
 

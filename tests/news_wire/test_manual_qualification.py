@@ -240,6 +240,74 @@ def test_excluding_qualifying_evidence_invalidates_pending_draft(tmp_path) -> No
     ) == {"status": "needs_reapproval", "last_error_class": "evidence_invalidated"}
 
 
+def test_completed_draft_is_preserved_and_can_be_reapproved_only_after_requalification(tmp_path) -> None:
+    database, service = _service(tmp_path)
+    story_id = "story-demo-watch-003"
+    claim_id = int(database.one("SELECT id FROM claim WHERE story_id = ?", (story_id,))["id"])
+    evidence_id = _inspect(database, service, story_id, "https://official.example.org/release")
+    service.confirm_evidence(
+        story_id, evidence_id, "Event", {claim_id: "supports"}, first_party=True
+    )
+    service.qualify_story(story_id)
+    service.review(story_id, "approve_neutral")
+    work_id = int(
+        database.one(
+            "SELECT id FROM work_item WHERE story_id = ? AND kind = 'draft'", (story_id,)
+        )["id"]
+    )
+    now = "2026-07-14T12:00:00Z"
+    database.execute(
+        """
+        INSERT INTO draft(
+            story_id, mode, status, version, headline, metadata, body,
+            lens, sources_json, created_at, updated_at
+        ) VALUES(?, 'Neutral News Brief', 'Current', 1, 'Preserved draft',
+                 'Fresh', 'Evidence-backed brief.', '', '[]', ?, ?)
+        """,
+        (story_id, now, now),
+    )
+    database.execute(
+        "UPDATE work_item SET status = 'completed', updated_at = ? WHERE id = ?",
+        (now, work_id),
+    )
+    database.execute(
+        "UPDATE story_cluster SET status = 'draft_ready', updated_at = ? WHERE id = ?",
+        (now, story_id),
+    )
+
+    with pytest.raises(ValueError, match="completed draft already exists"):
+        service.review(story_id, "approve_neutral")
+
+    service.exclude_evidence(story_id, evidence_id, "The source was withdrawn.")
+    invalidated = service.get_story(story_id)
+    assert invalidated["draft_request"]["status"] == "needs_reapproval"
+    assert invalidated["draft_request"]["retryable"] is False
+    assert database.one(
+        "SELECT status FROM draft WHERE story_id = ?", (story_id,)
+    ) == {"status": "Needs Review"}
+    with pytest.raises(ValueError, match="not available for retry"):
+        service.retry_draft(story_id)
+    with pytest.raises(ValueError, match="Evidence and importance"):
+        service.review(story_id, "approve_neutral")
+
+    database.execute(
+        "UPDATE evidence_source SET status = 'confirmed', excluded_at = NULL WHERE id = ?",
+        (evidence_id,),
+    )
+    assert recalculate_story_qualification(database, story_id)["qualified"] is True
+    assert database.one(
+        "SELECT status FROM story_cluster WHERE id = ?", (story_id,)
+    ) == {"status": "candidate"}
+    assert service.review(story_id, "approve_neutral") == "approved"
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM work_item WHERE story_id = ? AND kind = 'draft'",
+        (story_id,),
+    ) == {"count": 2}
+    assert database.one(
+        "SELECT status FROM draft WHERE story_id = ?", (story_id,)
+    ) == {"status": "Needs Review"}
+
+
 def test_evidence_url_and_dns_boundaries() -> None:
     assert normalize_public_https_url("https://example.com/news?utm_source=x") == "https://example.com/news"
     for url in (

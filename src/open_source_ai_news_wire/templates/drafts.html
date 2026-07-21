@@ -4,11 +4,17 @@
 <header class="page-header"><div><p class="kicker">Human-approved editorial work</p><h1>Drafts & history</h1><p class="lede">Every revision is a new version. Corrections never silently replace earlier text.</p></div></header>
 <section class="panel">
   <div class="table-list draft-list">
-  {% for draft in drafts %}
-    <a class="table-row" href="{{ url_for('draft_detail', draft_id=draft.id) }}">
-      <div><span class="tag tag-outline">v{{ draft.version }}</span><span class="status-chip draft-{{ draft.status|lower|replace(' ','-') }}">{{ draft.status }}</span></div>
-      <div class="table-main"><strong>{{ draft.headline }}</strong><small>{{ draft.mode }} · {{ draft.lane }}</small></div>
-      <div class="table-date">{{ draft.updated_at|wire_time }}<span>→</span></div>
+  {% for entry in drafts %}
+    <a class="table-row" href="{{ url_for('draft_detail', draft_id=entry.id) if entry.entry_kind == 'draft' else url_for('story_detail', story_id=entry.story_id) }}">
+      <div>
+        {% if entry.entry_kind == 'draft' %}<span class="tag tag-outline">v{{ entry.version }}</span>{% else %}<span class="tag tag-outline">Request</span>{% endif %}
+        <span class="status-chip draft-{{ entry.display_status|lower|replace(' ','-') }}">{{ entry.display_status }}</span>
+      </div>
+      <div class="table-main">
+        <strong>{{ entry.headline if entry.entry_kind == 'draft' else entry.story_headline }}</strong>
+        <small>{{ entry.mode }} · {{ entry.lane }}{% if entry.entry_kind == 'request' %} · {{ entry.status_message }}{% endif %}</small>
+      </div>
+      <div class="table-date">{{ entry.updated_at|wire_time }}<span>→</span></div>
     </a>
   {% else %}
     <div class="empty-state"><strong>No drafts yet.</strong><span>Approve a verified candidate from the Review Inbox.</span></div>

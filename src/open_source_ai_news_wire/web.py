@@ -8,7 +8,7 @@ import secrets
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from flask import (
@@ -86,6 +86,7 @@ def create_app(
     auth_token: str | None = None,
     auth_required: bool = True,
     operational_controls: bool = False,
+    draft_callback: Callable[[int], None] | None = None,
     test_config: dict[str, Any] | None = None,
 ) -> Flask:
     paths = resolve_runtime_paths(data_root)
@@ -107,10 +108,32 @@ def create_app(
             daemon=True,
         ).start()
 
+    def dispatch_draft_in_background(work_item_id: int) -> None:
+        def generate() -> None:
+            try:
+                from .assistance import run_assistance_work
+
+                run_assistance_work(database, work_item_id)
+            except Exception:
+                # The assistance layer records a safe, user-visible terminal or
+                # retry state. Never let a daemon thread failure stop Flask.
+                return
+
+        threading.Thread(
+            target=generate,
+            name=f"wire-draft-{work_item_id}",
+            daemon=True,
+        ).start()
+
     service = DashboardService(
         database,
         scheduler=scheduler,
         run_callback=run_in_background if operational_controls else None,
+        draft_callback=(
+            draft_callback
+            if draft_callback is not None
+            else dispatch_draft_in_background if operational_controls else None
+        ),
     )
 
     app = Flask(__name__, template_folder="templates", static_folder="static")
@@ -270,7 +293,12 @@ def create_app(
         story = service.get_story(story_id)
         if not story:
             abort(404)
-        return render_template("story.html", page="inbox", story=story)
+        return render_template(
+            "story.html",
+            page="inbox",
+            story=story,
+            auto_open_draft=request.args.get("draft_started") == "1",
+        )
 
     @app.post("/stories/<story_id>/evidence/inspect")
     def inspect_story_evidence(story_id: str) -> Response:
@@ -339,18 +367,52 @@ def create_app(
     def review_story(story_id: str) -> Response:
         action = request.form.get("action", "")
         reason = request.form.get("reason", "")
+        draft_started = False
         try:
             status = service.review(story_id, action, reason)
         except (ValueError, LookupError) as error:
             flash(str(error), "error")
         else:
+            draft_started = status == "approved"
             labels = {
-                "approved": "Draft request queued after human approval.",
+                "approved": "Approval saved. Draft generation is starting now.",
                 "archived": "Story archived. Evidence and history were preserved.",
                 "withdrawn": "Story withdrawn. Its audit history was preserved.",
                 "candidate": "Story accepted as a candidate.",
             }
             flash(labels.get(status, "Review action saved."), "success")
+        destination = url_for(
+            "story_detail",
+            story_id=story_id,
+            **({"draft_started": "1"} if draft_started else {}),
+        )
+        return redirect(destination, code=303)
+
+    @app.get("/stories/<story_id>/draft-status.json")
+    def story_draft_status(story_id: str) -> Response:
+        if not database.one("SELECT 1 AS present FROM story_cluster WHERE id = ?", (story_id,)):
+            abort(404)
+        status = service.draft_status(story_id)
+        if not status:
+            return jsonify({"schema_version": 1, "status": "not_requested", "active": False})
+        payload = {"schema_version": 1, **status}
+        payload["draft_url"] = (
+            url_for("draft_detail", draft_id=status["draft_id"])
+            if status.get("draft_id")
+            else None
+        )
+        return jsonify(payload)
+
+    @app.post("/stories/<story_id>/draft/retry")
+    def retry_story_draft(story_id: str) -> Response:
+        try:
+            service.retry_draft(story_id)
+        except LookupError:
+            abort(404)
+        except ValueError as error:
+            flash(str(error), "error")
+        else:
+            flash("The existing approval is being retried now.", "success")
         return redirect(url_for("story_detail", story_id=story_id), code=303)
 
     @app.get("/stories/<story_id>/evidence.json")

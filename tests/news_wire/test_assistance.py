@@ -2,20 +2,25 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from importlib.resources import files
 from pathlib import Path
 
 import pytest
 
+from open_source_ai_news_wire import assistance as assistance_module
 from open_source_ai_news_wire.assistance import (
     ApprovalInvalidated,
     AssistanceDeferred,
+    AssistanceConfigurationError,
     AssistanceError,
     AssistanceService,
+    AssistanceTransientError,
     CodexInvoker,
     InvocationResult,
     build_packet,
     run_isolation_canary,
+    run_assistance_work,
     sandbox_profile,
     validate_result,
 )
@@ -169,7 +174,239 @@ def test_assistance_disabled_empty_queue_and_invocation_failure_are_explicit(tmp
         AssistanceService(database, FakeInvoker(fail=True)).process_next()
     assert database.one(
         "SELECT status, last_error_class FROM work_item WHERE id = ?", (work_id,)
-    ) == {"status": "deferred", "last_error_class": "AssistanceError"}
+    ) == {"status": "failed", "last_error_class": "assistance_validation_error"}
+
+
+def test_transient_draft_failure_retries_once_and_accounts_retry(tmp_path: Path) -> None:
+    database, service = _service(tmp_path)
+    service.review("story-demo-runtime-001", "approve_neutral")
+    database.set_state("assistance_isolation_gate", "passed", "2026-07-14T00:00:00Z")
+    database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
+
+    class FlakyInvoker(FakeInvoker):
+        def invoke(self, packet):
+            if not self.packets:
+                self.packets.append(packet)
+                raise AssistanceTransientError("codex_timeout: temporary")
+            return super().invoke(packet)
+
+    draft_id = AssistanceService(
+        database,
+        FlakyInvoker(),
+        retry_delay_seconds=0,
+        sleeper=lambda _seconds: None,
+    ).process_next()
+
+    assert draft_id is not None
+    assert database.one(
+        "SELECT status, attempt_count, last_error_class FROM work_item WHERE kind='draft'"
+    ) == {"status": "completed", "attempt_count": 2, "last_error_class": None}
+    assert database.one(
+        "SELECT retry_count FROM usage_ledger WHERE category='draft' ORDER BY id DESC LIMIT 1"
+    ) == {"retry_count": 1}
+
+
+def test_exact_claim_does_not_process_another_draft_or_reclaim_live_lease(tmp_path: Path) -> None:
+    database, service = _service(tmp_path)
+    service.review("story-demo-runtime-001", "approve_neutral")
+    service.review("story-demo-policy-002", "approve_lens")
+    database.set_state("assistance_isolation_gate", "passed", "2026-07-14T00:00:00Z")
+    database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
+    work = database.one(
+        "SELECT id FROM work_item WHERE story_id='story-demo-policy-002' AND kind='draft'"
+    )
+
+    draft_id = AssistanceService(database, FakeInvoker()).process(int(work["id"]))
+
+    assert draft_id is not None
+    assert database.one(
+        "SELECT status FROM work_item WHERE story_id='story-demo-runtime-001' AND kind='draft'"
+    ) == {"status": "queued"}
+    database.execute(
+        "UPDATE work_item SET status='generating', available_at='2999-01-01T00:00:00Z' WHERE story_id='story-demo-runtime-001'"
+    )
+    runtime_work = database.one(
+        "SELECT id FROM work_item WHERE story_id='story-demo-runtime-001'"
+    )
+    assert AssistanceService(database, FakeInvoker()).process(int(runtime_work["id"])) is None
+
+
+def test_immediate_and_scheduled_workers_cannot_claim_the_same_draft(
+    tmp_path: Path,
+) -> None:
+    database, service = _service(tmp_path)
+    service.review("story-demo-runtime-001", "approve_neutral")
+    database.set_state("assistance_isolation_gate", "passed", "2026-07-14T00:00:00Z")
+    database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
+    work = database.one("SELECT id FROM work_item WHERE kind = 'draft'")
+    entered = threading.Event()
+    release = threading.Event()
+    completed: list[int | None] = []
+
+    class BlockingInvoker(FakeInvoker):
+        def invoke(self, packet):
+            entered.set()
+            assert release.wait(timeout=2)
+            return super().invoke(packet)
+
+    thread = threading.Thread(
+        target=lambda: completed.append(
+            AssistanceService(database, BlockingInvoker()).process(int(work["id"]))
+        )
+    )
+    thread.start()
+    assert entered.wait(timeout=2)
+
+    assert AssistanceService(database, FakeInvoker()).process(int(work["id"])) is None
+    release.set()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert len(completed) == 1 and completed[0] is not None
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM draft WHERE story_id = 'story-demo-runtime-001'"
+    ) == {"count": 1}
+    assert database.one("SELECT COUNT(*) AS count FROM assistance_result") == {"count": 1}
+
+
+def test_exact_draft_waits_with_visible_prerequisite_codes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database, service = _service(tmp_path)
+    service.review("story-demo-runtime-001", "approve_neutral")
+    work = database.one("SELECT id FROM work_item WHERE kind = 'draft'")
+    monkeypatch.setattr(assistance_module, "CodexInvoker", FakeInvoker)
+
+    with pytest.raises(AssistanceDeferred, match="isolation"):
+        run_assistance_work(database, int(work["id"]))
+    assert database.one(
+        "SELECT status, last_error_class FROM work_item WHERE id = ?", (work["id"],)
+    ) == {"status": "waiting", "last_error_class": "isolation_not_passed"}
+
+    database.execute(
+        "UPDATE work_item SET status = 'queued', last_error_class = NULL WHERE id = ?",
+        (work["id"],),
+    )
+    database.set_state("assistance_isolation_gate", "passed", "2026-07-14T00:00:00Z")
+    with pytest.raises(AssistanceDeferred, match="disabled"):
+        run_assistance_work(database, int(work["id"]))
+    assert database.one(
+        "SELECT status, last_error_class FROM work_item WHERE id = ?", (work["id"],)
+    ) == {"status": "waiting", "last_error_class": "assistance_disabled"}
+
+
+def test_runtime_bootstrap_failure_is_visible_on_the_preserved_work_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database, service = _service(tmp_path)
+    service.review("story-demo-runtime-001", "approve_neutral")
+
+    class MissingCodex:
+        def __init__(self):
+            raise AssistanceConfigurationError("codex_unavailable: missing")
+
+    monkeypatch.setattr(assistance_module, "CodexInvoker", MissingCodex)
+
+    with pytest.raises(AssistanceConfigurationError, match="codex_unavailable"):
+        run_assistance_work(database)
+
+    assert database.one(
+        "SELECT status, last_error_class FROM work_item WHERE story_id='story-demo-runtime-001' AND kind='draft'"
+    ) == {"status": "failed", "last_error_class": "codex_unavailable"}
+    assert database.one(
+        "SELECT event_type FROM diagnostic_event WHERE event_type='assistance' ORDER BY id DESC LIMIT 1"
+    ) == {"event_type": "assistance"}
+    trace = (database.paths.operations / "logs" / "assistance.stderr.log").read_text(
+        encoding="utf-8"
+    )
+    assert "work_item=" in trace and "codex_unavailable" in trace
+    assert "AssistanceConfigurationError" in trace
+    assert "codex_unavailable: missing" not in trace
+
+
+def test_bootstrap_failure_cannot_clobber_an_active_lease_or_future_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database, service = _service(tmp_path)
+    service.review("story-demo-runtime-001", "approve_neutral")
+    work = database.one("SELECT id FROM work_item WHERE kind = 'draft'")
+
+    class MissingCodex:
+        def __init__(self):
+            raise AssistanceConfigurationError("codex_unavailable: missing")
+
+    monkeypatch.setattr(assistance_module, "CodexInvoker", MissingCodex)
+    database.execute(
+        "UPDATE work_item SET status = 'generating', available_at = '2999-01-01T00:00:00Z', attempt_count = 1 WHERE id = ?",
+        (work["id"],),
+    )
+    assert run_assistance_work(database, int(work["id"])) is None
+    assert database.one(
+        "SELECT status, attempt_count, last_error_class FROM work_item WHERE id = ?",
+        (work["id"],),
+    ) == {"status": "generating", "attempt_count": 1, "last_error_class": None}
+
+    database.execute(
+        "UPDATE work_item SET status = 'queued', available_at = '2999-01-01T00:00:00Z' WHERE id = ?",
+        (work["id"],),
+    )
+    assert run_assistance_work(database, int(work["id"])) is None
+    assert database.one(
+        "SELECT status, last_error_class FROM work_item WHERE id = ?", (work["id"],)
+    ) == {"status": "queued", "last_error_class": None}
+
+
+def test_bootstrap_failure_loses_race_without_clobbering_new_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database, service = _service(tmp_path)
+    service.review("story-demo-runtime-001", "approve_neutral")
+    work = database.one("SELECT id FROM work_item WHERE kind = 'draft'")
+
+    class RacingMissingCodex:
+        def __init__(self):
+            database.execute(
+                "UPDATE work_item SET status = 'generating', attempt_count = attempt_count + 1, available_at = '2999-01-01T00:00:00Z' WHERE id = ?",
+                (work["id"],),
+            )
+            raise AssistanceConfigurationError("codex_unavailable: missing")
+
+    monkeypatch.setattr(assistance_module, "CodexInvoker", RacingMissingCodex)
+
+    assert run_assistance_work(database, int(work["id"])) is None
+    assert database.one(
+        "SELECT status, attempt_count, available_at, last_error_class FROM work_item WHERE id = ?",
+        (work["id"],),
+    ) == {
+        "status": "generating",
+        "attempt_count": 1,
+        "available_at": "2999-01-01T00:00:00Z",
+        "last_error_class": None,
+    }
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM diagnostic_event WHERE event_type = 'assistance'"
+    ) == {"count": 0}
+
+
+def test_expired_generation_lease_is_reclaimed_without_duplicate_result(tmp_path: Path) -> None:
+    database, service = _service(tmp_path)
+    service.review("story-demo-runtime-001", "approve_neutral")
+    database.set_state("assistance_isolation_gate", "passed", "2026-07-14T00:00:00Z")
+    database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
+    database.execute(
+        "UPDATE work_item SET status='generating', available_at='2020-01-01T00:00:00Z', attempt_count=1 WHERE story_id='story-demo-runtime-001'"
+    )
+    work = database.one(
+        "SELECT id FROM work_item WHERE story_id='story-demo-runtime-001'"
+    )
+
+    draft_id = AssistanceService(database, FakeInvoker()).process(int(work["id"]))
+
+    assert draft_id is not None
+    assert database.one(
+        "SELECT status, attempt_count FROM work_item WHERE id=?", (work["id"],)
+    ) == {"status": "completed", "attempt_count": 2}
+    assert database.one("SELECT COUNT(*) AS count FROM assistance_result") == {"count": 1}
 
 
 def test_neutral_result_cannot_smuggle_a_lens() -> None:
@@ -248,10 +485,67 @@ def test_outer_sandbox_profile_allows_only_task_auth_system_and_codex_paths(tmp_
     assert "(allow file-write*" in profile
 
 
+def test_outer_sandbox_profile_handles_shallow_executable_path(tmp_path: Path) -> None:
+    profile = sandbox_profile(
+        tmp_path / "task", Path("/codex"), tmp_path / "auth.json"
+    )
+
+    assert '(literal "/codex")' in profile
+    assert '(subpath "/")' not in profile
+
+
+def test_codex_discovery_prefers_explicit_then_path_then_chatgpt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    explicit = tmp_path / "explicit-codex"
+    path_binary = tmp_path / "path-codex"
+    app_binary = (
+        tmp_path
+        / "Applications"
+        / "ChatGPT.app"
+        / "Contents"
+        / "Resources"
+        / "codex"
+    )
+    for candidate in (explicit, path_binary, app_binary):
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_text("binary", encoding="utf-8")
+        candidate.chmod(0o755)
+
+    monkeypatch.setattr(assistance_module.shutil, "which", lambda _name: str(path_binary))
+    monkeypatch.setattr(
+        assistance_module, "_known_codex_binary_paths", lambda: (app_binary,)
+    )
+    assert CodexInvoker(codex_binary=explicit).codex_binary == explicit.resolve()
+    assert CodexInvoker().codex_binary == path_binary.resolve()
+
+    monkeypatch.setattr(assistance_module.shutil, "which", lambda _name: None)
+    assert CodexInvoker().codex_binary == app_binary.resolve()
+
+
+def test_codex_discovery_rejects_non_files_and_non_executables_safely(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    non_executable = tmp_path / "not-executable"
+    non_executable.write_text("binary", encoding="utf-8")
+    monkeypatch.setattr(assistance_module.shutil, "which", lambda _name: str(directory))
+    monkeypatch.setattr(
+        assistance_module,
+        "_known_codex_binary_paths",
+        lambda: (non_executable,),
+    )
+
+    with pytest.raises(AssistanceError, match="^codex_unavailable:"):
+        CodexInvoker(codex_binary=tmp_path / "missing")
+
+
 def test_codex_invoker_builds_isolated_command_and_validates_result(tmp_path: Path) -> None:
     codex = tmp_path / "Codex.app" / "Contents" / "Resources" / "codex"
     codex.parent.mkdir(parents=True)
     codex.write_text("binary", encoding="utf-8")
+    codex.chmod(0o755)
     auth = tmp_path / "auth" / "auth.json"
     auth.parent.mkdir()
     auth.write_text("{}", encoding="utf-8")
@@ -304,16 +598,18 @@ def test_codex_invoker_builds_isolated_command_and_validates_result(tmp_path: Pa
 def test_codex_invoker_fails_on_process_malformed_and_oversized_results(tmp_path: Path) -> None:
     codex = tmp_path / "codex"
     codex.write_text("binary", encoding="utf-8")
+    codex.chmod(0o755)
     auth = tmp_path / "auth.json"
     auth.write_text("{}", encoding="utf-8")
 
     def failed(arguments, _input, _cwd, _environment):
-        return subprocess.CompletedProcess(arguments, 2, "", "denied")
+        return subprocess.CompletedProcess(arguments, 2, "", "SECRET_PACKET denied")
 
-    with pytest.raises(AssistanceError, match="denied"):
+    with pytest.raises(AssistanceError, match="codex_process_failed") as failure:
         CodexInvoker(codex_binary=codex, auth_file=auth, runner=failed).invoke(
             {"operation": "triage", "claims": []}
         )
+    assert "SECRET_PACKET" not in str(failure.value)
 
     def malformed(arguments, _input, _cwd, _environment):
         Path(arguments[arguments.index("--output-last-message") + 1]).write_text("not-json", encoding="utf-8")

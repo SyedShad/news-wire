@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-21
+
+### Added
+
+- Human-approved draft work starts immediately while retaining the durable queue for recovery.
+- Story and draft-history views expose queued, generating, waiting, failed, reapproval, retry, and ready states.
+- Transient generation failures receive one bounded automatic retry before a visible manual retry is required.
+
+### Fixed
+
+- LaunchAgent draft generation now resolves the ChatGPT-bundled Codex executable without relying on the interactive shell `PATH`.
+- Missing or shallow Codex paths fail safely instead of resolving to `/` and raising `IndexError`.
+- Exact-item atomic claiming prevents immediate and scheduled workers from generating the same approved draft twice.
+
 ## [0.3.1] - 2026-07-17
 
 ### Added

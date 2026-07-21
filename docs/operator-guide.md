@@ -54,7 +54,7 @@ The story page separates qualification from drafting. For a discovery signal:
 2. After the bounded fetch completes, confirm its Event, Reporting, or Discovery role and map it to the claims it supports, attributes, contradicts, or contextualizes.
 3. The evidence gate requires one confirmed first-party Event source or two independent Reporting publishers. It cannot be overridden.
 4. When evidence passes, **Qualify as candidate**. If automated importance did not pass, record the human editorial reason; this changes neither the automated score nor the evidence result.
-5. Separately approve a Neutral News Brief or, for a Strong or Moderate opportunity, an Open-Source Lens Brief.
+5. Separately approve and create a Neutral News Brief or, for a Strong or Moderate opportunity, an Open-Source Lens Brief. The dashboard dispatches that approved draft immediately and opens the editor when generation finishes in the active story tab.
 
 Official pages prove that an announcement was made. Use `attributes` for announcement or promotional claims unless the page directly establishes the factual claim. Excluding evidence preserves the audit record and invalidates qualification or pending drafts when the gate no longer passes.
 
@@ -65,7 +65,7 @@ open-source-ai-news-wire assistance check-isolation
 open-source-ai-news-wire assistance enable
 ```
 
-If the canary fails, leave assistance disabled and use the dashboard's human-classification states. Drafts are generated only from an approved work item; a material source change invalidates the approval snapshot.
+If the canary fails, leave assistance disabled and use the dashboard's human-classification states. Drafts are generated only from an approved work item; a material source change invalidates the approval snapshot. The durable queue remains the recovery path if the immediate dispatcher is interrupted. A transient generation failure receives one automatic retry, then the story and Drafts pages expose a manual retry without creating another approval.
 
 ## Pilot activation
 

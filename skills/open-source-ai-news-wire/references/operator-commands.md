@@ -57,6 +57,8 @@ open-source-ai-news-wire pilot stop-notifications
 
 The completion pilot uses the additional 72-hour validation and fail-closed automatic activation. The manual activation command is retained for compatibility. Drafting remains human-approved in both modes.
 
+Human-approved drafts are dispatched immediately by the local dashboard. `assistance run-pending` remains an operator recovery command; it is not the normal approval path.
+
 ## Data deletion
 
 ```bash

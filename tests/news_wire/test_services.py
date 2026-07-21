@@ -53,6 +53,49 @@ def test_human_approval_queues_draft_with_snapshot(service: DashboardService) ->
     assert {claim["status"] for claim in snapshot["claims"]} == {"verified"}
     assert len(snapshot["sources"]) == 2
     assert all(source["url"].startswith("https://") for source in snapshot["sources"])
+    assert work["status"] == "queued"
+    assert work["idempotency_key"].startswith("draft-approval:")
+    assert work["available_at"]
+    action = service.database.one(
+        "SELECT approval_snapshot_json FROM review_action WHERE id = ?",
+        (snapshot["review_action_id"],),
+    )
+    assert json.loads(action["approval_snapshot_json"])["story"]["id"] == "story-demo-runtime-001"
+
+
+def test_human_approval_dispatches_exact_work_after_commit(tmp_path: Path) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    seed_demo_data(database)
+    observed: list[tuple[int, str, str]] = []
+
+    def dispatch(work_item_id: int) -> None:
+        work = database.one("SELECT status, story_id FROM work_item WHERE id = ?", (work_item_id,))
+        story = database.one("SELECT status FROM story_cluster WHERE id = ?", (work["story_id"],))
+        observed.append((work_item_id, work["status"], story["status"]))
+
+    immediate = DashboardService(database, draft_callback=dispatch)
+    assert immediate.review("story-demo-runtime-001", "approve_neutral") == "approved"
+    assert observed and observed[0][1:] == ("queued", "approved")
+
+
+def test_dispatch_failure_preserves_durable_queue(tmp_path: Path) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    seed_demo_data(database)
+
+    def fail_dispatch(_work_item_id: int) -> None:
+        raise RuntimeError("test-only callback failure")
+
+    immediate = DashboardService(database, draft_callback=fail_dispatch)
+    immediate.review("story-demo-runtime-001", "approve_neutral")
+    work = database.one("SELECT status FROM work_item WHERE kind = 'draft'")
+    assert work == {"status": "queued"}
+    diagnostic = database.one(
+        "SELECT message, detail_json FROM diagnostic_event WHERE event_type = 'draft_dispatch'"
+    )
+    assert "durable queue was preserved" in diagnostic["message"]
+    assert "test-only callback failure" not in diagnostic["detail_json"]
 
 
 def test_pending_draft_approval_cannot_be_queued_twice(service: DashboardService) -> None:
@@ -65,6 +108,50 @@ def test_pending_draft_approval_cannot_be_queued_twice(service: DashboardService
         "SELECT COUNT(*) AS count FROM work_item WHERE story_id = ? AND kind = 'draft'",
         ("story-demo-runtime-001",),
     )["count"] == 1
+
+
+def test_failed_draft_retries_same_work_without_new_approval(tmp_path: Path) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    seed_demo_data(database)
+    dispatched: list[int] = []
+    immediate = DashboardService(database, draft_callback=dispatched.append)
+    immediate.review("story-demo-runtime-001", "approve_neutral")
+    work_id = dispatched[-1]
+    database.execute(
+        "UPDATE work_item SET status = 'failed', attempt_count = 2, last_error_class = 'codex_timeout' WHERE id = ?",
+        (work_id,),
+    )
+
+    assert immediate.retry_draft("story-demo-runtime-001") == work_id
+    assert dispatched == [work_id, work_id]
+    assert database.one(
+        "SELECT status, attempt_count, last_error_class FROM work_item WHERE id = ?", (work_id,)
+    ) == {"status": "queued", "attempt_count": 0, "last_error_class": None}
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM review_action WHERE action = 'approve_neutral'"
+    )["count"] == 1
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM review_action WHERE action = 'retry_draft'"
+    )["count"] == 1
+
+
+def test_draft_status_and_history_include_requests_before_a_draft_exists(service: DashboardService) -> None:
+    service.review("story-demo-runtime-001", "approve_neutral")
+    status = service.draft_status("story-demo-runtime-001")
+    assert status["status"] == "starting"
+    assert status["active"] is True
+    requests = [entry for entry in service.list_drafts() if entry["entry_kind"] == "request"]
+    assert len(requests) == 1
+    assert requests[0]["display_status"] == "Starting"
+
+    service.database.execute(
+        "UPDATE work_item SET status = 'waiting', last_error_class = 'assistance_disabled' WHERE id = ?",
+        (status["work_item_id"],),
+    )
+    waiting = service.draft_status("story-demo-runtime-001")
+    assert waiting["status"] == "waiting"
+    assert waiting["retryable"] is True
     assert service.database.one(
         "SELECT COUNT(*) AS count FROM review_action WHERE story_id = ? AND action = 'approve_neutral'",
         ("story-demo-runtime-001",),
@@ -263,7 +350,7 @@ def test_settings_alerts_and_evidence_failure_paths(service: DashboardService) -
     assert settings["counts"]["stories"] == 5
     assert settings["counts"]["registered sources"] == 12
     assert settings["counts"]["source items"] == 9
-    assert settings["app_version"] == "0.3.1"
+    assert settings["app_version"] == "0.3.2"
     assert settings["purge_preview"]["operations_count"] == 1
     assert settings["demo_mode"] is True
     assert service.mark_alerts_read() == 6

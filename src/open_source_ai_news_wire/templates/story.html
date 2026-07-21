@@ -186,14 +186,22 @@
     {% endif %}
   </div>
 
-  <aside class="review-panel panel">
+  <aside class="review-panel panel"{% if story.draft_request %} data-draft-status-url="{{ url_for('story_draft_status', story_id=story.id) }}" data-draft-active="{{ 'true' if story.draft_request.active else 'false' }}" data-draft-auto-open="{{ 'true' if auto_open_draft else 'false' }}"{% endif %}>
     <p class="section-index">Draft approval</p><h2>Approve a drafting mode</h2>
-    {% if story.status == 'approved' %}
-    <div class="approval-pending" role="status">
-      <strong>Draft request queued</strong>
-      <p>Your approval snapshot and guidance are preserved. The system will not create another request while this one is pending.</p>
+    {% if story.draft_request %}
+    <div class="approval-pending draft-state draft-state-{{ story.draft_request.status }}" role="status" aria-live="polite">
+      <small>Draft generation</small>
+      <strong data-draft-status-label>{{ story.draft_request.label }}</strong>
+      <p data-draft-status-message>{{ story.draft_request.message }}</p>
+      {% if story.draft_request.attempt_count %}<span data-draft-attempts>Attempt {{ story.draft_request.attempt_count }}</span>{% endif %}
+      <a class="button button-primary draft-review-link" data-draft-review href="{{ url_for('draft_detail', draft_id=story.draft_request.draft_id) if story.draft_request.draft_id else '#' }}" {{ 'hidden' if not story.draft_request.draft_id else '' }}>Review draft</a>
+      <form action="{{ url_for('retry_story_draft', story_id=story.id) }}" method="post" class="draft-retry-form" data-draft-retry {{ 'hidden' if not story.draft_request.retryable else '' }}>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="button" type="submit">Retry generation</button>
+      </form>
     </div>
-    {% else %}
+    {% endif %}
+    {% if not story.draft_request or story.draft_request.status == 'needs_reapproval' %}
     <p class="muted">Qualification never creates a draft. Approve one mode explicitly when the story is ready.</p>
     {% if story.status not in ['candidate','draft_ready'] %}<div class="approval-lock"><strong>Neutral brief locked</strong><p>Qualify this story as a candidate first.</p></div>{% endif %}
     {% if story.opportunity_strength not in ['Strong','Moderate'] %}<div class="approval-lock"><strong>Open-source lens locked</strong><p>No Strong or Moderate opportunity is recorded.</p></div>{% endif %}
@@ -201,10 +209,10 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>Guidance or reason <span>optional</span><textarea name="reason" rows="3" placeholder="What should the next step preserve or investigate?"></textarea></label>
       <button class="action-choice choice-neutral" name="action" value="approve_neutral" type="submit" {{ 'disabled' if story.status not in ['candidate','draft_ready'] else '' }}>
-        <span><strong>Approve neutral brief</strong><small>Facts first, no advocacy</small></span><b>→</b>
+        <span><strong>Approve and create neutral draft</strong><small>Start a facts-first draft immediately</small></span><b>→</b>
       </button>
       <button class="action-choice choice-lens" name="action" value="approve_lens" type="submit" {{ 'disabled' if story.status not in ['candidate','draft_ready'] or story.opportunity_strength not in ['Strong','Moderate'] else '' }}>
-        <span><strong>Approve open-source lens</strong><small>Neutral report + labelled analysis</small></span><b>→</b>
+        <span><strong>Approve and create open-source lens draft</strong><small>Start neutral reporting + labelled analysis immediately</small></span><b>→</b>
       </button>
       <div class="secondary-actions">
         <button name="action" value="archive" type="submit">Archive</button>

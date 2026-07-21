@@ -110,6 +110,67 @@ def test_worker_refreshes_persisted_next_scan_after_each_active_run(tmp_path: Pa
     assert next_scan.second == 0
 
 
+def test_worker_prioritizes_recovery_draft_before_collection(tmp_path: Path, monkeypatch) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
+    order: list[str] = []
+
+    def record_assistance(_database, *, drafts_only=False):
+        order.append("draft" if drafts_only else "assistance")
+        return None
+
+    class OrderedCollector(RecordingCollector):
+        def scan(self, **kwargs):
+            order.append("collection")
+            return super().scan(**kwargs)
+
+    monkeypatch.setattr(
+        "open_source_ai_news_wire.runner.run_assistance_work", record_assistance
+    )
+
+    Worker(database, collector=OrderedCollector()).run(trigger="scheduled")
+
+    assert order == ["draft", "collection", "assistance"]
+
+
+def test_worker_skips_end_of_run_assistance_when_full_retry_would_overrun(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
+    order: list[str] = []
+    start = datetime(2026, 7, 21, 8, 0, tzinfo=UTC)
+
+    class WorkerClock(datetime):
+        calls = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.calls += 1
+            value = start if cls.calls == 1 else start + timedelta(minutes=20)
+            return value if tz is not None else value.replace(tzinfo=None)
+
+    def record_assistance(_database, *, drafts_only=False):
+        order.append("draft" if drafts_only else "assistance")
+        return None
+
+    class OrderedCollector(RecordingCollector):
+        def scan(self, **kwargs):
+            order.append("collection")
+            return super().scan(**kwargs)
+
+    monkeypatch.setattr("open_source_ai_news_wire.runner.datetime", WorkerClock)
+    monkeypatch.setattr(
+        "open_source_ai_news_wire.runner.run_assistance_work", record_assistance
+    )
+
+    Worker(database, collector=OrderedCollector()).run(trigger="manual")
+
+    assert order == ["draft", "collection"]
+
+
 def test_launchagent_install_pause_resume_and_uninstall_are_atomic(tmp_path: Path) -> None:
     database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
     database.initialize()
@@ -234,7 +295,7 @@ def test_worker_maintains_promoted_expired_and_active_watches(tmp_path: Path) ->
     )["next_check_at"] > current
 
 
-def test_worker_marks_claimed_work_failed_and_records_assistance_failure(tmp_path: Path, monkeypatch) -> None:
+def test_worker_marks_claimed_work_failed_and_contains_assistance_failure(tmp_path: Path, monkeypatch) -> None:
     database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
     database.initialize()
     now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -253,24 +314,20 @@ def test_worker_marks_claimed_work_failed_and_records_assistance_failure(tmp_pat
 
     database.set_state("assistance_enabled", "true", now)
 
-    class FailingAssistance:
-        def __init__(self, *_args):
-            pass
+    def failing_assistance(*_args, **_kwargs):
+        raise RuntimeError("safe failure")
 
-        def process_next(self):
-            raise RuntimeError("safe failure")
-
-    monkeypatch.setattr("open_source_ai_news_wire.runner.AssistanceService", FailingAssistance)
+    monkeypatch.setattr(
+        "open_source_ai_news_wire.runner.run_assistance_work", failing_assistance
+    )
     Worker(database, collector=RecordingCollector()).run()
-    assert database.one(
-        "SELECT event_type FROM diagnostic_event WHERE event_type='assistance'"
-    ) == {"event_type": "assistance"}
 
-    class DeferredAssistance(FailingAssistance):
-        def process_next(self):
-            raise AssistanceDeferred("budget")
+    def deferred_assistance(*_args, **_kwargs):
+        raise AssistanceDeferred("budget")
 
-    monkeypatch.setattr("open_source_ai_news_wire.runner.AssistanceService", DeferredAssistance)
+    monkeypatch.setattr(
+        "open_source_ai_news_wire.runner.run_assistance_work", deferred_assistance
+    )
     Worker(database, collector=RecordingCollector()).run()
 
 
