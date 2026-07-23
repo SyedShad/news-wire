@@ -1328,6 +1328,19 @@ def test_codex_invoker_builds_isolated_command_and_validates_result(tmp_path: Pa
     assert captured["preflight_environment"] == captured["environment"]
     assert captured["preflight_arguments"][-1] == "--help"
 
+    class FailoverBroker(_FakeBroker):
+        failure_code = "broker_transport_failed"
+
+    failover_result = _codex_invoker(
+        codex_binary=codex,
+        sandbox_binary=Path("/usr/bin/sandbox-exec"),
+        auth_file=auth,
+        runner=runner,
+        profile_runner=profile_runner,
+        broker_factory=FailoverBroker,
+    ).invoke({"operation": "triage", "claims": [{"id": 1}]})
+    assert failover_result.payload["supported_claim_ids"] == [1]
+
 
 @pytest.mark.skipif(
     not Path("/usr/bin/sandbox-exec").is_file(),

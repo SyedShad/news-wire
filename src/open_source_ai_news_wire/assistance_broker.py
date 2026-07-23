@@ -17,7 +17,15 @@ from dataclasses import dataclass
 from typing import Any
 
 
-BROKER_POLICY_VERSION = "connect-v2"
+BROKER_POLICY_VERSION = "connect-v3"
+TRANSIENT_BROKER_FAILURES = frozenset(
+    {
+        "broker_dns_failed",
+        "broker_upstream_unavailable",
+        "broker_transport_failed",
+        "broker_idle_timeout",
+    }
+)
 REVIEWED_CODEX_HOSTS = frozenset(
     {
         "chatgpt.com",
@@ -394,7 +402,10 @@ class ConnectBroker:
 
     def _record_failure(self, code: str) -> None:
         with self._lock:
-            if not self._failure_code:
+            if not self._failure_code or (
+                self._failure_code in TRANSIENT_BROKER_FAILURES
+                and code not in TRANSIENT_BROKER_FAILURES
+            ):
                 self._failure_code = code
 
     def _track(self, connection: socket.socket) -> None:
