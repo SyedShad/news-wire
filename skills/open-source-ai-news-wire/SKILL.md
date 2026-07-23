@@ -24,7 +24,7 @@ Operate the local, destination-neutral AI news-monitoring and editorial-review s
 - For missed awake/offline time: let scheduled recovery apply the default 72-hour cap. Use `catch-up --start YYYY-MM-DD --end YYYY-MM-DD` only when the user selects an older interval.
 - For schedule lifecycle: use `schedule install|pause|resume|status|uninstall`. Explain that locked-and-awake works; sleep, logout, shutdown, and offline time pause work.
 - For the V1 pilot: complete one real human-approved revised draft, run `pilot notification-canary`, then `pilot extend-validation --auto-activate`. Use `pilot readiness` for exact blockers; never deliver alerts older than the activation watermark.
-- For ChatGPT assistance: run the isolation check before enabling it. If isolation fails, keep assistance disabled and continue deterministic monitoring.
+- For ChatGPT assistance: release 0.3.6 deliberately leaves it disabled while containment is revalidated. Run the expanded isolation check before enabling it. If any credential, filesystem, private-network, or snapshot canary fails, keep assistance disabled and continue deterministic monitoring.
 - For drafting: require an explicit human approval already recorded in the Wire. Approval starts generation immediately; the durable queue and half-hour worker are recovery fallbacks. Never infer approval from viewing, discussing, or accepting a story.
 - For draft attribution: name the confirmed original publication naturally and use the generated portable Markdown link. When only a republication URL is available, label it `Original Publisher, via Host`. In the normal path, Discovery links may remain in the grouped source list but never support a factual claim. A manual override may cite a validated stored Discovery URL without reclassifying it as qualifying evidence.
 - For failed drafting: inspect the visible work state and retry the preserved approval only after its evidence snapshot still passes. Never create a duplicate approval or work item.
@@ -41,6 +41,7 @@ Operate the local, destination-neutral AI news-monitoring and editorial-review s
 - Keep normal qualification and drafting approval separate. Manual candidate approval is a distinct, warned override that may bypass drafting gates but must preserve their failed state and its audit snapshot.
 - Never place manual-override badges, gate names, or system labels such as `unverified` or `provisional` into draft copy or exports.
 - Preserve First-Public Time during catch-up; do not relabel older material as breaking.
+- Treat source revisions separately from editorial material updates. Parser, hash-version, formatting, metadata, engagement, and duplicate changes never refresh the 24-hour ranking clock; only a changed normalized atomic-claim set does.
 - Report source gaps, deferred work, isolation failures, and low-disk states plainly.
 
 ## Return useful results

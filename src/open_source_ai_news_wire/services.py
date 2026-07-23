@@ -18,6 +18,7 @@ from .storage import Database, database_size
 from .source_registry import set_source_enabled
 from .scheduler import next_scheduled_run
 from .ranking import percentile_points, rank_story, ranking_sort_key
+from .revisions import approval_signature_sets
 from .evidence import (
     ALLOWED_PROVENANCE_TYPES,
     ALLOWED_RELATIONSHIPS,
@@ -171,8 +172,51 @@ class DashboardService:
             """
         )
         momentum = self._momentum_context()
+        identities: dict[str, set[str]] = {}
+        for item in self.database.query(
+            "SELECT story_id, COALESCE(canonical_url, url) AS url FROM source_item"
+        ):
+            key = publisher_key(str(item.get("url") or ""))
+            if key:
+                identities.setdefault(str(item["story_id"]), set()).add(
+                    f"publisher:{key}"
+                )
+        for lead in self.database.query(
+            "SELECT story_id, identity_key FROM discovery_lead WHERE TRIM(identity_key) != ''"
+        ):
+            key = re.sub(r"\s+", "", str(lead["identity_key"]).casefold())
+            if key:
+                identities.setdefault(str(lead["story_id"]), set()).add(
+                    f"account:{key}"
+                )
+        for evidence in self.database.query(
+            """
+            SELECT story_id, confirmed_role, publisher_key, reporting_origin_key
+            FROM evidence_source WHERE status = 'confirmed'
+              AND confirmed_role IN ('Event', 'Reporting')
+            """
+        ):
+            key = (
+                str(evidence.get("reporting_origin_key") or "")
+                if evidence["confirmed_role"] == "Reporting"
+                else str(evidence.get("publisher_key") or "")
+            ).casefold().strip()
+            if key:
+                identities.setdefault(str(evidence["story_id"]), set()).add(
+                    f"publisher:{key}"
+                )
         current = self._current_time()
-        return [rank_story({**row, **momentum.get(str(row["id"]), {})}, now=current) for row in rows]
+        return [
+            rank_story(
+                {
+                    **row,
+                    **momentum.get(str(row["id"]), {}),
+                    "source_identity_count": len(identities.get(str(row["id"]), set())),
+                },
+                now=current,
+            )
+            for row in rows
+        ]
 
     @staticmethod
     def _encode_cursor(story: dict[str, Any], sort: str) -> str:
@@ -560,6 +604,44 @@ class DashboardService:
             self.database, story_id, allow_discovery=allow_discovery
         )
 
+    def _editorial_signature(self, story_id: str) -> str:
+        claims = self.database.query(
+            "SELECT id, text, status, volatility FROM claim WHERE story_id = ? ORDER BY id",
+            (story_id,),
+        )
+        sources = self._draft_sources(story_id, allow_discovery=True)
+        claim_signatures, source_signatures = approval_signature_sets(claims, sources)
+        return hashlib.sha256(
+            Database.json(
+                {"claims": claim_signatures, "sources": source_signatures}
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def _record_nonmaterial_editorial_change(
+        self, story_id: str, before_signature: str, *, now: str
+    ) -> None:
+        if self._editorial_signature(story_id) == before_signature:
+            return
+        with self.database.transaction() as connection:
+            connection.execute(
+                "UPDATE story_cluster SET story_revision = story_revision + 1, updated_at = ? WHERE id = ?",
+                (now, story_id),
+            )
+            connection.execute(
+                """
+                UPDATE work_item
+                SET status = 'needs_reapproval', last_error_class = 'story_revision_changed',
+                    updated_at = ?
+                WHERE story_id = ? AND kind = 'draft'
+                  AND status IN ('pending', 'queued', 'running', 'generating', 'waiting')
+                """,
+                (now, story_id),
+            )
+            connection.execute(
+                "UPDATE draft SET status = 'Needs Review', updated_at = ? WHERE story_id = ? AND status = 'Current'",
+                (now, story_id),
+            )
+
     def queue_evidence_inspection(
         self, story_id: str, url: str, acquisition_method: str
     ) -> tuple[int, str]:
@@ -711,6 +793,7 @@ class DashboardService:
             )
             if {int(row["id"]) for row in rows} != claim_ids:
                 raise ValueError("Claim mapping crossed the story boundary")
+        before_editorial_signature = self._editorial_signature(story_id)
         now = utc_now()
         with self.database.transaction() as connection:
             connection.execute(
@@ -768,7 +851,11 @@ class DashboardService:
                 ),
             )
         recalculate_claim_statuses(self.database, story_id)
-        return recalculate_story_qualification(self.database, story_id)
+        result = recalculate_story_qualification(self.database, story_id)
+        self._record_nonmaterial_editorial_change(
+            story_id, before_editorial_signature, now=now
+        )
+        return result
 
     def exclude_evidence(self, story_id: str, evidence_id: int, reason: str = "") -> dict[str, Any]:
         evidence = self.database.one(
@@ -777,6 +864,7 @@ class DashboardService:
         )
         if not evidence:
             raise LookupError("Evidence source not found")
+        before_editorial_signature = self._editorial_signature(story_id)
         now = utc_now()
         with self.database.transaction() as connection:
             connection.execute(
@@ -791,7 +879,11 @@ class DashboardService:
                 (story_id, reason.strip(), now, Database.json({"evidence_source_id": evidence_id})),
             )
         recalculate_claim_statuses(self.database, story_id)
-        return recalculate_story_qualification(self.database, story_id)
+        result = recalculate_story_qualification(self.database, story_id)
+        self._record_nonmaterial_editorial_change(
+            story_id, before_editorial_signature, now=now
+        )
+        return result
 
     def qualify_story(self, story_id: str, reason: str = "") -> str:
         state = recalculate_story_qualification(self.database, story_id)
@@ -924,6 +1016,11 @@ class DashboardService:
             messages[status] = "The local isolation check must pass before this draft can be generated."
         elif error_code in {"approval_invalidated", "evidence_invalidated", "ApprovalInvalidated"}:
             status = "needs_reapproval"
+        elif error_code in {"story_revision_changed", "approval_revision_mismatch"}:
+            status = "needs_reapproval"
+            messages[status] = (
+                "The approved claims or sources changed. Review the latest revision and approve again."
+            )
         return {
             "status": status,
             "raw_status": raw_status,
@@ -1114,6 +1211,8 @@ class DashboardService:
                 else recalculate_story_qualification(self.database, story_id)
             )
             story = self.database.one("SELECT * FROM story_cluster WHERE id = ?", (story_id,)) or story
+            if ranked_story:
+                story.update(ranked_story)
             if story["status"] in {"archived", "withdrawn"}:
                 raise ValueError("Archived or withdrawn stories cannot be approved for drafting")
             if manual_override and confirmation_version != MANUAL_CONFIRMATION_VERSION:
@@ -1129,6 +1228,7 @@ class DashboardService:
             sources = self._draft_sources(
                 story_id, allow_discovery=manual_override
             )
+            claim_signatures, source_signatures = approval_signature_sets(claims, sources)
             if manual_override and not claims:
                 raise ValueError("Manual approval requires at least one stored claim")
             if manual_override and not any(
@@ -1158,7 +1258,8 @@ class DashboardService:
                 "candidate_basis": str(qualification["candidate_basis"]),
             }
             work_payload = {
-                "schema_version": 2,
+                "schema_version": 3,
+                "story_id": story_id,
                 "mode": mode,
                 "reason": reason.strip(),
                 "approval_basis": approval_basis,
@@ -1166,8 +1267,20 @@ class DashboardService:
                 "confirmation_version": confirmation_version if manual_override else "",
                 "qualification_snapshot": gate_snapshot,
                 "approval_snapshot_at": now,
+                "story_revision": int(story.get("story_revision") or 1),
+                "claim_signatures": claim_signatures,
+                "source_signatures": source_signatures,
                 "story": {
                     "id": story["id"],
+                    "story_revision": int(story.get("story_revision") or 1),
+                    "material_revision": int(story.get("material_revision") or 1),
+                    "headline": str(story.get("headline") or ""),
+                    "summary": str(story.get("summary") or ""),
+                    "lane": str(story.get("lane") or ""),
+                    "openness_class": str(story.get("openness_class") or ""),
+                    "opportunity_strength": story.get("opportunity_strength"),
+                    "relevance_bridge": str(story.get("relevance_bridge") or ""),
+                    "counterargument": str(story.get("counterargument") or ""),
                     "updated_at": story["updated_at"],
                     "first_public_at": story["first_public_at"],
                     "detected_at": story["detected_at"],
@@ -1179,6 +1292,18 @@ class DashboardService:
             }
         with self.database.transaction() as connection:
             if work_kind:
+                current_revision = connection.execute(
+                    "SELECT story_revision FROM story_cluster WHERE id = ?",
+                    (story_id,),
+                ).fetchone()
+                if (
+                    not current_revision
+                    or int(current_revision["story_revision"])
+                    != int(work_payload["story_revision"])
+                ):
+                    raise ValueError(
+                        "The story changed during approval; review the latest claims and sources again"
+                    )
                 latest_existing_draft = connection.execute(
                     """
                     SELECT status FROM draft
@@ -1237,8 +1362,9 @@ class DashboardService:
             action_cursor = connection.execute(
                 """
                 INSERT INTO review_action(
-                    story_id, action, reason, draft_mode, created_at, approval_snapshot_json
-                ) VALUES(?, ?, ?, ?, ?, ?)
+                    story_id, action, reason, draft_mode, created_at, approval_snapshot_json,
+                    story_revision, claim_signatures_json, source_signatures_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     story_id,
@@ -1247,6 +1373,9 @@ class DashboardService:
                     mode,
                     now,
                     Database.json(work_payload) if work_kind else "{}",
+                    int(story.get("story_revision") or 1),
+                    Database.json(claim_signatures) if work_kind else "[]",
+                    Database.json(source_signatures) if work_kind else "[]",
                 ),
             )
             connection.execute(
@@ -1280,7 +1409,7 @@ class DashboardService:
                             story_id,
                             int(qualification["evidence_gate"]),
                             int(qualification["automated_importance"]),
-                            int(story.get("importance_score") or story["priority_score"]),
+                            int(story.get("importance_score") or 0),
                             now,
                             int(action_cursor.lastrowid),
                             Database.json(gate_snapshot),
@@ -1296,7 +1425,7 @@ class DashboardService:
                     (
                         work_kind,
                         story_id,
-                        int(story.get("review_score") or story["priority_score"]),
+                        int(story.get("review_score") or 0),
                         Database.json(work_payload),
                         now,
                         now,

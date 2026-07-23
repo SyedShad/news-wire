@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -196,8 +197,53 @@ def test_momentum_uses_velocity_and_rank_movement_without_verifying(
     story = service.get_story("story-demo-watch-003")
     assert story["momentum_velocity_points"] == 5
     assert story["momentum_daily_rank"] == 2
-    assert story["attention_level"] == "High attention"
+    # Reported account counts are not identities; only the measured velocity
+    # contributes until concrete publisher/account keys are stored.
+    assert story["attention_level"] == "Building attention"
+    assert story["source_identity_count"] == 1
     assert story["evidence_points"] == 0
+    assert story["evidence_state"] == "Verification pending"
+
+
+def test_momentum_breadth_deduplicates_publishers_and_accounts(
+    service: DashboardService,
+) -> None:
+    story_id = "story-demo-watch-003"
+    now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    with service.database.transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO source_item(
+                story_id, source_name, source_role, title, url, published_at,
+                language, verification_status, passage, canonical_url,
+                fingerprint, content_hash, first_seen_at
+            ) VALUES(?, 'Duplicate host', 'Discovery', 'Same publisher mention',
+                     'https://news.example.invalid/another', ?, 'en', 'trace',
+                     'A repeated mention.', 'https://news.example.invalid/another',
+                     'same-publisher', 'same-publisher', ?)
+            """,
+            (story_id, now, now),
+        )
+        connection.executemany(
+            """
+            INSERT INTO discovery_lead(
+                story_id, via_source_id, external_id, identity_key, display_name,
+                url, published_at, metadata_json, created_at, updated_at
+            ) VALUES(?, 'huggingnews', ?, ?, 'Public account', ?, ?, '{}', ?, ?)
+            """,
+            [
+                (story_id, "post-a", "@same-account", "https://social.example/a", now, now, now),
+                (story_id, "post-b", "@same-account", "https://social.example/b", now, now, now),
+                (story_id, "post-c", "@other-account", "https://social.example/c", now, now, now),
+            ],
+        )
+
+    story = service.get_story(story_id)
+    # Two source rows share one normalized publisher, and the duplicate account
+    # key is counted once. Raw row and reported engagement counts are irrelevant.
+    assert story["source_count"] == 3
+    assert story["source_identity_count"] == 3
+    assert story["momentum_score"] == 3
     assert story["evidence_state"] == "Verification pending"
 
 
@@ -211,6 +257,8 @@ def test_human_approval_queues_draft_with_snapshot(service: DashboardService) ->
     )
     assert work is not None
     snapshot = json.loads(work["payload_json"])
+    assert snapshot["schema_version"] == 3
+    assert snapshot["story_id"] == "story-demo-runtime-001"
     assert snapshot["mode"] == "Neutral News Brief"
     assert snapshot["approval_snapshot_at"]
     assert snapshot["story"]["id"] == "story-demo-runtime-001"
@@ -218,15 +266,58 @@ def test_human_approval_queues_draft_with_snapshot(service: DashboardService) ->
     assert len(snapshot["claims"]) == 2
     assert {claim["status"] for claim in snapshot["claims"]} == {"verified"}
     assert len(snapshot["sources"]) == 2
+    assert snapshot["story_revision"] == 1
+    assert len(snapshot["claim_signatures"]) == 2
+    assert len(snapshot["source_signatures"]) == 2
     assert all(source["url"].startswith("https://") for source in snapshot["sources"])
     assert work["status"] == "queued"
     assert work["idempotency_key"].startswith("draft-approval:")
     assert work["available_at"]
     action = service.database.one(
-        "SELECT approval_snapshot_json FROM review_action WHERE id = ?",
+        """
+        SELECT approval_snapshot_json, story_revision, claim_signatures_json,
+               source_signatures_json FROM review_action WHERE id = ?
+        """,
         (snapshot["review_action_id"],),
     )
     assert json.loads(action["approval_snapshot_json"])["story"]["id"] == "story-demo-runtime-001"
+    assert action["story_revision"] == snapshot["story_revision"]
+    assert json.loads(action["claim_signatures_json"]) == snapshot["claim_signatures"]
+    assert json.loads(action["source_signatures_json"]) == snapshot["source_signatures"]
+
+
+def test_approval_aborts_if_story_revision_changes_before_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    seed_demo_data(database)
+    service = DashboardService(database)
+    original_transaction = database.transaction
+    drifted = False
+
+    @contextmanager
+    def transaction_with_drift():
+        nonlocal drifted
+        with original_transaction() as connection:
+            if not drifted:
+                connection.execute(
+                    "UPDATE story_cluster SET story_revision = story_revision + 1 WHERE id = ?",
+                    ("story-demo-watch-003",),
+                )
+                drifted = True
+            yield connection
+
+    monkeypatch.setattr(database, "transaction", transaction_with_drift)
+    with pytest.raises(ValueError, match="changed during approval"):
+        service.review(
+            "story-demo-watch-003",
+            "manual_approve_neutral",
+            confirmation_version="manual_override_v1",
+        )
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM work_item WHERE story_id = 'story-demo-watch-003'"
+    ) == {"count": 0}
 
 
 def test_human_approval_dispatches_exact_work_after_commit(tmp_path: Path) -> None:
@@ -721,7 +812,7 @@ def test_settings_alerts_and_evidence_failure_paths(service: DashboardService) -
     assert settings["counts"]["stories"] == 5
     assert settings["counts"]["registered sources"] == 12
     assert settings["counts"]["source items"] == 9
-    assert settings["app_version"] == "0.3.5"
+    assert settings["app_version"] == "0.3.6"
     assert settings["purge_preview"]["operations_count"] == 1
     assert settings["demo_mode"] is True
     assert service.mark_alerts_read() == 6

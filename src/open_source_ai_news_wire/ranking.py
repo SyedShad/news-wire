@@ -87,11 +87,7 @@ def rank_story(
     reporting_origins = int(story.get("reporting_origin_count") or 0)
     evidence = 15 if event_count >= 1 or reporting_origins >= 2 else 7 if reporting_origins == 1 else 0
 
-    identity_count = max(
-        int(story.get("source_count") or 0),
-        int(story.get("discovery_identity_count") or 0),
-        int(story.get("momentum_account_count") or 0),
-    )
+    identity_count = int(story.get("source_identity_count") or 0)
     breadth = breadth_points(identity_count)
     velocity = max(0, min(5, int(story.get("momentum_velocity_points") or 0)))
     momentum = min(10, breadth + velocity)

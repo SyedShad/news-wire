@@ -17,6 +17,7 @@ def _story(age: timedelta, **overrides):
         "priority_score": 99,
         "importance_score": 40,
         "source_count": 1,
+        "source_identity_count": 1,
         "discovery_identity_count": 0,
         "confirmed_event_count": 0,
         "reporting_origin_count": 0,
@@ -57,7 +58,7 @@ def test_momentum_raises_attention_but_not_evidence() -> None:
     story = rank_story(
         _story(
             timedelta(hours=3),
-            discovery_identity_count=12,
+            source_identity_count=12,
             momentum_velocity_points=5,
         ),
         now=NOW,
@@ -113,7 +114,7 @@ def test_review_priority_and_evidence_bands_are_exact() -> None:
             timedelta(minutes=5),
             importance_score=999,
             confirmed_event_count=1,
-            discovery_identity_count=99,
+            source_identity_count=99,
             momentum_velocity_points=99,
         ),
         now=NOW,
@@ -126,3 +127,18 @@ def test_review_priority_and_evidence_bands_are_exact() -> None:
     assert two_reports["priority"] == "High"
     assert capped["review_score"] == 100
     assert capped["priority"] == "Urgent"
+
+
+def test_raw_source_rows_never_inflate_identity_breadth() -> None:
+    story = rank_story(
+        _story(
+            timedelta(hours=1),
+            source_count=999,
+            discovery_identity_count=999,
+            momentum_account_count=999,
+            source_identity_count=1,
+        ),
+        now=NOW,
+    )
+    assert story["source_identity_count"] == 1
+    assert story["momentum_score"] == 0

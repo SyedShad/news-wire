@@ -296,7 +296,7 @@ wheels = [
 
 [[package]]
 name = "open-source-ai-news-wire"
-version = "0.3.5"
+version = "0.3.6"
 source = { editable = "." }
 dependencies = [
     { name = "flask" },

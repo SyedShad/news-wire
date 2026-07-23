@@ -13,6 +13,8 @@ from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
+from .revisions import OBSERVATION_HASH_VERSION, atomic_claim_signature, observation_hash
+
 
 class AdapterError(ValueError):
     """Raised when a source response cannot be parsed safely."""
@@ -40,7 +42,38 @@ class Observation:
         # provide a stable claim-bearing summary while retaining their full
         # display summary and metrics separately.
         material_summary = str(self.metadata.get("material_summary", self.summary))
-        return hashlib.sha256(f"{self.title}\n{material_summary}".encode("utf-8")).hexdigest()
+        return observation_hash(self.title, material_summary)
+
+    @property
+    def observation_hash_version(self) -> int:
+        return OBSERVATION_HASH_VERSION
+
+    @property
+    def atomic_claim_signature(self) -> str:
+        claims = self.metadata.get("atomic_claims")
+        if isinstance(claims, list):
+            values = [str(value) for value in claims]
+        else:
+            values = [self.title]
+        return atomic_claim_signature(values)
+
+    @property
+    def source_reported_at(self) -> str | None:
+        value = self.metadata.get("source_reported_at")
+        return str(value) if value else None
+
+    @property
+    def aggregator_published_at(self) -> str | None:
+        value = self.metadata.get("aggregator_published_at")
+        return str(value) if value else None
+
+    @property
+    def effective_published_at(self) -> str:
+        return self.published_at
+
+    @property
+    def timestamp_status(self) -> str:
+        return str(self.metadata.get("timestamp_status") or "valid")
 
 
 def canonical_url(value: str, base_url: str) -> str:
@@ -83,11 +116,93 @@ def parse_public_time(value: str | None, fallback: str) -> str:
     return moment.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def publication_timestamps(
+    source_value: str | None,
+    observed_at: str,
+    *,
+    aggregator_value: str | None = None,
+) -> tuple[str, dict[str, object]]:
+    """Choose an effective time and retain a safe status for bad/future inputs."""
+    detected = parse_public_time(observed_at, observed_at)
+    detected_moment = datetime.fromisoformat(detected.replace("Z", "+00:00"))
+
+    def parsed(value: str | None) -> tuple[str | None, str]:
+        if value is None or not str(value).strip():
+            return None, "missing"
+        try:
+            return parse_public_time(str(value), detected), "parsed"
+        except AdapterError:
+            return None, "malformed"
+
+    source_reported, source_state = parsed(source_value)
+    aggregator, aggregator_state = parsed(aggregator_value)
+
+    def acceptable(value: str | None) -> bool:
+        if not value:
+            return False
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return (moment - detected_moment).total_seconds() <= 15 * 60
+
+    source_valid = acceptable(source_reported)
+    aggregator_valid = acceptable(aggregator)
+    source_future = source_state == "parsed" and not source_valid
+    aggregator_future = aggregator_state == "parsed" and not aggregator_valid
+
+    if source_valid:
+        effective = str(source_reported)
+        if aggregator_future:
+            status = "future_aggregator_ignored"
+        elif aggregator_state == "malformed":
+            status = "malformed_aggregator_ignored"
+        else:
+            status = "valid"
+    elif aggregator_valid:
+        effective = str(aggregator)
+        status = (
+            "future_source_fallback_aggregator"
+            if source_future
+            else "malformed_source_fallback_aggregator"
+            if source_state == "malformed"
+            else "missing_source_fallback_aggregator"
+        )
+    else:
+        effective = detected
+        if source_future and aggregator_future:
+            status = "future_both_fallback_detection"
+        elif source_future:
+            status = "future_source_fallback_detection"
+        elif source_state == "malformed" and aggregator_state == "malformed":
+            status = "malformed_both_fallback_detection"
+        elif source_state == "malformed":
+            status = "malformed_source_fallback_detection"
+        elif aggregator_future:
+            status = "future_aggregator_fallback_detection"
+        elif aggregator_state == "malformed":
+            status = "malformed_aggregator_fallback_detection"
+        else:
+            status = "missing_source_fallback_detection"
+    metadata: dict[str, object] = {
+        "timestamp_status": status,
+    }
+    if source_reported:
+        metadata["source_reported_at"] = source_reported
+    elif source_state == "malformed":
+        metadata["source_timestamp_raw"] = str(source_value)[:500]
+    if aggregator:
+        metadata["aggregator_published_at"] = aggregator
+    elif aggregator_state == "malformed":
+        metadata["aggregator_timestamp_raw"] = str(aggregator_value)[:500]
+    return effective, metadata
+
+
 def _text(element: ET.Element, names: tuple[str, ...]) -> str:
-    for child in element.iter():
-        local = child.tag.rsplit("}", 1)[-1].lower()
-        if local in names and child.text:
-            return " ".join(child.text.split())
+    # Field-name preference is significant.  A feed may place <updated>
+    # before <published>; callers still get the first preferred field name.
+    for name in names:
+        for child in element.iter():
+            local = child.tag.rsplit("}", 1)[-1].lower()
+            if local == name and child.text:
+                return " ".join(child.text.split())
     return ""
 
 
@@ -104,7 +219,7 @@ def parse_feed(payload: bytes, *, source_url: str, observed_at: str, limit: int 
     observations: list[Observation] = []
     for entry in entries[:limit]:
         title = _text(entry, ("title",))
-        published = _text(entry, ("published", "pubdate", "updated", "date"))
+        published = _text(entry, ("published", "pubdate", "date", "updated"))
         summary = _text(entry, ("summary", "description", "content"))
         external_id = _text(entry, ("id", "guid"))
         link = ""
@@ -121,14 +236,18 @@ def parse_feed(payload: bytes, *, source_url: str, observed_at: str, limit: int 
         if not title or not link:
             continue
         item_url = canonical_url(link, source_url)
+        effective_at, timestamp_metadata = publication_timestamps(
+            published, observed_at
+        )
         observations.append(
             Observation(
                 external_id=external_id or item_url,
                 title=title[:500],
                 url=item_url,
-                published_at=parse_public_time(published, observed_at),
+                published_at=effective_at,
                 summary=re.sub(r"<[^>]+>", " ", summary)[:4000].strip(),
                 language=entry.attrib.get("{http://www.w3.org/XML/1998/namespace}lang", "und"),
+                metadata=timestamp_metadata,
             )
         )
     return observations
@@ -154,23 +273,25 @@ def parse_json(payload: bytes, *, source_url: str, observed_at: str, limit: int 
         if not title or not link:
             continue
         item_url = canonical_url(link, source_url)
+        reported_value = str(
+            row.get("published_at")
+            or row.get("publication_date")
+            or row.get("published")
+            or row.get("date")
+            or ""
+        )
+        effective_at, timestamp_metadata = publication_timestamps(
+            reported_value, observed_at
+        )
         observations.append(
             Observation(
                 external_id=str(row.get("id") or row.get("document_number") or row.get("guid") or item_url),
                 title=title[:500],
                 url=item_url,
-                published_at=parse_public_time(
-                    str(
-                        row.get("published_at")
-                        or row.get("publication_date")
-                        or row.get("published")
-                        or row.get("date")
-                        or ""
-                    ),
-                    observed_at,
-                ),
+                published_at=effective_at,
                 summary=str(row.get("summary") or row.get("abstract") or row.get("description") or "")[:4000],
                 language=str(row.get("language") or "und")[:16],
+                metadata=timestamp_metadata,
             )
         )
     return observations
@@ -191,12 +312,16 @@ def parse_sitemap(payload: bytes, *, source_url: str, observed_at: str, limit: i
         item_url = canonical_url(link, source_url)
         slug = urlsplit(item_url).path.rstrip("/").rsplit("/", 1)[-1]
         title = re.sub(r"[-_]", " ", slug).strip() or item_url
+        effective_at, timestamp_metadata = publication_timestamps(
+            _text(node, ("lastmod",)), observed_at
+        )
         observations.append(
             Observation(
                 external_id=item_url,
                 title=title[:500],
                 url=item_url,
-                published_at=parse_public_time(_text(node, ("lastmod",)), observed_at),
+                published_at=effective_at,
+                metadata=timestamp_metadata,
             )
         )
         if len(observations) >= limit:
@@ -247,8 +372,14 @@ def parse_html_listing(payload: bytes, *, source_url: str, observed_at: str, lim
         if item_url in seen or len(title) < 12:
             continue
         seen.add(item_url)
+        effective_at, timestamp_metadata = publication_timestamps(
+            None, observed_at
+        )
         observations.append(
-            Observation(item_url, title[:500], item_url, observed_at)
+            Observation(
+                item_url, title[:500], item_url, effective_at,
+                metadata=timestamp_metadata,
+            )
         )
         if len(observations) >= limit:
             break
@@ -332,11 +463,16 @@ def _parse_dated_links(
             title = _plain_html(aria.group(1))
         if len(title) < 12 or title.lower() in {"featured", "read more", "learn more"}:
             continue
+        reported_at = _nearest_public_time(text, match.start(), observed_at)
+        effective_at, timestamp_metadata = publication_timestamps(
+            reported_at, observed_at
+        )
         item = Observation(
             external_id=item_url,
             title=title[:500],
             url=item_url,
-            published_at=_nearest_public_time(text, match.start(), observed_at),
+            published_at=effective_at,
+            metadata=timestamp_metadata,
         )
         previous = selected.get(item_url)
         if previous is None or len(item.title) >= len(previous.title):
@@ -412,7 +548,15 @@ def parse_huggingnews(payload: bytes, *, source_url: str, observed_at: str, limi
         if metadata:
             summary += ": " + "; ".join(metadata)
         summary += ". Popularity is not evidence."
-        observations.append(Observation(item_url, title[:500], item_url, current_date, summary))
+        effective_at, timestamp_metadata = publication_timestamps(
+            current_date, observed_at
+        )
+        observations.append(
+            Observation(
+                item_url, title[:500], item_url, effective_at, summary,
+                metadata=timestamp_metadata,
+            )
+        )
         seen.add(item_url)
         if len(observations) >= limit:
             break
@@ -461,18 +605,17 @@ def parse_huggingnews_json(
             title = str(row.get("title") or "").strip()
             if not re.fullmatch(r"[a-z0-9][a-z0-9-]{2,199}", slug) or len(title) < 12:
                 continue
+            aggregator_value: str | None
             try:
-                published_at = _huggingnews_millis(row.get("publishedAt"), observed_at)
+                aggregator_value = _huggingnews_millis(row.get("publishedAt"), observed_at)
             except AdapterError:
-                continue
+                aggregator_value = str(row.get("publishedAt") or "") or None
             event_value = str(row.get("eventTimeApprox") or "").strip()
-            if event_value:
-                try:
-                    event_at = parse_public_time(event_value, published_at)
-                except AdapterError:
-                    event_at = published_at
-            else:
-                event_at = published_at
+            effective_at, timestamp_metadata = publication_timestamps(
+                event_value or None,
+                observed_at,
+                aggregator_value=aggregator_value,
+            )
             topic_tags = [
                 {"slug": str(tag.get("slug") or "")[:100], "name": str(tag.get("name") or "")[:100]}
                 for tag in row.get("topicTags", [])
@@ -484,12 +627,12 @@ def parse_huggingnews_json(
                     external_id=slug,
                     title=title[:500],
                     url=f"https://huggingnews.com/ai/{slug}",
-                    published_at=event_at,
+                    published_at=effective_at,
                     summary=f"HuggingNews discovery topics: {topic_names}."[:4000],
                     metadata={
                         "slug": slug,
-                        "aggregator_published_at": published_at,
-                        "event_time_approx": event_at,
+                        **timestamp_metadata,
+                        "event_time_approx": timestamp_metadata.get("source_reported_at"),
                         "topic_tags": topic_tags,
                     },
                 )
@@ -609,13 +752,17 @@ def parse_mastodon_signal(payload: bytes, *, source_url: str, observed_at: str, 
             continue
         item_url = canonical_url(link, source_url)
         title = re.split(r"(?:\n|(?<=[.!?])\s+)", plain, maxsplit=1)[0].strip()
+        effective_at, timestamp_metadata = publication_timestamps(
+            _text(entry, ("pubdate", "published", "updated")), observed_at
+        )
         observations.append(
             Observation(
                 external_id=_text(entry, ("guid", "id")) or item_url,
                 title=title[:500],
                 url=item_url,
-                published_at=parse_public_time(_text(entry, ("pubdate", "published", "updated")), observed_at),
+                published_at=effective_at,
                 summary=plain[:4000],
+                metadata=timestamp_metadata,
             )
         )
         if len(observations) >= limit:

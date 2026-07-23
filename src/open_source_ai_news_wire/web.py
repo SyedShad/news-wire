@@ -213,6 +213,10 @@ def create_app(
             "unread_alerts": int(unread["count"]),
             "demo_mode": database.get_state("demo_mode", "false") == "true",
             "schedule_state": database.get_state("schedule_status", "not_installed"),
+            "assistance_temporarily_unavailable": (
+                database.get_state("assistance_unavailable_reason", "")
+                == "security_revalidation"
+            ),
         }
 
     @app.get("/auth/<token>")

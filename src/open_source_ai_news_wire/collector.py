@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import re
 from collections.abc import Callable
@@ -33,6 +34,7 @@ from .evidence import publisher_key
 from .settings import load_settings
 from .source_registry import synchronize_sources
 from .storage import Database
+from .revisions import atomic_claim_signature
 
 
 def utc_now() -> str:
@@ -68,6 +70,14 @@ def _similarity(left: str, right: str) -> float:
     if not left_tokens or not right_tokens:
         return 0.0
     return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def _editorial_passage(observation: Observation) -> str:
+    return str(observation.metadata.get("material_summary", observation.summary))
+
+
+def _signature(value: object) -> str:
+    return hashlib.sha256(Database.json(value).encode("utf-8")).hexdigest()
 
 
 class Collector:
@@ -156,6 +166,7 @@ class Collector:
                         str(source["url"]),
                         etag=source.get("etag"),
                         last_modified=source.get("last_modified"),
+                        deadline=deadline,
                     )
                     observations = [] if fetched.not_modified else parse_source(
                         str(source["adapter"]),
@@ -167,12 +178,16 @@ class Collector:
                     observations = self._contextualize_native_metrics(source, observations)
                     observations = self._definition_filtered_observations(source, observations)
                     if source["adapter"] == "huggingnews_json" and observations:
-                        observations = self._huggingnews_momentum(client, observations)
+                        observations = self._huggingnews_momentum(
+                            client, observations, deadline=deadline
+                        )
                     observations = self._incremental_observations(
                         source, observations, interval_start, interval_end
                     )
                     if source["adapter"] == "huggingnews_json" and observations:
-                        observations = self._huggingnews_details(client, source, observations)
+                        observations = self._huggingnews_details(
+                            client, source, observations, deadline=deadline
+                        )
                 new_count = self._record_success(
                     source, transaction_id, fetched, observations, trigger=trigger
                 )
@@ -328,9 +343,11 @@ class Collector:
         self,
         client: SafeHttpClient,
         observations: list[Observation],
+        *,
+        deadline: datetime | None = None,
     ) -> list[Observation]:
         try:
-            visible = client.fetch("https://huggingnews.com/")
+            visible = client.fetch("https://huggingnews.com/", deadline=deadline)
             metrics = parse_huggingnews_momentum(visible.body)
         except Exception:
             metrics = {}
@@ -360,10 +377,15 @@ class Collector:
         client: SafeHttpClient,
         source: dict[str, Any],
         observations: list[Observation],
+        *,
+        deadline: datetime | None = None,
     ) -> list[Observation]:
         enriched: list[Observation] = []
-        resolved_count = 0
+        short_link_attempts = 0
         for index, item in enumerate(observations):
+            if deadline and datetime.now(UTC) >= deadline:
+                enriched.extend(observations[index:])
+                break
             prior = self.database.one(
                 "SELECT content_hash, metadata_json FROM raw_observation WHERE source_id = ? AND external_id = ?",
                 (source["id"], item.external_id),
@@ -384,19 +406,36 @@ class Collector:
                 continue
             try:
                 detail = client.fetch(
-                    f"https://api.huggingnews.com/api/stories/{item.external_id}"
+                    f"https://api.huggingnews.com/api/stories/{item.external_id}",
+                    deadline=deadline,
                 )
                 detailed = enrich_huggingnews_detail(item, detail.body)
                 metadata = dict(detailed.metadata)
                 public_links: list[dict[str, str]] = []
                 for short_url in metadata.get("short_links", []):
-                    if resolved_count >= 12:
+                    if deadline and datetime.now(UTC) >= deadline:
                         break
+                    if short_link_attempts >= 12:
+                        break
+                    short_link_attempts += 1
                     try:
-                        final_url = self.short_link_resolver(str(short_url))
+                        resolver_parameters = inspect.signature(
+                            self.short_link_resolver
+                        ).parameters.values()
+                        accepts_deadline = any(
+                            parameter.name == "deadline"
+                            or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                            for parameter in resolver_parameters
+                        )
+                        final_url = (
+                            self.short_link_resolver(
+                                str(short_url), deadline=deadline
+                            )
+                            if accepts_deadline
+                            else self.short_link_resolver(str(short_url))
+                        )
                     except Exception:
                         continue
-                    resolved_count += 1
                     if urlsplit(final_url).hostname in {
                         "x.com", "www.x.com", "twitter.com", "www.twitter.com",
                     }:
@@ -486,10 +525,23 @@ class Collector:
             published = datetime.fromisoformat(item.published_at.replace("Z", "+00:00"))
             newer = cursor_time is None or (published, item.external_id) > (cursor_time, cursor_external)
             prior = self.database.one(
-                "SELECT content_hash, metadata_json FROM raw_observation WHERE source_id = ? AND external_id = ?",
+                """
+                SELECT content_hash, observation_hash_version, atomic_claim_signature,
+                       metadata_json FROM raw_observation
+                WHERE source_id = ? AND external_id = ?
+                """,
                 (source["id"], item.external_id),
             )
-            changed = bool(prior and prior["content_hash"] != item.content_hash)
+            changed = bool(
+                prior
+                and (
+                    prior["content_hash"] != item.content_hash
+                    or int(prior.get("observation_hash_version") or 1)
+                    != item.observation_hash_version
+                    or str(prior.get("atomic_claim_signature") or "")
+                    != item.atomic_claim_signature
+                )
+            )
             metadata_changed = bool(
                 prior
                 and str(prior.get("metadata_json") or "{}")
@@ -526,9 +578,9 @@ class Collector:
         with self.database.transaction() as connection:
             recovered = str(source.get("state_health") or "") == "degraded" or int(source.get("state_failure_streak") or 0) >= 3
             for observation in observations:
-                prior = connection.execute(
+                prior_row = connection.execute(
                     """
-                    SELECT external_id, content_hash, metadata_json FROM raw_observation
+                    SELECT * FROM raw_observation
                     WHERE source_id = ? AND (external_id = ? OR fingerprint = ?)
                     ORDER BY CASE WHEN external_id = ? THEN 0 ELSE 1 END
                     LIMIT 1
@@ -541,16 +593,62 @@ class Collector:
                 # Some discovery feeds republish the same headline under a new
                 # item ID. Preserve the first stored observation, advance the
                 # source cursor below, and do not replay the story or evidence.
-                if prior and prior["external_id"] != observation.external_id:
+                if prior_row and prior_row["external_id"] != observation.external_id:
                     continue
-                material_update = bool(prior and prior["content_hash"] != observation.content_hash)
+                prior = dict(prior_row) if prior_row else None
                 metadata_payload = {"summary": observation.summary, **observation.metadata}
+                previous_metadata: dict[str, Any] = {}
+                if prior:
+                    try:
+                        previous_metadata = json.loads(str(prior.get("metadata_json") or "{}"))
+                    except json.JSONDecodeError:
+                        previous_metadata = {}
+                observation_changed = bool(
+                    not prior
+                    or prior.get("content_hash") != observation.content_hash
+                    or int(prior.get("observation_hash_version") or 1)
+                    != observation.observation_hash_version
+                    or str(prior.get("atomic_claim_signature") or "")
+                    != observation.atomic_claim_signature
+                    or str(prior.get("canonical_url") or "") != observation.url
+                    or str(prior.get("published_at") or "") != observation.published_at
+                    or str(prior.get("metadata_json") or "") != Database.json(metadata_payload)
+                )
+                legacy_hash_rebase = bool(
+                    prior
+                    and int(prior.get("observation_hash_version") or 1)
+                    != observation.observation_hash_version
+                    and not str(prior.get("atomic_claim_signature") or "")
+                )
+                previous_material_summary = str(
+                    previous_metadata.get("material_summary", previous_metadata.get("summary", ""))
+                )
+                editorial_changed = bool(
+                    not prior
+                    or (
+                        not legacy_hash_rebase
+                        and (
+                            str(prior.get("title") or "") != observation.title
+                            or previous_material_summary != _editorial_passage(observation)
+                            or str(prior.get("canonical_url") or "") != observation.url
+                        )
+                    )
+                )
+                atomic_claim_changed = bool(
+                    prior
+                    and str(prior.get("atomic_claim_signature") or "")
+                    and str(prior.get("atomic_claim_signature"))
+                    != observation.atomic_claim_signature
+                )
                 connection.execute(
                     """
                     INSERT INTO raw_observation(
                         source_id, external_id, canonical_url, title, published_at,
-                        observed_at, language, fingerprint, content_hash, metadata_json
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        observed_at, language, fingerprint, content_hash, metadata_json,
+                        observation_hash_version, atomic_claim_signature,
+                        source_reported_at, aggregator_published_at,
+                        effective_published_at, timestamp_status
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(source_id, external_id) DO UPDATE SET
                         canonical_url=excluded.canonical_url,
                         title=excluded.title,
@@ -559,23 +657,117 @@ class Collector:
                         language=excluded.language,
                         fingerprint=excluded.fingerprint,
                         content_hash=excluded.content_hash,
-                        metadata_json=excluded.metadata_json
+                        metadata_json=excluded.metadata_json,
+                        observation_hash_version=excluded.observation_hash_version,
+                        atomic_claim_signature=excluded.atomic_claim_signature,
+                        source_reported_at=excluded.source_reported_at,
+                        aggregator_published_at=excluded.aggregator_published_at,
+                        effective_published_at=excluded.effective_published_at,
+                        timestamp_status=excluded.timestamp_status
                     """,
                     (
                         source["id"], observation.external_id, observation.url,
                         observation.title, observation.published_at, observed_at,
                         observation.language, observation.fingerprint,
                         observation.content_hash, Database.json(metadata_payload),
+                        observation.observation_hash_version,
+                        observation.atomic_claim_signature,
+                        observation.source_reported_at,
+                        observation.aggregator_published_at,
+                        observation.effective_published_at,
+                        observation.timestamp_status,
                     ),
                 )
+                raw_id = int(
+                    connection.execute(
+                        "SELECT id FROM raw_observation WHERE source_id = ? AND external_id = ?",
+                        (source["id"], observation.external_id),
+                    ).fetchone()["id"]
+                )
+                source_revision_number = int(
+                    connection.execute(
+                        """
+                        SELECT COALESCE(MAX(revision_number), 0) AS value FROM source_revision
+                        WHERE source_id = ? AND external_id = ?
+                        """,
+                        (source["id"], observation.external_id),
+                    ).fetchone()["value"]
+                )
+                if observation_changed:
+                    source_revision_number += 1
+                    connection.execute(
+                        """
+                        INSERT INTO source_revision(
+                            raw_observation_id, source_id, external_id, revision_number,
+                            observation_hash_version, observation_hash,
+                            atomic_claim_signature, canonical_url, title,
+                            source_reported_at, aggregator_published_at,
+                            effective_published_at, timestamp_status, observed_at
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            raw_id, source["id"], observation.external_id,
+                            source_revision_number, observation.observation_hash_version,
+                            observation.content_hash, observation.atomic_claim_signature,
+                            observation.url, observation.title,
+                            observation.source_reported_at,
+                            observation.aggregator_published_at,
+                            observation.effective_published_at,
+                            observation.timestamp_status, observed_at,
+                        ),
+                    )
+                if legacy_hash_rebase:
+                    message = f"Rebased observation hash without editorial update: {source['id']}:{observation.external_id}"
+                    if not connection.execute(
+                        "SELECT 1 FROM diagnostic_event WHERE event_type = 'hash_rebase' AND message = ?",
+                        (message,),
+                    ).fetchone():
+                        connection.execute(
+                            """
+                            INSERT INTO diagnostic_event(level, event_type, message, created_at, detail_json)
+                            VALUES('info', 'hash_rebase', ?, ?, ?)
+                            """,
+                            (
+                                message, observed_at,
+                                Database.json({
+                                    "source_id": source["id"],
+                                    "external_id": observation.external_id,
+                                    "previous_hash_version": int(prior.get("observation_hash_version") or 1),
+                                    "current_hash_version": observation.observation_hash_version,
+                                }),
+                            ),
+                        )
+                if "future" in observation.timestamp_status or "malformed" in observation.timestamp_status:
+                    message = f"Publication timestamp fallback: {source['id']}:{observation.external_id}:{observation.timestamp_status}"
+                    if not connection.execute(
+                        "SELECT 1 FROM diagnostic_event WHERE event_type = 'publication_timestamp_fallback' AND message = ?",
+                        (message,),
+                    ).fetchone():
+                        connection.execute(
+                            """
+                            INSERT INTO diagnostic_event(level, event_type, message, created_at, detail_json)
+                            VALUES('warning', 'publication_timestamp_fallback', ?, ?, ?)
+                            """,
+                            (
+                                message, observed_at,
+                                Database.json({
+                                    "source_id": source["id"],
+                                    "external_id": observation.external_id,
+                                    "source_reported_at": observation.source_reported_at,
+                                    "aggregator_published_at": observation.aggregator_published_at,
+                                    "effective_published_at": observation.effective_published_at,
+                                    "timestamp_status": observation.timestamp_status,
+                                }),
+                            ),
+                        )
                 story_id: str | None = None
-                if not prior or material_update:
+                if not prior or editorial_changed:
                     existing_story = self._find_story(connection, observation) if not prior else None
                     qualification = qualify(
                         observation,
                         source,
                         observed_at=observed_at,
-                        novelty=8 if material_update else 3 if existing_story else 10,
+                        novelty=8 if atomic_claim_changed else 3 if existing_story else 10,
                     )
                     if qualification.relevant:
                         story_id = self._persist_story(
@@ -584,14 +776,14 @@ class Collector:
                             observation,
                             qualification,
                             observed_at,
-                            material_update,
+                            source_revision_number,
                             ingestion_context=(
                                 "recovery" if trigger == "recovery" else
                                 "extended" if trigger == "extended" else
                                 "scheduled"
                             ),
                         )
-                    changed += 1
+                    changed += int(observation_changed)
                 else:
                     existing_story = self._find_story(connection, observation)
                     story_id = str(existing_story["id"]) if existing_story else None
@@ -869,6 +1061,95 @@ class Collector:
                         ),
                     )
 
+    @staticmethod
+    def _story_claim_set_signature(connection: Any, story_id: str) -> str:
+        rows = connection.execute(
+            "SELECT text FROM claim WHERE story_id = ? ORDER BY id", (story_id,)
+        ).fetchall()
+        return atomic_claim_signature(str(row["text"]) for row in rows)
+
+    @staticmethod
+    def _story_source_set_signature(connection: Any, story_id: str) -> str:
+        rows = connection.execute(
+            """
+            SELECT id, source_role, verification_status,
+                   COALESCE(canonical_url, url) AS canonical_url, title, passage
+            FROM source_item WHERE story_id = ? ORDER BY id
+            """,
+            (story_id,),
+        ).fetchall()
+        return _signature(
+            [
+                {
+                    "id": int(row["id"]),
+                    "role": str(row["source_role"]),
+                    "verification_status": str(row["verification_status"]),
+                    "canonical_url": str(row["canonical_url"]),
+                    "title": str(row["title"]),
+                    "passage": str(row["passage"]),
+                }
+                for row in rows
+            ]
+        )
+
+    @staticmethod
+    def _apply_story_revision_change(
+        connection: Any,
+        story_id: str,
+        *,
+        before_claim_signature: str,
+        before_source_signature: str,
+        observed_at: str,
+        headline: str,
+    ) -> None:
+        after_claim_signature = Collector._story_claim_set_signature(connection, story_id)
+        after_source_signature = Collector._story_source_set_signature(connection, story_id)
+        claim_changed = before_claim_signature != after_claim_signature
+        source_changed = before_source_signature != after_source_signature
+        if not claim_changed and not source_changed:
+            return
+        connection.execute(
+            """
+            UPDATE story_cluster
+            SET story_revision = story_revision + 1,
+                material_revision = material_revision + ?,
+                material_update = CASE WHEN ? = 1 THEN 1 ELSE material_update END,
+                material_updated_at = CASE WHEN ? = 1 THEN ? ELSE material_updated_at END,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                int(claim_changed), int(claim_changed), int(claim_changed),
+                observed_at, observed_at, story_id,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE work_item
+            SET status = 'needs_reapproval', last_error_class = 'story_revision_changed',
+                updated_at = ?
+            WHERE story_id = ? AND kind = 'draft'
+              AND status IN ('pending', 'queued', 'running', 'generating', 'waiting')
+            """,
+            (observed_at, story_id),
+        )
+        affected = connection.execute(
+            "UPDATE draft SET status = 'Needs Review', updated_at = ? WHERE story_id = ? AND status = 'Current'",
+            (observed_at, story_id),
+        ).rowcount
+        if affected and not connection.execute(
+            "SELECT 1 FROM alert WHERE story_id = ? AND kind = 'correction' AND read_at IS NULL",
+            (story_id,),
+        ).fetchone():
+            connection.execute(
+                """
+                INSERT INTO alert(story_id, kind, severity, title, body, created_at)
+                VALUES(?, 'correction', 'high', ?,
+                       'Approved claim or source content changed; the draft requires renewed approval.', ?)
+                """,
+                (story_id, headline, observed_at),
+            )
+
     def _find_story(self, connection: Any, observation: Observation) -> dict[str, Any] | None:
         exact = connection.execute(
             """
@@ -895,13 +1176,16 @@ class Collector:
         observation: Observation,
         qualification: Qualification,
         observed_at: str,
-        material_update: bool,
+        source_revision_number: int,
         ingestion_context: str,
     ) -> str:
         story = self._find_story(connection, observation)
+        created_story = story is None
         role = str(source["monitoring_role"])
         if story:
             story_id = str(story["id"])
+            before_claim_signature = self._story_claim_set_signature(connection, story_id)
+            before_source_signature = self._story_source_set_signature(connection, story_id)
         else:
             story_id = "story-" + hashlib.sha256(
                 f"{observation.fingerprint}:{observation.published_at}".encode("utf-8")
@@ -917,8 +1201,9 @@ class Collector:
                     priority, priority_score, freshness, first_public_at, detected_at,
                     opportunity_strength, relevance_bridge, counterargument,
                     watch_expires_at, watch_status, material_update, created_at, updated_at,
-                    importance_score, importance_json, material_updated_at, ingestion_context
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    importance_score, importance_json, material_updated_at, ingestion_context,
+                    story_revision, material_revision
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     story_id, slug or story_id, observation.title,
@@ -929,7 +1214,7 @@ class Collector:
                     qualification.counterargument,
                     (datetime.fromisoformat(observed_at.replace("Z", "+00:00")) + timedelta(hours=24)).isoformat().replace("+00:00", "Z") if status == "watch" else None,
                     "Active" if status == "watch" else None,
-                    int(material_update), observed_at, observed_at,
+                    0, observed_at, observed_at,
                     qualification.importance_score,
                     Database.json({
                         "material_importance": qualification.impact_score,
@@ -937,49 +1222,67 @@ class Collector:
                         "source_significance": qualification.source_significance,
                         "total": qualification.importance_score,
                     }),
-                    observed_at if material_update else None,
+                    None,
                     ingestion_context,
+                    1,
+                    1,
                 ),
             )
+            before_claim_signature = atomic_claim_signature([])
+            before_source_signature = _signature([])
 
         existing_item = connection.execute(
-            "SELECT id, content_hash FROM source_item WHERE story_id = ? AND url = ?",
-            (story_id, observation.url),
+            """
+            SELECT id, content_hash FROM source_item
+            WHERE story_id = ? AND (
+                url = ? OR (source_registry_id = ? AND fingerprint = ?)
+            ) ORDER BY id LIMIT 1
+            """,
+            (story_id, observation.url, source["id"], observation.fingerprint),
         ).fetchone()
         if existing_item:
-            if material_update:
+            connection.execute(
+                """
+                UPDATE source_item SET title = ?, url = ?, canonical_url = ?,
+                    published_at = ?, passage = ?,
+                    content_hash = ?, first_seen_at = COALESCE(first_seen_at, ?),
+                    source_revision = ?, source_reported_at = ?,
+                    aggregator_published_at = ?, effective_published_at = ?,
+                    timestamp_status = ?
+                WHERE id = ?
+                """,
+                (
+                    observation.title, observation.url, observation.url,
+                    observation.effective_published_at,
+                    _editorial_passage(observation), observation.content_hash,
+                    observed_at, max(1, source_revision_number),
+                    observation.source_reported_at,
+                    observation.aggregator_published_at,
+                    observation.effective_published_at,
+                    observation.timestamp_status, existing_item["id"],
+                ),
+            )
+            linked_claim = connection.execute(
+                """
+                SELECT c.id FROM claim c
+                JOIN evidence_link e ON e.claim_id = c.id
+                WHERE e.source_item_id = ? ORDER BY c.id LIMIT 1
+                """,
+                (existing_item["id"],),
+            ).fetchone()
+            if linked_claim:
                 connection.execute(
-                    """
-                    UPDATE source_item SET title = ?, published_at = ?, passage = ?,
-                        content_hash = ?, first_seen_at = COALESCE(first_seen_at, ?)
-                    WHERE id = ?
-                    """,
-                    (
-                        observation.title, observation.published_at, observation.summary,
-                        observation.content_hash, observed_at, existing_item["id"],
-                    ),
+                    "UPDATE claim SET text = ? WHERE id = ?",
+                    (observation.title, linked_claim["id"]),
                 )
-                connection.execute(
-                    "UPDATE story_cluster SET material_update = 1, material_updated_at = ?, updated_at = ? WHERE id = ?",
-                    (observed_at, observed_at, story_id),
-                )
-                affected = connection.execute(
-                    "UPDATE draft SET status = 'Needs Review', updated_at = ? WHERE story_id = ? AND status = 'Current'",
-                    (observed_at, story_id),
-                ).rowcount
-                if affected:
-                    existing_correction = connection.execute(
-                        "SELECT 1 FROM alert WHERE story_id = ? AND kind = 'correction' AND read_at IS NULL",
-                        (story_id,),
-                    ).fetchone()
-                    if not existing_correction:
-                        connection.execute(
-                            """
-                            INSERT INTO alert(story_id, kind, severity, title, body, created_at)
-                            VALUES(?, 'correction', 'high', ?, 'A material source update invalidated the current draft snapshot.', ?)
-                            """,
-                            (story_id, observation.title, observed_at),
-                        )
+            self._apply_story_revision_change(
+                connection,
+                story_id,
+                before_claim_signature=before_claim_signature,
+                before_source_signature=before_source_signature,
+                observed_at=observed_at,
+                headline=observation.title,
+            )
             return story_id
 
         cursor = connection.execute(
@@ -987,15 +1290,20 @@ class Collector:
             INSERT INTO source_item(
                 story_id, source_name, source_role, title, url, published_at,
                 language, verification_status, passage, canonical_url,
-                source_registry_id, fingerprint, content_hash, first_seen_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                source_registry_id, fingerprint, content_hash, first_seen_at,
+                source_revision, source_reported_at, aggregator_published_at,
+                effective_published_at, timestamp_status
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 story_id, source["name"], role, observation.title, observation.url,
-                observation.published_at, observation.language,
+                observation.effective_published_at, observation.language,
                 "supports" if role in {"Event", "Reporting"} else "trace",
-                observation.summary, observation.url, source["id"],
+                _editorial_passage(observation), observation.url, source["id"],
                 observation.fingerprint, observation.content_hash, observed_at,
+                max(1, source_revision_number), observation.source_reported_at,
+                observation.aggregator_published_at,
+                observation.effective_published_at, observation.timestamp_status,
             ),
         )
         source_item_id = int(cursor.lastrowid)
@@ -1014,7 +1322,7 @@ class Collector:
             (story_id, source_item_id, observation.language),
         )
         first_public = connection.execute(
-            "SELECT MIN(published_at) AS value FROM source_item WHERE story_id = ?",
+            "SELECT MIN(effective_published_at) AS value FROM source_item WHERE story_id = ?",
             (story_id,),
         ).fetchone()["value"]
         legacy_evidence = connection.execute(
@@ -1047,14 +1355,12 @@ class Collector:
         connection.execute(
             """
             UPDATE story_cluster SET first_public_at = ?, status = ?, priority = ?,
-                priority_score = MAX(priority_score, ?), material_update = MAX(material_update, ?),
-                material_updated_at = CASE WHEN ? = 1 THEN ? ELSE material_updated_at END,
+                priority_score = MAX(priority_score, ?),
                 importance_score = MAX(importance_score, ?), importance_json = ?, updated_at = ?
             WHERE id = ?
             """,
             (
                 first_public, new_status, priority, qualification.score,
-                int(material_update), int(material_update), observed_at,
                 qualification.importance_score,
                 Database.json({
                     "material_importance": qualification.impact_score,
@@ -1141,4 +1447,13 @@ class Collector:
                         observed_at,
                     ),
                 )
+        if not created_story:
+            self._apply_story_revision_change(
+                connection,
+                story_id,
+                before_claim_signature=before_claim_signature,
+                before_source_signature=before_source_signature,
+                observed_at=observed_at,
+                headline=observation.title,
+            )
         return story_id

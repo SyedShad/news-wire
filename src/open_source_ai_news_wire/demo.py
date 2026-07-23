@@ -323,7 +323,7 @@ def seed_demo_data(database: Database, *, force: bool = False) -> bool:
             ("shadow_mode", "true"),
         ]
         connection.executemany(
-            "INSERT INTO app_state(key, value, updated_at) VALUES(?, ?, ?)",
+            "INSERT OR IGNORE INTO app_state(key, value, updated_at) VALUES(?, ?, ?)",
             [(key, value, _iso(now)) for key, value in state],
         )
         connection.execute(

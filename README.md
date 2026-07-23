@@ -12,7 +12,7 @@ Reporting is neutral by default. The evidence-qualified path offers a separately
 - Evidence-aware clustering, primary/independent-confirmation gates, evidence-first qualification, separately audited manual candidate overrides, candidate and watch lifecycles, correction handling, and 72-hour automatic recovery.
 - Local SQLite and content-addressed evidence storage outside Git, with explicit migration, diagnostics, integrity, storage-pressure, and purge operations.
 - User-level macOS LaunchAgent at minute `00` and `30`, plus login/load recovery. It runs while the Mac is locked and awake, but does not prevent sleep or change power policy.
-- Packet-only Codex assistance behind a mandatory isolation canary and local usage budget. No API key or paid fallback is supported.
+- Packet-only Codex assistance behind mandatory filesystem, credential, and private-network isolation canaries and a local usage budget. No API key or paid fallback is supported.
 - Approval-only immediate drafting with durable recovery, visible generation and retry states, versioned evidence and guidance history, production-safe Markdown/HTML source exports, and native notices protected by a 72-hour fail-closed automatic activation gate and historical-alert watermark.
 
 ## Install locally
@@ -37,7 +37,7 @@ Open the on-demand interface with:
 
 The dashboard binds only to loopback, selects a random port, and requires its one-time process-local access link. See [docs/operator-guide.md](docs/operator-guide.md) for routine operation and recovery.
 
-Release `0.3.5` uses schema version 6. `Review Now` contains only unresolved stories published or materially updated within 24 hours and calculates its score from the current clock; older work moves to `Older Context`, while `Newest first` is available as an alternate sort. HuggingNews uses its documented anonymous JSON API, preserves its approximate event time, and exposes selected public posts and safely resolved links as Discovery leads. Source breadth and engagement affect attention only and can never satisfy verification. Reporting qualification continues to follow the human-confirmed original publisher, and manual drafting approval remains a separately warned editorial override. The half-hour worker remains the recovery fallback.
+Release `0.3.6` uses schema version 7. Story and material revisions are audited separately: exact approved claim/source signatures are immutable, source or claim drift requires reapproval, and only a changed normalized atomic-claim set may create a material-update ranking anchor. Feed publication time wins over update time regardless of XML order; future or malformed timestamps fall back safely while retaining source, aggregator, effective-time, status, and diagnostic provenance. Momentum breadth uses distinct normalized publisher/account identities only, and legitimate zero live scores never inherit historical priority. Assisted drafting is disabled during this containment release until the expanded credential, filesystem, private-network, and approval-snapshot canaries pass. Deterministic monitoring and human editorial work continue.
 
 ## Development and verification
 

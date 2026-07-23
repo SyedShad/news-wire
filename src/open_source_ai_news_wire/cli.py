@@ -89,6 +89,10 @@ def build_parser() -> argparse.ArgumentParser:
     application.add_argument("action", choices=("install", "list", "rollback", "uninstall"))
     application.add_argument("--release-id")
     application.add_argument("--source-root", default=str(Path.cwd()))
+    application.add_argument(
+        "--validation-report",
+        help="JSON validation report bound to the exact release commit (required for install)",
+    )
 
     assistance = subparsers.add_parser("assistance", help="Manage packet-only ChatGPT assistance")
     assistance.add_argument(
@@ -273,7 +277,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if arguments.command == "app":
         database = _database(data_root)
-        installer = LocalInstaller(Path(arguments.source_root), database.paths)
+        if arguments.action == "install" and not arguments.validation_report:
+            parser.error("app install requires --validation-report")
+        installer = LocalInstaller(
+            Path(arguments.source_root),
+            database.paths,
+            validation_report=(
+                Path(arguments.validation_report)
+                if arguments.validation_report
+                else None
+            ),
+        )
         if arguments.action == "install":
             release = installer.install()
             print(json.dumps({
@@ -291,6 +305,8 @@ def main(argv: list[str] | None = None) -> int:
                     "active": item.active,
                     "version": item.version,
                     "schema_version": item.schema_version,
+                    "verified": item.verified,
+                    "provenance": item.provenance,
                 }
                 for item in installer.list_releases()
             ], indent=2))

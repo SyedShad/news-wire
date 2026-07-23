@@ -327,7 +327,7 @@ def test_v6_migration_adds_dynamic_ranking_state_without_reusing_generic_update_
         connection.commit()
 
     database = Database(paths)
-    assert database.migrate() == 6
+    assert database.migrate() == SCHEMA_VERSION
     story = database.one(
         """
         SELECT importance_score, material_updated_at, ingestion_context, priority,
@@ -342,6 +342,178 @@ def test_v6_migration_adds_dynamic_ranking_state_without_reusing_generic_update_
     assert story["freshness"] == "Breaking"
     assert database.one("SELECT COUNT(*) AS count FROM discovery_lead") == {"count": 0}
     assert database.one("SELECT COUNT(*) AS count FROM momentum_snapshot") == {"count": 0}
+
+
+def test_v7_migration_versions_revisions_disables_assistance_and_repairs_only_exact_updates(
+    tmp_path: Path,
+) -> None:
+    paths = resolve_runtime_paths(tmp_path / "wire-data")
+    ensure_runtime_layout(paths)
+    false_update = "2026-07-23T11:13:29Z"
+    other_update = "2026-07-23T11:13:30Z"
+    with sqlite3.connect(paths.database) as connection:
+        connection.executescript(SCHEMA_V1)
+        for version in (2, 3, 4, 5, 6):
+            for statement in MIGRATIONS[version]:
+                connection.execute(statement)
+        connection.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', '6')")
+        connection.execute(
+            """
+            INSERT INTO source_registry(id, name, family, monitoring_role, url)
+            VALUES('source-one', 'Source One', 'Official', 'Event', 'https://example.com/feed')
+            """
+        )
+        for story_id, updated in (
+            ("story-debeeae2b4fa78a37fda", false_update),
+            ("story-670cb7d55f310b539bbc", other_update),
+        ):
+            connection.execute(
+                """
+                INSERT INTO story_cluster(
+                    id, slug, headline, summary, lane, openness_class, status,
+                    priority, priority_score, freshness, first_public_at, detected_at,
+                    material_update, created_at, updated_at, importance_score,
+                    material_updated_at
+                ) VALUES(?, ?, 'AI model release', 'Summary', 'Broader AI News',
+                         'not stated', 'signal', 'High', 70, 'Updated',
+                         '2026-07-13T08:00:00Z', '2026-07-13T08:05:00Z', 1,
+                         '2026-07-13T08:05:00Z', '2026-07-23T11:14:00Z', 40, ?)
+                """,
+                (story_id, story_id, updated),
+            )
+        connection.execute(
+            """
+            INSERT INTO raw_observation(
+                source_id, external_id, canonical_url, title, published_at,
+                observed_at, fingerprint, content_hash
+            ) VALUES('source-one', 'external-one', 'https://example.com/story',
+                     'AI model release', '2026-07-13T08:00:00Z',
+                     '2026-07-13T08:05:00Z', 'fingerprint', 'legacy-hash')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO source_item(
+                story_id, source_name, source_role, title, url, published_at,
+                source_registry_id, content_hash
+            ) VALUES('story-debeeae2b4fa78a37fda', 'Source One', 'Event',
+                     'AI model release', 'https://example.com/story',
+                     '2026-07-13T08:00:00Z', 'source-one', 'legacy-hash')
+            """
+        )
+        connection.execute(
+            "INSERT INTO app_state(key, value, updated_at) VALUES('assistance_enabled', 'true', '2026-07-23T11:00:00Z')"
+        )
+        action_id = connection.execute(
+            """
+            INSERT INTO review_action(story_id, action, draft_mode, created_at)
+            VALUES('story-debeeae2b4fa78a37fda', 'approve_neutral',
+                   'Neutral News Brief', '2026-07-23T11:00:00Z')
+            """
+        ).lastrowid
+        exact_payload = {
+            "schema_version": 3,
+            "story_id": "story-debeeae2b4fa78a37fda",
+            "story_revision": 1,
+            "review_action_id": int(action_id),
+            "claim_signatures": [{"id": 1, "signature": "a" * 64}],
+            "source_signatures": [{"id": "registry:1", "signature": "b" * 64}],
+        }
+        connection.executemany(
+            """
+            INSERT INTO work_item(
+                kind, story_id, status, priority, payload_json, created_at, updated_at
+            ) VALUES('draft', 'story-debeeae2b4fa78a37fda', ?, 1, ?,
+                     '2026-07-23T11:00:00Z', '2026-07-23T11:00:00Z')
+            """,
+            [
+                ("queued", json.dumps({"schema_version": 2})),
+                ("generating", json.dumps({**exact_payload, "source_signatures": None})),
+                ("waiting", "{malformed"),
+                ("pending", json.dumps({**exact_payload, "claim_signatures": []})),
+                ("queued", json.dumps({**exact_payload, "source_signatures": []})),
+                ("pending", json.dumps(exact_payload)),
+                ("completed", json.dumps({"schema_version": 2})),
+                ("cancelled", json.dumps({"schema_version": 2})),
+                ("needs_reapproval", json.dumps({"schema_version": 2})),
+            ],
+        )
+        connection.commit()
+
+    database = Database(paths)
+    assert database.migrate() == SCHEMA_VERSION
+    repaired = database.one(
+        "SELECT story_revision, material_revision, material_update, material_updated_at FROM story_cluster WHERE id = 'story-debeeae2b4fa78a37fda'"
+    )
+    assert repaired == {
+        "story_revision": 1,
+        "material_revision": 1,
+        "material_update": 0,
+        "material_updated_at": None,
+    }
+    assert database.one(
+        "SELECT material_updated_at FROM story_cluster WHERE id = 'story-670cb7d55f310b539bbc'"
+    ) == {"material_updated_at": other_update}
+    assert database.one(
+        """
+        SELECT observation_hash_version, observation_hash, source_reported_at,
+               effective_published_at, timestamp_status
+        FROM source_revision
+        """
+    ) == {
+        "observation_hash_version": 1,
+        "observation_hash": "legacy-hash",
+        "source_reported_at": "2026-07-13T08:00:00Z",
+        "effective_published_at": "2026-07-13T08:00:00Z",
+        "timestamp_status": "legacy_assumed",
+    }
+    assert database.get_state("assistance_enabled") == "false"
+    assert database.get_state("assistance_isolation_gate") == "requires_0.3.6_revalidation"
+    repair = database.one(
+        "SELECT detail_json FROM diagnostic_event WHERE event_type = 'false_material_update_repair'"
+    )
+    assert json.loads(repair["detail_json"])["repaired_story_ids"] == [
+        "story-debeeae2b4fa78a37fda"
+    ]
+    work = database.query(
+        "SELECT id, status, last_error_class FROM work_item ORDER BY id"
+    )
+    assert [row["status"] for row in work] == [
+        "needs_reapproval",
+        "needs_reapproval",
+        "needs_reapproval",
+        "needs_reapproval",
+        "needs_reapproval",
+        "pending",
+        "completed",
+        "cancelled",
+        "needs_reapproval",
+    ]
+    assert all(
+        row["last_error_class"] == "legacy_approval_snapshot_incomplete"
+        for row in work[:5]
+    )
+    assert all(row["last_error_class"] is None for row in work[5:])
+    quarantine = database.one(
+        "SELECT detail_json FROM diagnostic_event WHERE event_type = 'legacy_draft_snapshot_quarantine'"
+    )
+    detail = json.loads(quarantine["detail_json"])
+    assert detail == {
+        "count": 5,
+        "error_class": "legacy_approval_snapshot_incomplete",
+        "truncated_count": 0,
+        "work_item_ids": [1, 2, 3, 4, 5],
+    }
+    action = database.one(
+        """
+        SELECT story_revision, claim_signatures_json, source_signatures_json
+        FROM review_action WHERE id = ?
+        """,
+        (action_id,),
+    )
+    assert action["story_revision"] == 1
+    assert json.loads(action["claim_signatures_json"]) == exact_payload["claim_signatures"]
+    assert json.loads(action["source_signatures_json"]) == exact_payload["source_signatures"]
 
 
 def test_storage_pressure_levels_can_be_forced(tmp_path: Path) -> None:

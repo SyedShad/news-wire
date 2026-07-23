@@ -1,0 +1,39 @@
+{
+  "report_version": 1,
+  "release": "0.3.6",
+  "collected_at": "2026-07-23T13:27:25Z",
+  "mode": "read_only",
+  "runtime_data_root": "$HOME/open-source-ai-news-wire-data",
+  "database_integrity": "ok",
+  "schema": {
+    "current": 6,
+    "target": 7
+  },
+  "live_counts": {
+    "stories": 2490,
+    "raw_observations": 2575,
+    "source_items": 2506,
+    "active_draft_work": 0,
+    "legacy_active_draft_work": 0
+  },
+  "migration_effects": {
+    "legacy_observation_baselines": 2575,
+    "conditional_false_material_update_repairs": [
+      {
+        "story_id": "story-670cb7d55f310b539bbc",
+        "matching_timestamp": "2026-07-23T11:13:29Z"
+      },
+      {
+        "story_id": "story-debeeae2b4fa78a37fda",
+        "matching_timestamp": "2026-07-23T11:13:29Z"
+      }
+    ],
+    "legacy_active_drafts_requiring_reapproval": 0,
+    "assistance_forced_disabled": true
+  },
+  "data_policy": {
+    "backup_created": false,
+    "runtime_data_deleted": false,
+    "runtime_data_synchronized": false
+  }
+}

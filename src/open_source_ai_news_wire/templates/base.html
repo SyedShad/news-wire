@@ -59,6 +59,13 @@
       </div>
       {% endif %}
 
+      {% if assistance_temporarily_unavailable %}
+      <div class="demo-banner" role="status">
+        <span class="demo-pill">Assisted drafting temporarily unavailable</span>
+        Collection, ranking, evidence review, manual editing, and publishing remain available while isolation is revalidated.
+      </div>
+      {% endif %}
+
       {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
           <div class="flash-stack" aria-live="polite">

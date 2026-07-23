@@ -460,7 +460,7 @@ def recalculate_story_qualification(database: Database, story_id: str) -> dict[s
             INSERT INTO candidate(story_id, evidence_gate, importance_gate, score, score_json)
             VALUES(?, 0, 0, ?, '{}')
             """,
-            (story_id, int(story.get("importance_score") or story["priority_score"])),
+            (story_id, int(story.get("importance_score") or 0)),
         )
     state = qualification_state(database, story_id)
     now = utc_now()
