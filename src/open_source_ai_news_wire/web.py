@@ -213,6 +213,10 @@ def create_app(
             "unread_alerts": int(unread["count"]),
             "demo_mode": database.get_state("demo_mode", "false") == "true",
             "schedule_state": database.get_state("schedule_status", "not_installed"),
+            "assistance_temporarily_unavailable": (
+                database.get_state("assistance_unavailable_reason", "")
+                == "security_revalidation"
+            ),
         }
 
     @app.get("/auth/<token>")
@@ -270,16 +274,32 @@ def create_app(
         kind = request.args.get("kind", "all")
         status = request.args.get("status", "all")
         lane = request.args.get("lane", "all")
-        stories = service.list_stories(status=status, lane=lane, kind=kind)
+        window = request.args.get("window") or (
+            "all" if kind in {"health", "correction", "catch_up"} else "review_now"
+        )
+        sort = request.args.get("sort", "priority")
+        cursor = request.args.get("cursor", "")
+        story_page = service.list_story_page(
+            status=status,
+            lane=lane,
+            kind=kind,
+            window=window,
+            sort=sort,
+            cursor=cursor,
+        )
         notices = service.list_inbox_notices(kind=kind)
         return render_template(
             "inbox.html",
             page="inbox",
-            stories=stories,
+            stories=story_page["stories"],
+            story_total=story_page["total"],
+            next_cursor=story_page["next_cursor"],
             notices=notices,
             selected_kind=kind,
             selected_status=status,
             selected_lane=lane,
+            selected_window=window,
+            selected_sort=sort,
         )
 
     @app.post("/inbox/read-alerts")

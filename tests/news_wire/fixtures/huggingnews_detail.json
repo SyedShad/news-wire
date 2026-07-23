@@ -1,0 +1,22 @@
+{
+  "slug": "open-model-release-abc123",
+  "title": "Open Lab Releases a New Open-Weight AI Model",
+  "publishedAt": 1784793600000,
+  "eventTimeApprox": "2026-07-23T07:15:00Z",
+  "topicTags": [{"slug": "ai-open-models", "name": "AI Open Source"}],
+  "summary": "Reference-only summary.",
+  "selectedTweets": [
+    {
+      "authorHandle": "OpenLab",
+      "url": "https://x.com/openlab/status/123",
+      "tweetedAt": 1784791200000,
+      "text": "Release details https://t.co/abc123"
+    },
+    {
+      "authorHandle": "unsafe",
+      "url": "https://private.example/post",
+      "tweetedAt": 1784791200000,
+      "text": "Rejected host"
+    }
+  ]
+}

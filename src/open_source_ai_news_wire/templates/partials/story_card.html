@@ -1,20 +1,24 @@
 <article class="story-card priority-{{ story.priority|lower|replace(' ', '-') }}">
   <div class="story-rank">
     <span class="rank-number">{{ '%02d'|format(loop.index if loop else 1) }}</span>
-    <span class="score">{{ story.priority_score }}</span>
+    <span class="score" title="Current review score">{{ story.review_score }}</span>
   </div>
   <div class="story-card-body">
     <div class="eyebrow-row">
       <span class="tag tag-{{ story.freshness|lower }}">{{ story.freshness }}</span>
       <span class="eyebrow">{{ story.lane }}</span>
-      {% if story.material_update %}<span class="material-flag">Material update</span>{% endif %}
+      {% if story.is_material_update_current %}<span class="material-flag">Updated {{ story.ranking_age_label }} · First published {{ story.age_label }}</span>{% elif story.material_update %}<span class="material-flag">Material update recorded</span>{% endif %}
     </div>
     <h3><a href="{{ url_for('story_detail', story_id=story.id) }}">{{ story.headline }}</a></h3>
     <p>{{ story.summary }}</p>
     <div class="story-meta">
       <span>{{ story.priority }}</span>
-      <span>{{ story.first_public_at|wire_time }}</span>
-      <span>{{ story.openness_class }}</span>
+      <span>First public {{ story.first_public_at|wire_time }}</span>
+      {% if not story.is_material_update_current %}<span>{{ story.age_label }}</span>{% endif %}
+      <span>{{ story.impact_level }}</span>
+      <span>{{ story.attention_level }}</span>
+      <span>{{ story.evidence_state }}</span>
+      <span>{{ story.confirmed_origin_count }} confirmed origin{{ '' if story.confirmed_origin_count == 1 else 's' }} · {{ story.discovery_identity_count }} discovery mention{{ '' if story.discovery_identity_count == 1 else 's' }}</span>
     </div>
   </div>
   <a class="arrow-link" href="{{ url_for('story_detail', story_id=story.id) }}" aria-label="Review {{ story.headline }}">→</a>

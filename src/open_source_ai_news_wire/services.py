@@ -7,6 +7,8 @@ import hashlib
 import html
 import ipaddress
 import re
+import base64
+import bisect
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -15,6 +17,8 @@ from . import __version__
 from .storage import Database, database_size
 from .source_registry import set_source_enabled
 from .scheduler import next_scheduled_run
+from .ranking import percentile_points, rank_story, ranking_sort_key
+from .revisions import approval_signature_sets
 from .evidence import (
     ALLOWED_PROVENANCE_TYPES,
     ALLOWED_RELATIONSHIPS,
@@ -58,11 +62,179 @@ class DashboardService:
         scheduler: Any | None = None,
         run_callback: Callable[[], None] | None = None,
         draft_callback: Callable[[int], None] | None = None,
+        clock: Callable[[], datetime] | None = None,
     ):
         self.database = database
         self.scheduler = scheduler
         self.run_callback = run_callback
         self.draft_callback = draft_callback
+        self.clock = clock or (lambda: datetime.now(UTC))
+
+    def _current_time(self) -> datetime:
+        value = self.clock()
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+    def _momentum_context(self) -> dict[str, dict[str, int]]:
+        cutoff = (self._current_time() - timedelta(hours=24)).isoformat().replace("+00:00", "Z")
+        rows = self.database.query(
+            """
+            SELECT * FROM momentum_snapshot
+            WHERE captured_at >= ?
+            ORDER BY source_id, story_id, captured_at, id
+            """,
+            (cutoff,),
+        )
+        grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for row in rows:
+            grouped.setdefault((str(row["source_id"]), str(row["story_id"])), []).append(row)
+        values: dict[str, list[float]] = {}
+        velocities: dict[tuple[str, str], float] = {}
+        for key, snapshots in grouped.items():
+            first, latest = snapshots[0], snapshots[-1]
+            velocity = max(
+                0.0,
+                float(latest.get("native_score") or 0) - float(first.get("native_score") or 0),
+            )
+            first_rank = int(first.get("daily_rank") or 0)
+            latest_rank = int(latest.get("daily_rank") or 0)
+            if first_rank and latest_rank and latest_rank < first_rank:
+                velocity += float(first_rank - latest_rank) * 2
+            velocities[key] = velocity
+            values.setdefault(key[0], []).append(velocity)
+        for items in values.values():
+            items.sort()
+        context: dict[str, dict[str, int]] = {}
+        for key, snapshots in grouped.items():
+            source_id, story_id = key
+            row = snapshots[-1]
+            velocity = velocities[key]
+            population = values[source_id]
+            percentile = (
+                bisect.bisect_right(population, velocity) / max(1, len(population))
+                if velocity > 0
+                else 0.0
+            )
+            story = context.setdefault(
+                story_id,
+                {
+                    "momentum_velocity_points": 0,
+                    "momentum_account_count": 0,
+                    "momentum_post_count": 0,
+                    "momentum_daily_rank": 0,
+                },
+            )
+            story["momentum_velocity_points"] = max(
+                story["momentum_velocity_points"], percentile_points(percentile)
+            )
+            story["momentum_account_count"] = max(
+                story["momentum_account_count"], int(row.get("account_count") or 0)
+            )
+            story["momentum_post_count"] = max(
+                story["momentum_post_count"], int(row.get("post_count") or 0)
+            )
+            rank = int(row.get("daily_rank") or 0)
+            if rank and (not story["momentum_daily_rank"] or rank < story["momentum_daily_rank"]):
+                story["momentum_daily_rank"] = rank
+        return context
+
+    def _story_rows(self) -> list[dict[str, Any]]:
+        rows = self.database.query(
+            """
+            SELECT s.*,
+              (SELECT COUNT(*) FROM source_item i WHERE i.story_id = s.id) AS source_count,
+              (
+                SELECT COUNT(*) FROM source_item i
+                WHERE i.story_id = s.id AND i.source_role != 'Discovery'
+              ) AS direct_source_count,
+              (SELECT COUNT(*) FROM claim c WHERE c.story_id = s.id) AS claim_count,
+              (
+                SELECT COUNT(DISTINCT identity) FROM (
+                  SELECT LOWER(source_name) AS identity FROM source_item
+                    WHERE story_id = s.id AND source_role = 'Discovery'
+                  UNION
+                  SELECT identity_key AS identity FROM discovery_lead WHERE story_id = s.id
+                )
+              ) AS discovery_identity_count,
+              (
+                SELECT COUNT(*) FROM source_item i
+                WHERE i.story_id = s.id AND i.source_role = 'Event'
+              ) + (
+                SELECT COUNT(*) FROM evidence_source e
+                WHERE e.story_id = s.id AND e.status = 'confirmed' AND e.confirmed_role = 'Event'
+              ) AS confirmed_event_count,
+              (
+                SELECT COUNT(DISTINCT reporting_origin_key) FROM evidence_source e
+                WHERE e.story_id = s.id AND e.status = 'confirmed'
+                  AND e.confirmed_role = 'Reporting' AND e.origin_status = 'confirmed'
+                  AND e.reporting_origin_key IS NOT NULL
+              ) AS reporting_origin_count
+            FROM story_cluster s
+            """
+        )
+        momentum = self._momentum_context()
+        identities: dict[str, set[str]] = {}
+        for item in self.database.query(
+            "SELECT story_id, COALESCE(canonical_url, url) AS url FROM source_item"
+        ):
+            key = publisher_key(str(item.get("url") or ""))
+            if key:
+                identities.setdefault(str(item["story_id"]), set()).add(
+                    f"publisher:{key}"
+                )
+        for lead in self.database.query(
+            "SELECT story_id, identity_key FROM discovery_lead WHERE TRIM(identity_key) != ''"
+        ):
+            key = re.sub(r"\s+", "", str(lead["identity_key"]).casefold())
+            if key:
+                identities.setdefault(str(lead["story_id"]), set()).add(
+                    f"account:{key}"
+                )
+        for evidence in self.database.query(
+            """
+            SELECT story_id, confirmed_role, publisher_key, reporting_origin_key
+            FROM evidence_source WHERE status = 'confirmed'
+              AND confirmed_role IN ('Event', 'Reporting')
+            """
+        ):
+            key = (
+                str(evidence.get("reporting_origin_key") or "")
+                if evidence["confirmed_role"] == "Reporting"
+                else str(evidence.get("publisher_key") or "")
+            ).casefold().strip()
+            if key:
+                identities.setdefault(str(evidence["story_id"]), set()).add(
+                    f"publisher:{key}"
+                )
+        current = self._current_time()
+        return [
+            rank_story(
+                {
+                    **row,
+                    **momentum.get(str(row["id"]), {}),
+                    "source_identity_count": len(identities.get(str(row["id"]), set())),
+                },
+                now=current,
+            )
+            for row in rows
+        ]
+
+    @staticmethod
+    def _encode_cursor(story: dict[str, Any], sort: str) -> str:
+        payload = json.dumps({"v": 1, "sort": sort, "id": story["id"]}, separators=(",", ":"))
+        return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _decode_cursor(value: str, sort: str) -> str | None:
+        if not value:
+            return None
+        try:
+            padded = value + "=" * (-len(value) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if payload.get("v") != 1 or payload.get("sort") != sort:
+            return None
+        return str(payload.get("id") or "") or None
 
     def overview(self) -> dict[str, Any]:
         counts = self.database.one(
@@ -71,7 +243,7 @@ class DashboardService:
               SUM(CASE WHEN status = 'candidate' THEN 1 ELSE 0 END) AS candidates,
               SUM(CASE WHEN status = 'watch' THEN 1 ELSE 0 END) AS watches,
               SUM(CASE WHEN status = 'draft_ready' THEN 1 ELSE 0 END) AS draft_ready,
-              SUM(CASE WHEN priority = 'Urgent' AND status != 'archived' THEN 1 ELSE 0 END) AS urgent
+              0 AS urgent
             FROM story_cluster
             """
         ) or {}
@@ -84,15 +256,16 @@ class DashboardService:
             FROM source_registry WHERE enabled = 1
             """
         ) or {}
-        top_stories = self.database.query(
-            """
-            SELECT * FROM story_cluster
-            WHERE status IN ('candidate', 'watch', 'draft_ready')
-            ORDER BY CASE priority WHEN 'Urgent' THEN 0 WHEN 'High' THEN 1 WHEN 'High potential' THEN 2 ELSE 3 END,
-                     priority_score DESC, first_public_at DESC
-            LIMIT 5
-            """
-        )
+        current_rows = [
+            story for story in self._story_rows()
+            if story["is_review_current"]
+            and story["status"] in {"signal", "watch", "candidate"}
+            and story.get("watch_status") != "Expired"
+        ]
+        current_rows.sort(key=ranking_sort_key)
+        top_stories = current_rows[:5]
+        counts["urgent"] = sum(story["priority"] == "Urgent" for story in current_rows)
+        counts["review_now"] = len(current_rows)
         alerts = self.database.query(
             "SELECT * FROM alert ORDER BY created_at DESC LIMIT 5"
         )
@@ -128,37 +301,80 @@ class DashboardService:
         lane: str | None = None,
         kind: str | None = None,
     ) -> list[dict[str, Any]]:
-        conditions: list[str] = []
-        parameters: list[str] = []
-        if status and status != "all":
-            conditions.append("status = ?")
-            parameters.append(status)
-        if lane and lane != "all":
-            conditions.append("lane = ?")
-            parameters.append(lane)
-        if kind == "candidate":
-            conditions.append("status = 'candidate'")
-        elif kind == "watch":
-            conditions.append("status = 'watch'")
-        elif kind == "catch_up":
-            conditions.append("freshness = 'Catch-Up'")
-        elif kind == "correction":
-            conditions.append("EXISTS (SELECT 1 FROM alert a WHERE a.story_id = s.id AND a.kind = 'correction')")
-        elif kind == "health":
-            conditions.append("0 = 1")
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        return self.database.query(
-            f"""
-            SELECT s.*,
-              (SELECT COUNT(*) FROM source_item i WHERE i.story_id = s.id) AS source_count,
-              (SELECT COUNT(*) FROM claim c WHERE c.story_id = s.id) AS claim_count
-            FROM story_cluster s
-            {where}
-            ORDER BY CASE priority WHEN 'Urgent' THEN 0 WHEN 'High' THEN 1 WHEN 'High potential' THEN 2 ELSE 3 END,
-                     priority_score DESC, first_public_at DESC
-            """,
-            parameters,
-        )
+        return self.list_story_page(
+            status=status,
+            lane=lane,
+            kind=kind,
+            window="all",
+            page_size=10000,
+        )["stories"]
+
+    def list_story_page(
+        self,
+        *,
+        status: str | None = None,
+        lane: str | None = None,
+        kind: str | None = None,
+        window: str = "review_now",
+        sort: str = "priority",
+        cursor: str = "",
+        page_size: int = 25,
+    ) -> dict[str, Any]:
+        if window not in {"review_now", "older", "all"}:
+            window = "review_now"
+        if sort not in {"priority", "newest"}:
+            sort = "priority"
+        rows = self._story_rows()
+        correction_ids = {
+            str(row["story_id"])
+            for row in self.database.query(
+                "SELECT DISTINCT story_id FROM alert WHERE kind = 'correction' AND story_id IS NOT NULL"
+            )
+        }
+
+        def included(story: dict[str, Any]) -> bool:
+            if status and status != "all" and story["status"] != status:
+                return False
+            if lane and lane != "all" and story["lane"] != lane:
+                return False
+            if kind == "candidate" and story["status"] != "candidate":
+                return False
+            if kind == "watch" and story["status"] != "watch":
+                return False
+            if kind == "catch_up" and story.get("ingestion_context") not in {"recovery", "extended"}:
+                return False
+            if kind == "correction" and story["id"] not in correction_ids:
+                return False
+            if kind == "health":
+                return False
+            if window == "review_now":
+                return bool(
+                    story["is_review_current"]
+                    and story["status"] in {"signal", "watch", "candidate"}
+                    and story.get("watch_status") != "Expired"
+                )
+            if window == "older":
+                return bool(
+                    story["freshness"] == "Older"
+                    and story["status"] not in {"archived", "withdrawn"}
+                )
+            return True
+
+        selected = [story for story in rows if included(story)]
+        selected.sort(key=lambda story: ranking_sort_key(story, newest=sort == "newest"))
+        total = len(selected)
+        cursor_id = self._decode_cursor(cursor, sort)
+        start = 0
+        if cursor_id:
+            for index, story in enumerate(selected):
+                if story["id"] == cursor_id:
+                    start = index + 1
+                    break
+        page = selected[start:start + max(1, min(100, page_size))]
+        next_cursor = ""
+        if start + len(page) < total and page:
+            next_cursor = self._encode_cursor(page[-1], sort)
+        return {"stories": page, "next_cursor": next_cursor, "total": total}
 
     def list_inbox_notices(self, kind: str | None = None) -> list[dict[str, Any]]:
         operational_kinds = ("health", "correction", "catch_up", "recovery")
@@ -329,6 +545,33 @@ class DashboardService:
             if story["qualification"]["verified_qualified"]
             else ""
         )
+        ranked = next(
+            (item for item in self._story_rows() if item["id"] == story_id),
+            None,
+        )
+        if ranked:
+            for key in (
+                "historical_priority", "historical_priority_score", "freshness",
+                "age_hours", "ranking_anchor_at", "ranking_age_hours",
+                "review_score", "priority", "importance_score", "impact_level",
+                "evidence_points", "evidence_state", "momentum_score",
+                "attention_level", "source_identity_count", "source_count",
+                "direct_source_count", "confirmed_origin_count", "age_label",
+                "ranking_age_label",
+                "discovery_identity_count", "reporting_origin_count",
+                "confirmed_event_count", "is_review_current",
+                "is_material_update_current", "momentum_account_count",
+                "momentum_post_count", "momentum_daily_rank",
+                "momentum_velocity_points",
+            ):
+                story[key] = ranked.get(key)
+        story["discovery_leads"] = self.database.query(
+            """
+            SELECT * FROM discovery_lead WHERE story_id = ?
+            ORDER BY published_at, id
+            """,
+            (story_id,),
+        )
         return story
 
     @staticmethod
@@ -361,6 +604,44 @@ class DashboardService:
             self.database, story_id, allow_discovery=allow_discovery
         )
 
+    def _editorial_signature(self, story_id: str) -> str:
+        claims = self.database.query(
+            "SELECT id, text, status, volatility FROM claim WHERE story_id = ? ORDER BY id",
+            (story_id,),
+        )
+        sources = self._draft_sources(story_id, allow_discovery=True)
+        claim_signatures, source_signatures = approval_signature_sets(claims, sources)
+        return hashlib.sha256(
+            Database.json(
+                {"claims": claim_signatures, "sources": source_signatures}
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def _record_nonmaterial_editorial_change(
+        self, story_id: str, before_signature: str, *, now: str
+    ) -> None:
+        if self._editorial_signature(story_id) == before_signature:
+            return
+        with self.database.transaction() as connection:
+            connection.execute(
+                "UPDATE story_cluster SET story_revision = story_revision + 1, updated_at = ? WHERE id = ?",
+                (now, story_id),
+            )
+            connection.execute(
+                """
+                UPDATE work_item
+                SET status = 'needs_reapproval', last_error_class = 'story_revision_changed',
+                    updated_at = ?
+                WHERE story_id = ? AND kind = 'draft'
+                  AND status IN ('pending', 'queued', 'running', 'generating', 'waiting')
+                """,
+                (now, story_id),
+            )
+            connection.execute(
+                "UPDATE draft SET status = 'Needs Review', updated_at = ? WHERE story_id = ? AND status = 'Current'",
+                (now, story_id),
+            )
+
     def queue_evidence_inspection(
         self, story_id: str, url: str, acquisition_method: str
     ) -> tuple[int, str]:
@@ -379,6 +660,13 @@ class DashboardService:
                 """,
                 (story_id, normalized),
             )
+            if not linked:
+                lead = self.database.one(
+                    "SELECT id FROM discovery_lead WHERE story_id = ? AND url = ?",
+                    (story_id, normalized),
+                )
+                if lead:
+                    linked = {"id": lead["id"], "source_role": "Discovery"}
             if not linked:
                 raise ValueError("Linked inspection must use a stored Discovery or Reporting URL")
             proposed_role = "Reporting" if linked["source_role"] == "Reporting" else "Event"
@@ -505,6 +793,7 @@ class DashboardService:
             )
             if {int(row["id"]) for row in rows} != claim_ids:
                 raise ValueError("Claim mapping crossed the story boundary")
+        before_editorial_signature = self._editorial_signature(story_id)
         now = utc_now()
         with self.database.transaction() as connection:
             connection.execute(
@@ -562,7 +851,11 @@ class DashboardService:
                 ),
             )
         recalculate_claim_statuses(self.database, story_id)
-        return recalculate_story_qualification(self.database, story_id)
+        result = recalculate_story_qualification(self.database, story_id)
+        self._record_nonmaterial_editorial_change(
+            story_id, before_editorial_signature, now=now
+        )
+        return result
 
     def exclude_evidence(self, story_id: str, evidence_id: int, reason: str = "") -> dict[str, Any]:
         evidence = self.database.one(
@@ -571,6 +864,7 @@ class DashboardService:
         )
         if not evidence:
             raise LookupError("Evidence source not found")
+        before_editorial_signature = self._editorial_signature(story_id)
         now = utc_now()
         with self.database.transaction() as connection:
             connection.execute(
@@ -585,7 +879,11 @@ class DashboardService:
                 (story_id, reason.strip(), now, Database.json({"evidence_source_id": evidence_id})),
             )
         recalculate_claim_statuses(self.database, story_id)
-        return recalculate_story_qualification(self.database, story_id)
+        result = recalculate_story_qualification(self.database, story_id)
+        self._record_nonmaterial_editorial_change(
+            story_id, before_editorial_signature, now=now
+        )
+        return result
 
     def qualify_story(self, story_id: str, reason: str = "") -> str:
         state = recalculate_story_qualification(self.database, story_id)
@@ -718,6 +1016,11 @@ class DashboardService:
             messages[status] = "The local isolation check must pass before this draft can be generated."
         elif error_code in {"approval_invalidated", "evidence_invalidated", "ApprovalInvalidated"}:
             status = "needs_reapproval"
+        elif error_code in {"story_revision_changed", "approval_revision_mismatch"}:
+            status = "needs_reapproval"
+            messages[status] = (
+                "The approved claims or sources changed. Review the latest revision and approve again."
+            )
         return {
             "status": status,
             "raw_status": raw_status,
@@ -884,6 +1187,12 @@ class DashboardService:
         story = self.database.one("SELECT * FROM story_cluster WHERE id = ?", (story_id,))
         if not story:
             raise LookupError("Story not found")
+        ranked_story = next(
+            (item for item in self._story_rows() if item["id"] == story_id),
+            None,
+        )
+        if ranked_story:
+            story.update(ranked_story)
         now = utc_now()
         mode: str | None = None
         new_status = story["status"]
@@ -902,6 +1211,8 @@ class DashboardService:
                 else recalculate_story_qualification(self.database, story_id)
             )
             story = self.database.one("SELECT * FROM story_cluster WHERE id = ?", (story_id,)) or story
+            if ranked_story:
+                story.update(ranked_story)
             if story["status"] in {"archived", "withdrawn"}:
                 raise ValueError("Archived or withdrawn stories cannot be approved for drafting")
             if manual_override and confirmation_version != MANUAL_CONFIRMATION_VERSION:
@@ -917,6 +1228,7 @@ class DashboardService:
             sources = self._draft_sources(
                 story_id, allow_discovery=manual_override
             )
+            claim_signatures, source_signatures = approval_signature_sets(claims, sources)
             if manual_override and not claims:
                 raise ValueError("Manual approval requires at least one stored claim")
             if manual_override and not any(
@@ -946,7 +1258,8 @@ class DashboardService:
                 "candidate_basis": str(qualification["candidate_basis"]),
             }
             work_payload = {
-                "schema_version": 2,
+                "schema_version": 3,
+                "story_id": story_id,
                 "mode": mode,
                 "reason": reason.strip(),
                 "approval_basis": approval_basis,
@@ -954,8 +1267,20 @@ class DashboardService:
                 "confirmation_version": confirmation_version if manual_override else "",
                 "qualification_snapshot": gate_snapshot,
                 "approval_snapshot_at": now,
+                "story_revision": int(story.get("story_revision") or 1),
+                "claim_signatures": claim_signatures,
+                "source_signatures": source_signatures,
                 "story": {
                     "id": story["id"],
+                    "story_revision": int(story.get("story_revision") or 1),
+                    "material_revision": int(story.get("material_revision") or 1),
+                    "headline": str(story.get("headline") or ""),
+                    "summary": str(story.get("summary") or ""),
+                    "lane": str(story.get("lane") or ""),
+                    "openness_class": str(story.get("openness_class") or ""),
+                    "opportunity_strength": story.get("opportunity_strength"),
+                    "relevance_bridge": str(story.get("relevance_bridge") or ""),
+                    "counterargument": str(story.get("counterargument") or ""),
                     "updated_at": story["updated_at"],
                     "first_public_at": story["first_public_at"],
                     "detected_at": story["detected_at"],
@@ -967,6 +1292,18 @@ class DashboardService:
             }
         with self.database.transaction() as connection:
             if work_kind:
+                current_revision = connection.execute(
+                    "SELECT story_revision FROM story_cluster WHERE id = ?",
+                    (story_id,),
+                ).fetchone()
+                if (
+                    not current_revision
+                    or int(current_revision["story_revision"])
+                    != int(work_payload["story_revision"])
+                ):
+                    raise ValueError(
+                        "The story changed during approval; review the latest claims and sources again"
+                    )
                 latest_existing_draft = connection.execute(
                     """
                     SELECT status FROM draft
@@ -1025,8 +1362,9 @@ class DashboardService:
             action_cursor = connection.execute(
                 """
                 INSERT INTO review_action(
-                    story_id, action, reason, draft_mode, created_at, approval_snapshot_json
-                ) VALUES(?, ?, ?, ?, ?, ?)
+                    story_id, action, reason, draft_mode, created_at, approval_snapshot_json,
+                    story_revision, claim_signatures_json, source_signatures_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     story_id,
@@ -1035,6 +1373,9 @@ class DashboardService:
                     mode,
                     now,
                     Database.json(work_payload) if work_kind else "{}",
+                    int(story.get("story_revision") or 1),
+                    Database.json(claim_signatures) if work_kind else "[]",
+                    Database.json(source_signatures) if work_kind else "[]",
                 ),
             )
             connection.execute(
@@ -1068,7 +1409,7 @@ class DashboardService:
                             story_id,
                             int(qualification["evidence_gate"]),
                             int(qualification["automated_importance"]),
-                            int(story["priority_score"]),
+                            int(story.get("importance_score") or 0),
                             now,
                             int(action_cursor.lastrowid),
                             Database.json(gate_snapshot),
@@ -1084,7 +1425,7 @@ class DashboardService:
                     (
                         work_kind,
                         story_id,
-                        int(story["priority_score"]),
+                        int(story.get("review_score") or 0),
                         Database.json(work_payload),
                         now,
                         now,

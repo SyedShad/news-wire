@@ -84,13 +84,11 @@ jobs:
         with:
           persist-credentials: false
 
-      # Advisory-first: visibility before enforcement. Semgrep CE scans
-      # the repository with the community rule set (Python, shell, YAML,
-      # JavaScript, Go) to catch source-level security bugs before they
-      # reach production. Set continue-on-error: false once a clean baseline
-      # is confirmed.
+      # Semgrep CE scans the repository with the high-signal default community
+      # rules and blocks the change on a finding. An explicit registry config is
+      # required when anonymous metrics are disabled; `--config=auto` exits
+      # before scanning in that mode.
       - name: Run Semgrep SAST scan
-        continue-on-error: true
         env:
           SEMGREP_SEND_METRICS: off
-        run: semgrep scan --config=auto
+        run: semgrep scan --config=p/default

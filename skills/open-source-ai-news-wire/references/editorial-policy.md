@@ -13,8 +13,9 @@
 
 - Cover Open Ecosystem News, AGI Development, and Broader AI News.
 - Classify open source, open-weight, source-available, proprietary, and unstated access separately.
-- Use Breaking for 0–2 hours, Fresh for over 2–6 hours, and Catch-Up after 6 hours, based on First-Public Time.
-- Let importance and evidence qualify a story; engagement can reorder attention but cannot establish truth.
+- Use Breaking for 0–2 hours, Fresh for over 2 hours through 24 hours, and Older after 24 hours, based on First-Public Time. An older story may re-enter the live queue as Updated for 24 hours only after a genuine material development.
+- Keep catch-up as an ingestion context (`recovery` or `extended`), never an age or freshness class.
+- Let importance and evidence qualify a story; source breadth and engagement can reorder attention but cannot establish truth. HuggingNews summaries, selected public posts, ranks, and counts remain Discovery-only.
 
 ## Drafting
 

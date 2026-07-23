@@ -29,6 +29,7 @@ def seed_demo_data(database: Database, *, force: bool = False) -> bool:
             "status": "candidate",
             "priority": "Urgent",
             "priority_score": 88,
+            "importance_score": 60,
             "freshness": "Breaking",
             "first_public_at": _iso(now - timedelta(minutes=46)),
             "detected_at": _iso(now - timedelta(minutes=31)),
@@ -38,6 +39,8 @@ def seed_demo_data(database: Database, *, force: bool = False) -> bool:
             "watch_expires_at": None,
             "watch_status": None,
             "material_update": 1,
+            "material_updated_at": _iso(now - timedelta(minutes=31)),
+            "ingestion_context": "scheduled",
         },
         {
             "id": "story-demo-policy-002",
@@ -49,6 +52,7 @@ def seed_demo_data(database: Database, *, force: bool = False) -> bool:
             "status": "candidate",
             "priority": "High",
             "priority_score": 74,
+            "importance_score": 57,
             "freshness": "Fresh",
             "first_public_at": _iso(now - timedelta(hours=3, minutes=12)),
             "detected_at": _iso(now - timedelta(hours=2, minutes=53)),
@@ -58,6 +62,8 @@ def seed_demo_data(database: Database, *, force: bool = False) -> bool:
             "watch_expires_at": None,
             "watch_status": None,
             "material_update": 0,
+            "material_updated_at": None,
+            "ingestion_context": "scheduled",
         },
         {
             "id": "story-demo-watch-003",
@@ -69,6 +75,7 @@ def seed_demo_data(database: Database, *, force: bool = False) -> bool:
             "status": "watch",
             "priority": "High potential",
             "priority_score": 67,
+            "importance_score": 53,
             "freshness": "Breaking",
             "first_public_at": _iso(now - timedelta(hours=1, minutes=24)),
             "detected_at": _iso(now - timedelta(hours=1, minutes=8)),
@@ -78,6 +85,8 @@ def seed_demo_data(database: Database, *, force: bool = False) -> bool:
             "watch_expires_at": _iso(now + timedelta(hours=22, minutes=36)),
             "watch_status": "Active",
             "material_update": 0,
+            "material_updated_at": None,
+            "ingestion_context": "scheduled",
         },
         {
             "id": "story-demo-eval-004",
@@ -89,6 +98,7 @@ def seed_demo_data(database: Database, *, force: bool = False) -> bool:
             "status": "draft_ready",
             "priority": "Standard",
             "priority_score": 58,
+            "importance_score": 50,
             "freshness": "Fresh",
             "first_public_at": _iso(now - timedelta(hours=4, minutes=48)),
             "detected_at": _iso(now - timedelta(hours=4, minutes=22)),
@@ -98,6 +108,8 @@ def seed_demo_data(database: Database, *, force: bool = False) -> bool:
             "watch_expires_at": None,
             "watch_status": None,
             "material_update": 0,
+            "material_updated_at": None,
+            "ingestion_context": "scheduled",
         },
         {
             "id": "story-demo-catchup-005",
@@ -109,6 +121,7 @@ def seed_demo_data(database: Database, *, force: bool = False) -> bool:
             "status": "archived",
             "priority": "Standard",
             "priority_score": 43,
+            "importance_score": 43,
             "freshness": "Catch-Up",
             "first_public_at": _iso(now - timedelta(hours=19)),
             "detected_at": _iso(now - timedelta(hours=2)),
@@ -118,6 +131,8 @@ def seed_demo_data(database: Database, *, force: bool = False) -> bool:
             "watch_expires_at": None,
             "watch_status": None,
             "material_update": 0,
+            "material_updated_at": None,
+            "ingestion_context": "recovery",
         },
     ]
 
@@ -140,7 +155,7 @@ def seed_demo_data(database: Database, *, force: bool = False) -> bool:
         if force:
             for table in (
                 "evidence_source_claim", "evidence_source", "candidate", "evidence_link", "claim", "source_item", "review_action", "draft",
-                "work_item", "alert", "story_cluster", "source_registry", "scan_run",
+                "discovery_lead", "momentum_snapshot", "work_item", "alert", "story_cluster", "source_registry", "scan_run",
                 "usage_ledger", "diagnostic_event", "app_state",
             ):
                 connection.execute(f"DELETE FROM {table}")
@@ -151,12 +166,14 @@ def seed_demo_data(database: Database, *, force: bool = False) -> bool:
                 id, slug, headline, summary, lane, openness_class, status, priority,
                 priority_score, freshness, first_public_at, detected_at,
                 opportunity_strength, relevance_bridge, counterargument,
-                watch_expires_at, watch_status, material_update, created_at, updated_at
+                watch_expires_at, watch_status, material_update, created_at, updated_at,
+                importance_score, importance_json, material_updated_at, ingestion_context
             ) VALUES(
                 :id, :slug, :headline, :summary, :lane, :openness_class, :status, :priority,
                 :priority_score, :freshness, :first_public_at, :detected_at,
                 :opportunity_strength, :relevance_bridge, :counterargument,
-                :watch_expires_at, :watch_status, :material_update, :detected_at, :detected_at
+                :watch_expires_at, :watch_status, :material_update, :detected_at, :detected_at,
+                :importance_score, '{}', :material_updated_at, :ingestion_context
             )
             """,
             stories,
@@ -306,7 +323,7 @@ def seed_demo_data(database: Database, *, force: bool = False) -> bool:
             ("shadow_mode", "true"),
         ]
         connection.executemany(
-            "INSERT INTO app_state(key, value, updated_at) VALUES(?, ?, ?)",
+            "INSERT OR IGNORE INTO app_state(key, value, updated_at) VALUES(?, ?, ?)",
             [(key, value, _iso(now)) for key, value in state],
         )
         connection.execute(

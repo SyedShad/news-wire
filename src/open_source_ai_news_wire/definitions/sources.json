@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_date": "2026-07-17",
+  "checked_date": "2026-07-23",
   "sources": [
     {
       "id": "openai-news",
@@ -297,15 +297,16 @@
       "name": "HuggingNews",
       "family": "Aggregation",
       "monitoring_role": "Discovery",
-      "adapter": "huggingnews",
-      "url": "https://huggingnews.com/",
-      "base_hosts": ["huggingnews.com"],
+      "adapter": "huggingnews_json",
+      "url": "https://api.huggingnews.com/api/stories",
+      "base_hosts": ["api.huggingnews.com", "huggingnews.com"],
+      "include_terms": ["AI", "artificial intelligence", "AGI", "machine learning", "large language model", "LLM", "open model", "foundation model"],
       "enabled_by_default": true,
-      "parser_version": 2,
+      "parser_version": 3,
       "minimum_interval_minutes": 30,
       "validation_status": "live-validated",
       "evidence_use": "discovery-only",
-      "detail": "Dedicated dated discovery parser passed fixture and no-login live checks on 2026-07-17; popularity remains non-evidentiary metadata."
+      "detail": "Documented anonymous JSON feed and bounded story details validated on 2026-07-23; selected public posts and popularity remain Discovery-only."
     }
   ]
 }

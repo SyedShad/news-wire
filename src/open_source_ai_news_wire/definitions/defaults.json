@@ -26,6 +26,6 @@
     "neutral_default": true,
     "watch_lifetime_hours": 24,
     "breaking_hours": 2,
-    "fresh_hours": 6
+    "fresh_hours": 24
   }
 }

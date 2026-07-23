@@ -60,6 +60,42 @@ def test_worker_coalesces_overlapping_triggers(tmp_path: Path) -> None:
     }
 
 
+def test_worker_refreshes_reused_coalesced_queue_age(tmp_path: Path) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    database.execute(
+        """
+        INSERT INTO work_item(
+            kind, status, priority, payload_json, created_at, updated_at,
+            idempotency_key, available_at, last_error_class
+        ) VALUES('scout_scan', 'queued', 100, '{}', ?, ?, ?, ?, ?)
+        """,
+        (
+            "2026-07-14T00:00:00Z",
+            "2026-07-14T00:00:00Z",
+            "coalesced-scout-scan",
+            "2026-07-14T00:00:00Z",
+            "obsolete_error",
+        ),
+    )
+    lock = ScanLock(database.paths.operations / "locks" / "scan.lock")
+    lock.acquire()
+    try:
+        result = Worker(database, collector=RecordingCollector()).run(trigger="manual")
+    finally:
+        lock.release()
+
+    assert result.coalesced is True
+    queued = database.one(
+        "SELECT status, created_at, updated_at, available_at, last_error_class FROM work_item"
+    )
+    assert queued is not None
+    assert queued["status"] == "queued"
+    assert queued["created_at"] != "2026-07-14T00:00:00Z"
+    assert queued["created_at"] == queued["updated_at"] == queued["available_at"]
+    assert queued["last_error_class"] is None
+
+
 def test_scheduled_worker_uses_a_capped_recovery_interval(tmp_path: Path) -> None:
     database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
     database.initialize()

@@ -112,6 +112,8 @@ a { color: inherit; }
 .tag-breaking { color: #713018; background: #ffe1d4; }
 .tag-fresh { color: #365210; background: #e7f5c4; }
 .tag-catch-up { color: #4c5e67; background: #e4eaed; }
+.tag-updated { color: #3c3d71; background: #e4e5ff; }
+.tag-older { color: #59615b; background: #e8ebe7; }
 .tag-outline { color: var(--ink-soft); background: transparent; border: 1px solid var(--line-dark); }
 .eyebrow { color: var(--muted); font-size: 10px; font-weight: 750; text-transform: uppercase; letter-spacing: .06em; }
 .material-flag { color: var(--red); font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
@@ -159,6 +161,7 @@ select, input, textarea { width: 100%; color: var(--ink); background: #fffef9; b
 select, input { min-height: 40px; padding: 0 11px; }textarea { padding: 11px; line-height: 1.55; resize: vertical; }
 select:focus, input:focus, textarea:focus { border-color: var(--forest); box-shadow: 0 0 0 3px rgba(23,62,50,.1); }
 .filter-bar select { min-width: 210px; }.result-count { margin: 0 7px 11px auto; color: var(--muted); font-size: 11px; }
+.pagination { max-width: 1450px; margin: 14px auto 0; display: flex; justify-content: flex-end; }
 .inbox-panel { max-width: 1450px; margin: 0 auto; overflow: hidden; }.story-list.spacious .story-card { padding-block: 26px; }
 
 .breadcrumb { max-width: 1450px; display: flex; align-items: center; gap: 8px; margin: 34px auto 22px; color: var(--muted); font-size: 11px; }.breadcrumb a { color: var(--forest); text-decoration: none; }

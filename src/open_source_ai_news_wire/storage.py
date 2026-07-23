@@ -15,7 +15,49 @@ from typing import Any
 from .config import RuntimePaths, ensure_runtime_layout
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
+
+
+def _exact_signature_records(value: object, *, source: bool) -> bool:
+    if not isinstance(value, list) or not value:
+        return False
+    identifiers: list[str | int] = []
+    for record in value:
+        if not isinstance(record, dict) or set(record) != {"id", "signature"}:
+            return False
+        identifier = record["id"]
+        if source:
+            if not isinstance(identifier, str) or not identifier or len(identifier) > 160:
+                return False
+        elif isinstance(identifier, bool) or not isinstance(identifier, int) or identifier < 1:
+            return False
+        signature = record["signature"]
+        if not isinstance(signature, str) or len(signature) != 64 or any(
+            character not in "0123456789abcdef" for character in signature
+        ):
+            return False
+        identifiers.append(identifier)
+    return len(set(identifiers)) == len(identifiers) and identifiers == sorted(identifiers)
+
+
+def _exact_v3_draft_snapshot(
+    value: object, *, story_id: str, story_revision: int
+) -> bool:
+    if not isinstance(value, dict) or value.get("schema_version") != 3:
+        return False
+    revision = value.get("story_revision")
+    action_id = value.get("review_action_id")
+    return bool(
+        value.get("story_id") == story_id
+        and not isinstance(revision, bool)
+        and isinstance(revision, int)
+        and revision == story_revision
+        and not isinstance(action_id, bool)
+        and isinstance(action_id, int)
+        and action_id > 0
+        and _exact_signature_records(value.get("claim_signatures"), source=False)
+        and _exact_signature_records(value.get("source_signatures"), source=True)
+    )
 
 
 class MigrationRequired(RuntimeError):
@@ -445,6 +487,87 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE candidate ADD COLUMN manual_override_action_id INTEGER REFERENCES review_action(id)",
         "ALTER TABLE candidate ADD COLUMN manual_override_snapshot_json TEXT NOT NULL DEFAULT '{}'",
     ),
+    6: (
+        "ALTER TABLE story_cluster ADD COLUMN importance_score INTEGER NOT NULL DEFAULT 0 CHECK(importance_score BETWEEN 0 AND 60)",
+        "ALTER TABLE story_cluster ADD COLUMN importance_json TEXT NOT NULL DEFAULT '{}'",
+        "ALTER TABLE story_cluster ADD COLUMN material_updated_at TEXT",
+        "ALTER TABLE story_cluster ADD COLUMN ingestion_context TEXT NOT NULL DEFAULT 'legacy'",
+        """
+        CREATE TABLE discovery_lead (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            story_id TEXT NOT NULL REFERENCES story_cluster(id) ON DELETE CASCADE,
+            via_source_id TEXT NOT NULL REFERENCES source_registry(id) ON DELETE CASCADE,
+            external_id TEXT NOT NULL,
+            identity_key TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            published_at TEXT NOT NULL,
+            lead_type TEXT NOT NULL DEFAULT 'public_post',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(via_source_id, external_id)
+        )
+        """,
+        """
+        CREATE TABLE momentum_snapshot (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            story_id TEXT NOT NULL REFERENCES story_cluster(id) ON DELETE CASCADE,
+            source_id TEXT NOT NULL REFERENCES source_registry(id) ON DELETE CASCADE,
+            captured_at TEXT NOT NULL,
+            native_score REAL NOT NULL DEFAULT 0,
+            post_count INTEGER,
+            account_count INTEGER,
+            daily_rank INTEGER,
+            distinct_identity_count INTEGER NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            UNIQUE(story_id, source_id, captured_at)
+        )
+        """,
+        "CREATE INDEX idx_story_current_review ON story_cluster(status, first_public_at DESC, material_updated_at DESC)",
+        "CREATE INDEX idx_discovery_lead_story ON discovery_lead(story_id, identity_key)",
+        "CREATE INDEX idx_momentum_story_time ON momentum_snapshot(story_id, captured_at DESC)",
+    ),
+    7: (
+        "ALTER TABLE story_cluster ADD COLUMN story_revision INTEGER NOT NULL DEFAULT 1 CHECK(story_revision >= 1)",
+        "ALTER TABLE story_cluster ADD COLUMN material_revision INTEGER NOT NULL DEFAULT 1 CHECK(material_revision >= 1)",
+        "ALTER TABLE raw_observation ADD COLUMN observation_hash_version INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE raw_observation ADD COLUMN atomic_claim_signature TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE raw_observation ADD COLUMN source_reported_at TEXT",
+        "ALTER TABLE raw_observation ADD COLUMN aggregator_published_at TEXT",
+        "ALTER TABLE raw_observation ADD COLUMN effective_published_at TEXT",
+        "ALTER TABLE raw_observation ADD COLUMN timestamp_status TEXT NOT NULL DEFAULT 'legacy_assumed'",
+        "ALTER TABLE source_item ADD COLUMN source_revision INTEGER NOT NULL DEFAULT 1 CHECK(source_revision >= 1)",
+        "ALTER TABLE source_item ADD COLUMN source_reported_at TEXT",
+        "ALTER TABLE source_item ADD COLUMN aggregator_published_at TEXT",
+        "ALTER TABLE source_item ADD COLUMN effective_published_at TEXT",
+        "ALTER TABLE source_item ADD COLUMN timestamp_status TEXT NOT NULL DEFAULT 'legacy_assumed'",
+        "ALTER TABLE review_action ADD COLUMN story_revision INTEGER",
+        "ALTER TABLE review_action ADD COLUMN claim_signatures_json TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE review_action ADD COLUMN source_signatures_json TEXT NOT NULL DEFAULT '[]'",
+        """
+        CREATE TABLE source_revision (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            raw_observation_id INTEGER REFERENCES raw_observation(id) ON DELETE SET NULL,
+            source_id TEXT NOT NULL REFERENCES source_registry(id) ON DELETE CASCADE,
+            external_id TEXT NOT NULL,
+            revision_number INTEGER NOT NULL CHECK(revision_number >= 1),
+            observation_hash_version INTEGER NOT NULL,
+            observation_hash TEXT,
+            atomic_claim_signature TEXT NOT NULL DEFAULT '',
+            canonical_url TEXT NOT NULL,
+            title TEXT NOT NULL,
+            source_reported_at TEXT,
+            aggregator_published_at TEXT,
+            effective_published_at TEXT NOT NULL,
+            timestamp_status TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            UNIQUE(source_id, external_id, revision_number)
+        )
+        """,
+        "CREATE INDEX idx_source_revision_identity ON source_revision(source_id, external_id, revision_number DESC)",
+        "CREATE INDEX idx_story_revisions ON story_cluster(story_revision, material_revision)",
+    ),
 }
 
 
@@ -688,6 +811,251 @@ class Database:
                                     "affected_story_count": len(affected),
                                 }),
                             ),
+                        )
+                if version == 5:
+                    from .qualification import importance_components
+
+                    rows = connection.execute(
+                        "SELECT id, headline, summary FROM story_cluster"
+                    ).fetchall()
+                    for row in rows:
+                        roles = [
+                            str(item["source_role"])
+                            for item in connection.execute(
+                                "SELECT DISTINCT source_role FROM source_item WHERE story_id = ?",
+                                (row["id"],),
+                            ).fetchall()
+                        ]
+                        components = importance_components(
+                            str(row["headline"]),
+                            str(row["summary"]),
+                            roles,
+                            # Schema 6 deliberately does not pretend that a
+                            # legacy record's novelty can be reconstructed.
+                            novelty=0,
+                            assume_relevant=True,
+                        )
+                        connection.execute(
+                            """
+                            UPDATE story_cluster
+                            SET importance_score = ?, importance_json = ?,
+                                material_updated_at = NULL, ingestion_context = 'legacy'
+                            WHERE id = ?
+                            """,
+                            (components["total"], self.json(components), row["id"]),
+                        )
+                        connection.execute(
+                            """
+                            UPDATE candidate
+                            SET importance_gate = MAX(importance_gate, ?)
+                            WHERE story_id = ?
+                            """,
+                            (
+                                int(
+                                    components["material_importance"] >= 26
+                                    and components["total"] >= 40
+                                ),
+                                row["id"],
+                            ),
+                        )
+                    connection.execute(
+                        """
+                        UPDATE story_cluster
+                        SET priority = 'Standard'
+                        WHERE watch_status = 'Expired' AND status = 'signal'
+                        """
+                    )
+                if version == 6:
+                    now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                    # Existing rows retain their historical hash as a version-1
+                    # baseline.  Recollection under hash version 2 records a
+                    # new source revision without implying a material update.
+                    connection.execute(
+                        """
+                        UPDATE raw_observation
+                        SET observation_hash_version = 1,
+                            effective_published_at = COALESCE(effective_published_at, published_at),
+                            source_reported_at = COALESCE(source_reported_at, published_at),
+                            timestamp_status = 'legacy_assumed'
+                        """
+                    )
+                    connection.execute(
+                        """
+                        UPDATE source_item
+                        SET effective_published_at = COALESCE(effective_published_at, published_at),
+                            source_reported_at = COALESCE(source_reported_at, published_at),
+                            timestamp_status = 'legacy_assumed'
+                        """
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO source_revision(
+                            raw_observation_id, source_id, external_id, revision_number,
+                            observation_hash_version, observation_hash,
+                            atomic_claim_signature, canonical_url, title,
+                            source_reported_at, aggregator_published_at,
+                            effective_published_at, timestamp_status, observed_at
+                        )
+                        SELECT id, source_id, external_id, 1, observation_hash_version,
+                               content_hash, atomic_claim_signature, canonical_url, title,
+                               source_reported_at, aggregator_published_at,
+                               COALESCE(effective_published_at, published_at),
+                               timestamp_status, observed_at
+                        FROM raw_observation
+                        """
+                    )
+                    legacy_revision_count = int(
+                        connection.execute(
+                            "SELECT COUNT(*) AS count FROM source_revision"
+                        ).fetchone()["count"]
+                    )
+                    repair_timestamp = "2026-07-23T11:13:29Z"
+                    repair_targets = (
+                        "story-debeeae2b4fa78a37fda",
+                        "story-670cb7d55f310b539bbc",
+                    )
+                    present_repair_ids = {
+                        str(row["id"])
+                        for row in connection.execute(
+                            "SELECT id FROM story_cluster WHERE id IN (?, ?)",
+                            repair_targets,
+                        )
+                    }
+                    repaired_ids: list[str] = []
+                    for story_id in repair_targets:
+                        repaired = connection.execute(
+                            """
+                            UPDATE story_cluster
+                            SET material_update = 0, material_updated_at = NULL
+                            WHERE id = ? AND material_updated_at = ?
+                            """,
+                            (story_id, repair_timestamp),
+                        ).rowcount
+                        if repaired:
+                            repaired_ids.append(story_id)
+                    if legacy_revision_count:
+                        connection.execute(
+                            """
+                            INSERT INTO diagnostic_event(level, event_type, message, created_at, detail_json)
+                            VALUES('info', 'schema7_hash_baseline', ?, ?, ?)
+                            """,
+                            (
+                                "Versioned legacy observation hashes without treating the rebase as editorial change.",
+                                now,
+                                self.json({
+                                    "legacy_hash_version": 1,
+                                    "next_hash_version": 2,
+                                    "source_revision_rows": legacy_revision_count,
+                                }),
+                            ),
+                        )
+                    if present_repair_ids:
+                        connection.execute(
+                            """
+                            INSERT INTO diagnostic_event(level, event_type, message, created_at, detail_json)
+                            VALUES('info', 'false_material_update_repair', ?, ?, ?)
+                            """,
+                            (
+                                "Conditionally evaluated confirmed false material-update ranking anchors.",
+                                now,
+                                self.json({
+                                    "expected_timestamp": repair_timestamp,
+                                    "repaired_story_ids": repaired_ids,
+                                    "skipped_story_ids": sorted(
+                                        present_repair_ids - set(repaired_ids)
+                                    ),
+                                }),
+                            ),
+                        )
+                    invalid_draft_ids: list[int] = []
+                    active_drafts = connection.execute(
+                        """
+                        SELECT w.id, w.story_id, w.payload_json, s.story_revision
+                        FROM work_item w
+                        LEFT JOIN story_cluster s ON s.id = w.story_id
+                        WHERE w.kind = 'draft'
+                          AND w.status NOT IN ('completed', 'cancelled', 'failed', 'needs_reapproval')
+                        ORDER BY w.id
+                        """
+                    ).fetchall()
+                    for work in active_drafts:
+                        try:
+                            payload = json.loads(str(work["payload_json"] or "{}"))
+                        except (TypeError, json.JSONDecodeError):
+                            payload = None
+                        story_id = str(work["story_id"] or "")
+                        story_revision = int(work["story_revision"] or 0)
+                        exact = _exact_v3_draft_snapshot(
+                            payload,
+                            story_id=story_id,
+                            story_revision=story_revision,
+                        )
+                        action = None
+                        if exact and isinstance(payload, dict):
+                            action = connection.execute(
+                                "SELECT id, story_id FROM review_action WHERE id = ?",
+                                (int(payload["review_action_id"]),),
+                            ).fetchone()
+                            exact = bool(action and str(action["story_id"]) == story_id)
+                        if not exact:
+                            invalid_draft_ids.append(int(work["id"]))
+                            continue
+                        # Schema 7 makes the snapshot signatures independently
+                        # auditable on the approval action. Backfill only from an
+                        # already exact v3 payload; no editorial data is inferred.
+                        connection.execute(
+                            """
+                            UPDATE review_action
+                            SET story_revision = ?, claim_signatures_json = ?,
+                                source_signatures_json = ?
+                            WHERE id = ?
+                            """,
+                            (
+                                story_revision,
+                                self.json(payload["claim_signatures"]),
+                                self.json(payload["source_signatures"]),
+                                int(payload["review_action_id"]),
+                            ),
+                        )
+                    if invalid_draft_ids:
+                        placeholders = ",".join("?" for _ in invalid_draft_ids)
+                        connection.execute(
+                            f"""
+                            UPDATE work_item
+                            SET status = 'needs_reapproval',
+                                last_error_class = 'legacy_approval_snapshot_incomplete',
+                                updated_at = ?
+                            WHERE id IN ({placeholders})
+                            """,
+                            (now, *invalid_draft_ids),
+                        )
+                        connection.execute(
+                            """
+                            INSERT INTO diagnostic_event(level, event_type, message, created_at, detail_json)
+                            VALUES('warning', 'legacy_draft_snapshot_quarantine', ?, ?, ?)
+                            """,
+                            (
+                                "Quarantined active draft requests without exact schema-7 approval provenance.",
+                                now,
+                                self.json({
+                                    "count": len(invalid_draft_ids),
+                                    "work_item_ids": invalid_draft_ids[:50],
+                                    "truncated_count": max(0, len(invalid_draft_ids) - 50),
+                                    "error_class": "legacy_approval_snapshot_incomplete",
+                                }),
+                            ),
+                        )
+                    for key, value in (
+                        ("assistance_enabled", "false"),
+                        ("assistance_isolation_gate", "requires_0.3.6_revalidation"),
+                        ("assistance_unavailable_reason", "security_revalidation"),
+                    ):
+                        connection.execute(
+                            """
+                            INSERT INTO app_state(key, value, updated_at) VALUES(?, ?, ?)
+                            ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+                            """,
+                            (key, value, now),
                         )
                 connection.execute(
                     "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",

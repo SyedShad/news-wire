@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-07-23
+
+### Added
+
+- Schema 6 stores durable importance components, material-update anchors, ingestion context, timestamped momentum snapshots, and deduplicated Discovery leads.
+- The inbox now defaults to a paginated 24-hour `Review Now` queue, with `Newest first`, `Older Context`, and `All History` views.
+- HuggingNews collection now uses its documented anonymous JSON feed and bounded new-story detail requests, preserving `eventTimeApprox`, topic tags, selected public posts, and safely resolved public links.
+
+### Changed
+
+- Breaking, Fresh, Updated, Older, review score, and priority labels are calculated from the current clock instead of frozen at ingestion.
+- Durable importance, verification, source breadth, engagement velocity, and freshness are displayed separately. Momentum can raise attention but never verification.
+- Catch-up describes ingestion context rather than age, and completed work no longer appears in the Overview Priority Wire.
+
+### Fixed
+
+- Old stories cannot retain live Breaking, Fresh, Urgent, High, or High-potential placement after the 24-hour window.
+- Routine engagement-counter changes, duplicate mentions, rescans, and human actions cannot refresh the material-update clock.
+- Expired watches return to Standard historical context and cannot trigger current-content notifications.
+
+### Security
+
+- Public links discovered through known short URLs are resolved only across bounded HTTPS redirects with credential, port, DNS, private-address, and rebinding checks on every hop.
+- HuggingNews remains Discovery-only; selected posts, summaries, ranks, post counts, and account counts do not qualify evidence.
+
 ## [0.3.4] - 2026-07-23
 
 ### Added

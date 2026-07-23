@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,22 +18,161 @@ from open_source_ai_news_wire.adapters import (
     parse_anthropic_newsroom,
     parse_cisa_advisories,
     parse_huggingnews,
+    parse_huggingnews_json,
+    enrich_huggingnews_detail,
+    parse_huggingnews_momentum,
     parse_json,
     parse_mastodon_signal,
     parse_meta_ai_blog,
     parse_public_time,
+    publication_timestamps,
     parse_source,
     parse_sitemap,
 )
 from open_source_ai_news_wire.collector import Collector, _default_client_factory, _similarity, _title_tokens
 from open_source_ai_news_wire.config import resolve_runtime_paths
-from open_source_ai_news_wire.network import ResponseTooLarge, SafeHttpClient, UnsafeRequest
+from open_source_ai_news_wire.demo import seed_demo_data
+from open_source_ai_news_wire.network import (
+    NetworkDeadlineExceeded,
+    ResponseTooLarge,
+    SafeHttpClient,
+    UnsafeRequest,
+    _PinnedTransport,
+    _public_address,
+    _remaining_seconds,
+    resolve_known_short_url,
+    system_resolver,
+)
 from open_source_ai_news_wire.qualification import qualify
 from open_source_ai_news_wire.source_registry import set_source_enabled, synchronize_sources
 from open_source_ai_news_wire.storage import Database
 
 
 PUBLIC_IP = lambda _host: ["93.184.216.34"]
+
+
+@pytest.mark.parametrize(
+    "address",
+    (
+        "0.0.0.0",
+        "10.0.0.1",
+        "100.64.0.1",
+        "127.0.0.1",
+        "169.254.1.1",
+        "172.16.0.1",
+        "192.0.0.1",
+        "192.0.2.1",
+        "192.168.1.1",
+        "198.18.0.1",
+        "198.51.100.1",
+        "203.0.113.1",
+        "224.0.0.1",
+        "240.0.0.1",
+        "::",
+        "::1",
+        "fc00::1",
+        "fe80::1",
+        "ff00::1",
+        "2001:db8::1",
+        "not-an-address",
+    ),
+)
+def test_public_address_rejects_every_private_and_special_range(address: str) -> None:
+    assert _public_address(address) is False
+
+
+def test_pinned_transport_preserves_host_and_tls_name_and_verifies_peer() -> None:
+    captured: dict[str, object] = {}
+
+    class NetworkStream:
+        def __init__(self, peer: str):
+            self.peer = peer
+
+        def get_extra_info(self, name: str):
+            return (self.peer, 443) if name == "server_addr" else None
+
+    class RecordingTransport(httpx.BaseTransport):
+        def __init__(self, peer: str):
+            self.peer = peer
+
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            captured.update(
+                host=request.url.host,
+                host_header=request.headers["host"],
+                sni=request.extensions["sni_hostname"],
+            )
+            return httpx.Response(
+                200,
+                content=b"ok",
+                extensions={"network_stream": NetworkStream(self.peer)},
+            )
+
+    pinned = _PinnedTransport("example.com", "93.184.216.34")
+    pinned._transport.close()
+    pinned._transport = RecordingTransport("93.184.216.34")  # type: ignore[assignment]
+    response = pinned.handle_request(httpx.Request("GET", "https://example.com/path"))
+    response.close()
+    assert captured == {
+        "host": "93.184.216.34",
+        "host_header": "example.com",
+        "sni": "example.com",
+    }
+
+    pinned._transport = RecordingTransport("93.184.216.35")  # type: ignore[assignment]
+    with pytest.raises(UnsafeRequest, match="peer"):
+        pinned.handle_request(httpx.Request("GET", "https://example.com/path"))
+
+
+def test_pinned_transport_rejects_host_credentials_and_malformed_peer() -> None:
+    class MalformedPeerTransport(httpx.BaseTransport):
+        def handle_request(self, _request: httpx.Request) -> httpx.Response:
+            class Stream:
+                def get_extra_info(self, _name: str):
+                    return (object(),)
+
+            return httpx.Response(
+                200, content=b"ok", extensions={"network_stream": Stream()}
+            )
+
+    pinned = _PinnedTransport("example.com", "93.184.216.34")
+    pinned._transport.close()
+    pinned._transport = MalformedPeerTransport()  # type: ignore[assignment]
+    with pytest.raises(UnsafeRequest, match="hostname"):
+        pinned.handle_request(httpx.Request("GET", "https://other.example/path"))
+    with pytest.raises(UnsafeRequest, match="Credential-bearing"):
+        pinned.handle_request(
+            httpx.Request(
+                "GET", "https://example.com/path", headers={"Cookie": "session=secret"}
+            )
+        )
+    with pytest.raises(UnsafeRequest, match="peer"):
+        pinned.handle_request(httpx.Request("GET", "https://example.com/path"))
+    pinned.close()
+
+
+def test_system_resolver_and_deadline_helpers_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:2800:220:1:248:1893:25c8:1946", 443, 0, 0)),
+        ],
+    )
+    assert system_resolver("example.com") == [
+        "2606:2800:220:1:248:1893:25c8:1946",
+        "93.184.216.34",
+    ]
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("offline")),
+    )
+    with pytest.raises(ConnectionError, match="could not be resolved"):
+        system_resolver("example.com")
+    assert 0 < _remaining_seconds(datetime.now() + timedelta(seconds=1), 5) <= 5
 
 
 def test_safe_client_rejects_unregistered_private_and_credentialed_urls() -> None:
@@ -44,6 +183,9 @@ def test_safe_client_rejects_unregistered_private_and_credentialed_urls() -> Non
             client.fetch("https://user:pass@example.com/news")
     with SafeHttpClient(allowed_hosts={"example.com"}, resolver=lambda _host: ["127.0.0.1"]) as client:
         with pytest.raises(UnsafeRequest, match="public"):
+            client.fetch("https://example.com/news")
+    with SafeHttpClient(allowed_hosts={"example.com"}, resolver=lambda _host: ["not-an-ip"]) as client:
+        with pytest.raises(UnsafeRequest, match="invalid address"):
             client.fetch("https://example.com/news")
 
 
@@ -74,6 +216,13 @@ def test_safe_client_rejects_protocol_redirect_and_content_type_edge_cases() -> 
             client.fetch("file:///tmp/news")
         with pytest.raises(UnsafeRequest, match="Plain HTTP"):
             client.fetch("http://example.com/feed")
+        with pytest.raises(UnsafeRequest, match="non-standard"):
+            client.fetch("https://example.com:8443/feed")
+        with pytest.raises(NetworkDeadlineExceeded):
+            client.fetch(
+                "https://example.com/feed",
+                deadline=datetime(2020, 1, 1, tzinfo=UTC),
+            )
         with pytest.raises(UnsafeRequest, match="public"):
             SafeHttpClient(allowed_hosts={"example.com"}, resolver=lambda _host: []).fetch(
                 "https://example.com/feed"
@@ -99,6 +248,115 @@ def test_safe_client_rejects_protocol_redirect_and_content_type_edge_cases() -> 
         assert result.body == b"ok"
 
 
+def test_safe_client_rejects_dns_rebinding_between_hops() -> None:
+    answers = iter((["93.184.216.34"], ["93.184.216.34"], ["93.184.216.35"]))
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(302, headers={"location": "/next"}, request=request)
+    )
+    with SafeHttpClient(
+        allowed_hosts={"example.com"}, resolver=lambda _host: next(answers), transport=transport
+    ) as client:
+        with pytest.raises(UnsafeRequest, match="DNS resolution changed"):
+            client.fetch("https://example.com/start")
+
+
+def test_known_short_link_resolution_validates_every_public_https_hop() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "t.co":
+            return httpx.Response(
+                302,
+                headers={"location": "https://publisher.example/article"},
+                request=request,
+            )
+        return httpx.Response(200, content=b"article", request=request)
+
+    resolved = resolve_known_short_url(
+        "https://t.co/abc123",
+        resolver=PUBLIC_IP,
+        transport=httpx.MockTransport(handler),
+    )
+    assert resolved == "https://publisher.example/article"
+
+    with pytest.raises(UnsafeRequest, match="known public short-link"):
+        resolve_known_short_url(
+            "https://example.com/not-short",
+            resolver=PUBLIC_IP,
+            transport=httpx.MockTransport(handler),
+        )
+
+
+@pytest.mark.parametrize(
+    ("url", "message"),
+    (
+        ("", "missing or too long"),
+        ("http://t.co/a", "must use HTTPS"),
+        ("https://user:pass@t.co/a", "credentials"),
+        ("https://t.co:444/a", "standard HTTPS port"),
+    ),
+)
+def test_known_short_link_rejects_unsafe_initial_urls(url: str, message: str) -> None:
+    with pytest.raises(UnsafeRequest, match=message):
+        resolve_known_short_url(url, resolver=PUBLIC_IP, transport=httpx.MockTransport(lambda _: None))
+
+
+def test_known_short_link_rejects_invalid_dns_and_redirect_edges() -> None:
+    with pytest.raises(UnsafeRequest, match="invalid address"):
+        resolve_known_short_url(
+            "https://t.co/a",
+            resolver=lambda _host: ["invalid"],
+            transport=httpx.MockTransport(lambda _: None),
+        )
+
+    for response, message, maximum_redirects in (
+        (httpx.Response(302), "omitted", 1),
+        (httpx.Response(302, headers={"location": "/again"}), "Too many", 0),
+    ):
+        with pytest.raises(UnsafeRequest, match=message):
+            resolve_known_short_url(
+                "https://t.co/a",
+                resolver=PUBLIC_IP,
+                transport=httpx.MockTransport(
+                    lambda request, response=response: httpx.Response(
+                        response.status_code, headers=response.headers, request=request
+                    )
+                ),
+                maximum_redirects=maximum_redirects,
+            )
+
+
+def test_known_short_link_rejects_private_redirect_and_dns_change() -> None:
+    private_redirect = httpx.MockTransport(
+        lambda request: httpx.Response(
+            302,
+            headers={"location": "https://private.example/article"},
+            request=request,
+        )
+    )
+    with pytest.raises(UnsafeRequest, match="exclusively to public"):
+        resolve_known_short_url(
+            "https://t.co/abc123",
+            resolver=lambda host: ["127.0.0.1"] if host == "private.example" else PUBLIC_IP(host),
+            transport=private_redirect,
+        )
+
+    calls = 0
+
+    def changing_resolver(_host: str) -> list[str]:
+        nonlocal calls
+        calls += 1
+        return ["93.184.216.34" if calls == 1 else "93.184.216.35"]
+
+    same_host_redirect = httpx.MockTransport(
+        lambda request: httpx.Response(302, headers={"location": "/again"}, request=request)
+    )
+    with pytest.raises(UnsafeRequest, match="DNS resolution changed"):
+        resolve_known_short_url(
+            "https://t.co/abc123",
+            resolver=changing_resolver,
+            transport=same_host_redirect,
+        )
+
+
 def test_feed_json_sitemap_and_canonical_normalization() -> None:
     observed = "2026-07-14T10:00:00Z"
     feed = b"""<?xml version='1.0'?>
@@ -120,6 +378,59 @@ def test_feed_json_sitemap_and_canonical_normalization() -> None:
     assert canonical_url("/a?fbclid=x&q=1", "https://example.com") == "https://example.com/a?q=1"
     with pytest.raises(AdapterError):
         canonical_url("file:///tmp/private", "https://example.com")
+
+
+def test_feed_prefers_published_even_when_updated_appears_first() -> None:
+    observed = "2026-07-23T10:00:00Z"
+    feed = b"""<feed xmlns='http://www.w3.org/2005/Atom'><entry>
+    <id>ordered</id><title>AI model publication timestamp test</title>
+    <updated>2026-07-23T09:55:00Z</updated>
+    <published>2026-07-22T08:00:00Z</published>
+    <link rel='alternate' href='https://example.com/story'/></entry></feed>"""
+    item = parse_feed(feed, source_url="https://example.com/feed", observed_at=observed)[0]
+    assert item.published_at == "2026-07-22T08:00:00Z"
+    assert item.source_reported_at == "2026-07-22T08:00:00Z"
+    assert item.timestamp_status == "valid"
+
+
+def test_publication_timestamp_fallback_states_are_explicit() -> None:
+    observed = "2026-07-23T10:00:00Z"
+    future = "2026-07-23T10:16:00Z"
+    tolerance_boundary = "2026-07-23T10:15:00Z"
+    valid = "2026-07-23T09:30:00Z"
+
+    effective, metadata = publication_timestamps(tolerance_boundary, observed)
+    assert effective == tolerance_boundary
+    assert metadata["timestamp_status"] == "valid"
+
+    effective, metadata = publication_timestamps(future, observed)
+    assert effective == observed
+    assert metadata["timestamp_status"] == "future_source_fallback_detection"
+
+    effective, metadata = publication_timestamps(
+        future, observed, aggregator_value=valid
+    )
+    assert effective == valid
+    assert metadata["timestamp_status"] == "future_source_fallback_aggregator"
+
+    effective, metadata = publication_timestamps(
+        valid, observed, aggregator_value=future
+    )
+    assert effective == valid
+    assert metadata["timestamp_status"] == "future_aggregator_ignored"
+
+    effective, metadata = publication_timestamps(
+        future, observed, aggregator_value="2026-07-23T10:17:00Z"
+    )
+    assert effective == observed
+    assert metadata["timestamp_status"] == "future_both_fallback_detection"
+
+    effective, metadata = publication_timestamps(
+        "not-a-time", observed, aggregator_value=valid
+    )
+    assert effective == valid
+    assert metadata["timestamp_status"] == "malformed_source_fallback_aggregator"
+    assert metadata["source_timestamp_raw"] == "not-a-time"
 
 
 def test_adapter_variants_and_malformed_payloads() -> None:
@@ -191,6 +502,198 @@ def test_dedicated_source_fixtures_preserve_dates_roles_and_discovery_metadata()
     assert [item.external_id for item in mastodon] == ["https://social.example/@lab/1"]
 
 
+def test_huggingnews_documented_json_preserves_event_time_tags_and_public_leads() -> None:
+    fixtures = Path(__file__).parent / "fixtures"
+    rows = parse_huggingnews_json(
+        (fixtures / "huggingnews_latest.json").read_bytes(),
+        source_url="https://api.huggingnews.com/api/stories",
+        observed_at="2026-07-23T09:00:00Z",
+    )
+    assert rows[0].external_id == "open-model-release-abc123"
+    assert rows[0].published_at == "2026-07-23T07:15:00Z"
+    assert rows[0].metadata["aggregator_published_at"] != rows[0].published_at
+    assert rows[0].metadata["topic_tags"][0]["slug"] == "ai-open-models"
+
+    enriched = enrich_huggingnews_detail(
+        rows[0], (fixtures / "huggingnews_detail.json").read_bytes()
+    )
+    assert enriched.metadata["reference_summary"] == "Reference-only summary."
+    assert len(enriched.metadata["selected_tweets"]) == 1
+    assert enriched.metadata["distinct_identity_count"] == 1
+    assert enriched.metadata["detail_fetched"] is True
+    assert enriched.metadata["short_links"] == ["https://t.co/abc123"]
+
+
+def test_huggingnews_search_shape_and_missing_fields_degrade_per_item() -> None:
+    fixtures = Path(__file__).parent / "fixtures"
+    rows = parse_huggingnews_json(
+        (fixtures / "huggingnews_search.json").read_bytes(),
+        source_url="https://api.huggingnews.com/api/stories?query=open%20models",
+        observed_at="2026-07-23T09:00:00Z",
+    )
+    assert [item.external_id for item in rows] == [
+        "valid-open-model-story-abc123",
+        "invalid-time-story-abc123",
+    ]
+    assert rows[0].published_at == rows[0].metadata["aggregator_published_at"]
+    assert rows[0].timestamp_status == "malformed_source_fallback_aggregator"
+    assert rows[1].published_at == "2026-07-23T09:00:00Z"
+    assert rows[1].timestamp_status == "malformed_aggregator_fallback_detection"
+
+    with pytest.raises(AdapterError, match="dayGroups or stories"):
+        parse_huggingnews_json(
+            b'{"unexpected": []}',
+            source_url="https://api.huggingnews.com/api/stories",
+            observed_at="2026-07-23T09:00:00Z",
+        )
+
+
+def test_huggingnews_visible_momentum_is_optional_structured_discovery_data() -> None:
+    payload = b'''<a class="story-row-link" href="/ai/open-model-release-abc123"><div class="story-row"><div class="story-rank">2</div><div class="story-title">Open model</div><span class="meta-signal">34/25</span></div></a>'''
+    assert parse_huggingnews_momentum(payload) == {
+        "open-model-release-abc123": {
+            "daily_rank": 2,
+            "post_count": 34,
+            "account_count": 25,
+        }
+    }
+    assert parse_huggingnews_momentum(b"<html>layout changed</html>") == {}
+
+
+def test_huggingnews_detail_and_optional_momentum_enrichment_are_bounded(
+    tmp_path: Path,
+) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    synchronize_sources(database)
+    fixtures = Path(__file__).parent / "fixtures"
+    item = parse_huggingnews_json(
+        (fixtures / "huggingnews_latest.json").read_bytes(),
+        source_url="https://api.huggingnews.com/api/stories",
+        observed_at="2026-07-23T09:00:00Z",
+    )[0]
+    homepage = b'''<a class="story-row-link" href="/ai/open-model-release-abc123"><div class="story-row"><div class="story-rank">2</div><span class="meta-signal">34/25</span></div></a>'''
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "huggingnews.com":
+            return httpx.Response(200, content=homepage, request=request)
+        return httpx.Response(
+            200,
+            content=(fixtures / "huggingnews_detail.json").read_bytes(),
+            headers={"content-type": "application/json"},
+            request=request,
+        )
+
+    with SafeHttpClient(
+        allowed_hosts={"api.huggingnews.com", "huggingnews.com"},
+        resolver=PUBLIC_IP,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        collector = Collector(
+            database,
+            short_link_resolver=lambda _url: "https://publisher.example/report",
+        )
+        momentum = collector._huggingnews_momentum(client, [item])
+        enriched = collector._huggingnews_details(
+            client, {"id": "hugging-news"}, momentum
+        )
+
+    assert enriched[0].metadata["daily_rank"] == 2
+    assert enriched[0].metadata["native_score"] == 84.0
+    assert enriched[0].metadata["public_links"] == [
+        {"short_url": "https://t.co/abc123", "url": "https://publisher.example/report"}
+    ]
+
+    failing = httpx.MockTransport(
+        lambda request: (_ for _ in ()).throw(httpx.ConnectError("offline", request=request))
+    )
+    with SafeHttpClient(
+        allowed_hosts={"api.huggingnews.com", "huggingnews.com"},
+        resolver=PUBLIC_IP,
+        transport=failing,
+    ) as client:
+        assert Collector(database)._huggingnews_momentum(client, [item])[0].metadata.get(
+            "native_score"
+        ) is None
+
+
+def test_huggingnews_detail_short_link_cap_counts_failed_attempts(
+    tmp_path: Path,
+) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    item = Observation(
+        "story",
+        "Open model release",
+        "https://huggingnews.com/ai/story",
+        "2026-07-23T08:00:00Z",
+    )
+    attempts: list[str] = []
+
+    def resolve(url: str) -> str:
+        attempts.append(url)
+        raise UnsafeRequest("blocked")
+
+    detail = json.dumps(
+        {
+            "slug": "story",
+            "title": "Open model release",
+            "summary": "Reference-only summary.",
+            "selectedTweets": [
+                {
+                    "authorHandle": "openlab",
+                    "url": "https://x.com/openlab/status/123",
+                    "tweetedAt": 1784791200000,
+                    "text": " ".join(f"https://t.co/link{i}" for i in range(20)),
+                }
+            ],
+        }
+    ).encode()
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            content=detail,
+            headers={"content-type": "application/json"},
+            request=request,
+        )
+    )
+    with SafeHttpClient(
+        allowed_hosts={"api.huggingnews.com"},
+        resolver=PUBLIC_IP,
+        transport=transport,
+    ) as client:
+        enriched = Collector(database, short_link_resolver=resolve)._huggingnews_details(
+            client, {"id": "hugging-news"}, [item]
+        )
+
+    assert len(attempts) == 12
+    assert enriched[0].metadata["public_links"] == []
+
+
+def test_huggingnews_detail_loop_stops_at_worker_deadline(tmp_path: Path) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    item = Observation(
+        "story",
+        "Open model release",
+        "https://huggingnews.com/ai/story",
+        "2026-07-23T08:00:00Z",
+    )
+
+    class NoFetchClient:
+        def fetch(self, _url: str) -> None:
+            pytest.fail("detail fetch started after the worker deadline")
+
+    rows = Collector(database)._huggingnews_details(
+        NoFetchClient(),  # type: ignore[arg-type]
+        {"id": "hugging-news"},
+        [item],
+        deadline=datetime(2026, 7, 23, 7, 59, tzinfo=UTC),
+    )
+
+    assert rows == [item]
+
+
 def test_dedicated_parsers_reject_malformed_or_non_utf8_payloads() -> None:
     observed = "2026-07-17T10:00:00Z"
     for parser, url in (
@@ -214,6 +717,85 @@ def test_github_release_headline_is_grounded_in_repository_identity() -> None:
     assert rows[0].title == "Transformers v5.14.1 released"
 
 
+def test_hacker_news_engagement_changes_do_not_become_material_updates() -> None:
+    first = Observation(
+        "hn-1",
+        "A material AI announcement",
+        "https://example.com/announcement",
+        "2026-07-23T08:00:00Z",
+        "Article URL: https://example.com/announcement Points: 5 # Comments: 1",
+    )
+    second = Observation(
+        "hn-1",
+        "A material AI announcement",
+        "https://example.com/announcement",
+        "2026-07-23T08:00:00Z",
+        "Article URL: https://example.com/announcement Points: 500 # Comments: 99",
+    )
+    source = {"id": "hacker-news-ai"}
+    first_enriched = Collector._contextualize_native_metrics(source, [first])[0]
+    second_enriched = Collector._contextualize_native_metrics(source, [second])[0]
+
+    assert first_enriched.content_hash == second_enriched.content_hash
+    assert first_enriched.metadata["native_score"] < second_enriched.metadata["native_score"]
+
+
+def test_huggingnews_public_links_queue_proposals_without_verifying_them(
+    tmp_path: Path,
+) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    seed_demo_data(database)
+    observation = Observation(
+        "story-slug",
+        "A high-attention AI development",
+        "https://huggingnews.com/ai/story-slug",
+        "2026-07-23T08:00:00Z",
+        metadata={
+            "selected_tweets": [],
+            "public_links": [
+                {
+                    "short_url": "https://t.co/abc123",
+                    "url": "https://publisher.example/report",
+                }
+            ],
+        },
+    )
+    with database.transaction() as connection:
+        Collector._record_discovery_leads(
+            connection,
+            "story-demo-watch-003",
+            {"id": "huggingnews", "name": "HuggingNews"},
+            observation,
+            "2026-07-23T09:00:00Z",
+        )
+        Collector._record_discovery_leads(
+            connection,
+            "story-demo-watch-003",
+            {"id": "huggingnews", "name": "HuggingNews"},
+            observation,
+            "2026-07-23T09:01:00Z",
+        )
+
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM discovery_lead WHERE lead_type = 'public_link'"
+    ) == {"count": 1}
+    assert database.one(
+        "SELECT status, proposed_role, acquisition_method FROM evidence_source WHERE canonical_url = ?",
+        ("https://publisher.example/report",),
+    ) == {
+        "status": "queued",
+        "proposed_role": "Reporting",
+        "acquisition_method": "discovery_enrichment",
+    }
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM work_item WHERE kind = 'evidence_enrichment'"
+    ) == {"count": 1}
+    assert database.one(
+        "SELECT evidence_gate FROM candidate WHERE story_id = 'story-demo-watch-003'"
+    ) == {"evidence_gate": 0}
+
+
 def test_completion_registry_enables_validated_non_sec_sources_and_excludes_sec() -> None:
     payload = json.loads(
         (Path(__file__).parents[2] / "src/open_source_ai_news_wire/definitions/sources.json").read_text(encoding="utf-8")
@@ -223,7 +805,7 @@ def test_completion_registry_enables_validated_non_sec_sources_and_excludes_sec(
         "anthropic-newsroom": "anthropic_newsroom",
         "meta-ai-blog": "meta_ai_blog",
         "cisa-ai-security": "cisa_advisories",
-        "hugging-news": "huggingnews",
+        "hugging-news": "huggingnews_json",
         "mastodon-ai-signal": "mastodon_signal",
     }
     for source_id, adapter in expected.items():
@@ -377,9 +959,87 @@ def test_collector_is_incremental_and_creates_verified_candidate(tmp_path: Path)
     )
     changed = collector.scan(trigger="manual")
     assert changed.discovered_count == 1
-    assert database.one("SELECT material_update FROM story_cluster") == {"material_update": 1}
+    assert database.one(
+        "SELECT story_revision, material_revision, material_update, material_updated_at FROM story_cluster"
+    ) == {
+        "story_revision": 2,
+        "material_revision": 1,
+        "material_update": 0,
+        "material_updated_at": None,
+    }
+    assert database.one("SELECT source_revision FROM source_item") == {
+        "source_revision": 2
+    }
     assert database.one("SELECT status FROM draft") == {"status": "Needs Review"}
     assert database.one("SELECT kind FROM alert WHERE kind='correction'") == {"kind": "correction"}
+
+    payload["body"] = _feed(
+        "Open-source AI model release improves inference safety",
+        "Corrected and materially expanded public evidence",
+    )
+    revised_claim = collector.scan(trigger="manual")
+    assert revised_claim.discovered_count == 1
+    assert database.one(
+        "SELECT story_revision, material_revision, material_update, material_updated_at FROM story_cluster"
+    ) == {
+        "story_revision": 3,
+        "material_revision": 2,
+        "material_update": 1,
+        "material_updated_at": "2026-07-14T10:00:00Z",
+    }
+    assert database.one("SELECT text FROM claim") == {
+        "text": "Open-source AI model release improves inference safety"
+    }
+
+
+def test_collector_persists_and_deduplicates_future_timestamp_fallback(
+    tmp_path: Path,
+) -> None:
+    database = _database_with_one_source(tmp_path)
+    body = b"""<rss><channel><item><guid>future-one</guid>
+    <title>Open-source AI model release improves inference security</title>
+    <link>https://openai.com/news/future-one</link>
+    <pubDate>Thu, 23 Jul 2026 10:30:00 GMT</pubDate>
+    <description>Public evidence</description></item></channel></rss>"""
+
+    def factory(source: dict[str, object]) -> SafeHttpClient:
+        return SafeHttpClient(
+            allowed_hosts=set(json.loads(str(source["base_hosts_json"]))),
+            resolver=PUBLIC_IP,
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    content=body,
+                    headers={"content-type": "application/rss+xml"},
+                    request=request,
+                )
+            ),
+        )
+
+    collector = Collector(
+        database, client_factory=factory, now=lambda: "2026-07-23T10:00:00Z"
+    )
+    collector.scan(trigger="manual")
+    collector.scan(trigger="manual")
+
+    expected = {
+        "source_reported_at": "2026-07-23T10:30:00Z",
+        "aggregator_published_at": None,
+        "effective_published_at": "2026-07-23T10:00:00Z",
+        "timestamp_status": "future_source_fallback_detection",
+    }
+    assert database.one(
+        "SELECT source_reported_at, aggregator_published_at, effective_published_at, timestamp_status FROM raw_observation"
+    ) == expected
+    assert database.one(
+        "SELECT source_reported_at, aggregator_published_at, effective_published_at, timestamp_status FROM source_item"
+    ) == expected
+    assert database.one(
+        "SELECT source_reported_at, aggregator_published_at, effective_published_at, timestamp_status FROM source_revision"
+    ) == expected
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM diagnostic_event WHERE event_type = 'publication_timestamp_fallback'"
+    ) == {"count": 1}
 
 
 def test_collector_collapses_republished_fingerprint_and_advances_cursor(tmp_path: Path) -> None:

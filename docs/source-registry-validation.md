@@ -19,9 +19,11 @@ On 2026-07-17, the five remaining non-SEC families passed bounded no-login acces
 - Anthropic Newsroom: dedicated dated Event parser.
 - Meta AI Blog: dedicated dated Event parser replacing the unavailable RSS address.
 - CISA advisories: dedicated public HTML Event parser with deterministic AI relevance terms; the declared product client still receives HTTP 403, so it remains `validated-unavailable` and disabled.
-- HuggingNews: dated Discovery parser; rank and momentum remain explicitly non-evidentiary.
+- HuggingNews: originally validated with a dated public-HTML Discovery parser.
 - Mastodon AI tag: bounded Discovery RSS parser requiring AI context plus an event, research, or policy term and rejecting common promotional noise.
 
-Together with the previously validated registry, nineteen definitions are live-validated, CISA is implemented but `validated-unavailable`, and SEC remains disabled as `excluded-by-operator`. Release 0.3.1 makes no SEC requests.
+On 2026-07-23, HuggingNews was revalidated against its documented anonymous `GET /api/stories` interface and exact-slug detail interface. The JSON adapter preserves `eventTimeApprox` as First-Public Time, falls back to `publishedAt`, stores topic tags, and fetches details only for new or materially changed slugs. Selected X posts and safely resolved public links are deduplicated Discovery leads. The optional public HTML parser supplies visible daily rank and post/account counts when available; its failure does not disable JSON collection. None of the summary, selected posts, counts, ranks, or link breadth counts as Event or Reporting evidence without direct retrieval and human confirmation. Authenticated pagination, private Convex fields, and API keys remain out of scope.
+
+Together with the previously validated registry, nineteen definitions are live-validated, CISA is implemented but `validated-unavailable`, and SEC remains disabled as `excluded-by-operator`. Release 0.3.5 makes no SEC requests.
 
 Run `sources health` after installation and after any source-definition update. A failing source is isolated; its cursor advances only after a successful transaction. Whole-Mac resolver or connection outages are grouped and do not advance individual source failure streaks. Re-enable a disabled source only after updating its checked date, fixture, live result, evidence role, and detail.

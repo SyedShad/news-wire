@@ -65,6 +65,15 @@ class NativeNotifier:
             """,
             (watermark,),
         )
+        ranked: dict[str, dict[str, Any]] = {}
+        if any(row.get("kind") in {"candidate", "watch"} for row in rows):
+            from .services import DashboardService
+
+            ranked = {
+                str(story["id"]): story
+                for story in DashboardService(self.database)._story_rows()
+            }
+        rows = [row for row in rows if self._current_content_alert(row, ranked)]
         if not rows:
             return 0
         recent_cutoff = datetime.now(UTC) - timedelta(minutes=10)
@@ -95,6 +104,39 @@ class NativeNotifier:
             self._record([row], f"news-wire-alert-{row['id']}", success, error_class)
             delivered += int(success)
         return delivered
+
+    def _current_content_alert(
+        self,
+        alert: dict[str, Any],
+        ranked: dict[str, dict[str, Any]] | None = None,
+    ) -> bool:
+        if alert.get("kind") not in {"candidate", "watch"} or not alert.get("story_id"):
+            return True
+        if ranked is not None:
+            story = ranked.get(str(alert["story_id"]))
+            return bool(
+                story
+                and story.get("is_review_current")
+                and story.get("priority") in {"Urgent", "High"}
+                and story.get("watch_status") != "Expired"
+            )
+        story = self.database.one(
+            "SELECT first_public_at, material_updated_at FROM story_cluster WHERE id = ?",
+            (alert["story_id"],),
+        )
+        if not story:
+            return False
+        now = datetime.now(UTC)
+        for value in (story.get("material_updated_at"), story.get("first_public_at")):
+            if not value:
+                continue
+            try:
+                moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if now - moment.astimezone(UTC) <= timedelta(hours=24):
+                return True
+        return False
 
     def send_canary(self) -> bool:
         now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")

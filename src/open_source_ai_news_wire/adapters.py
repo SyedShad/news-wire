@@ -7,11 +7,13 @@ import html
 import json
 import re
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+
+from .revisions import OBSERVATION_HASH_VERSION, atomic_claim_signature, observation_hash
 
 
 class AdapterError(ValueError):
@@ -26,6 +28,7 @@ class Observation:
     published_at: str
     summary: str = ""
     language: str = "und"
+    metadata: dict[str, object] = field(default_factory=dict)
 
     @property
     def fingerprint(self) -> str:
@@ -34,7 +37,43 @@ class Observation:
 
     @property
     def content_hash(self) -> str:
-        return hashlib.sha256(f"{self.title}\n{self.summary}".encode("utf-8")).hexdigest()
+        # Mutable counters and other attention metadata must not promote a
+        # routine rescan into a material editorial update.  Adapters may
+        # provide a stable claim-bearing summary while retaining their full
+        # display summary and metrics separately.
+        material_summary = str(self.metadata.get("material_summary", self.summary))
+        return observation_hash(self.title, material_summary)
+
+    @property
+    def observation_hash_version(self) -> int:
+        return OBSERVATION_HASH_VERSION
+
+    @property
+    def atomic_claim_signature(self) -> str:
+        claims = self.metadata.get("atomic_claims")
+        if isinstance(claims, list):
+            values = [str(value) for value in claims]
+        else:
+            values = [self.title]
+        return atomic_claim_signature(values)
+
+    @property
+    def source_reported_at(self) -> str | None:
+        value = self.metadata.get("source_reported_at")
+        return str(value) if value else None
+
+    @property
+    def aggregator_published_at(self) -> str | None:
+        value = self.metadata.get("aggregator_published_at")
+        return str(value) if value else None
+
+    @property
+    def effective_published_at(self) -> str:
+        return self.published_at
+
+    @property
+    def timestamp_status(self) -> str:
+        return str(self.metadata.get("timestamp_status") or "valid")
 
 
 def canonical_url(value: str, base_url: str) -> str:
@@ -77,11 +116,93 @@ def parse_public_time(value: str | None, fallback: str) -> str:
     return moment.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def publication_timestamps(
+    source_value: str | None,
+    observed_at: str,
+    *,
+    aggregator_value: str | None = None,
+) -> tuple[str, dict[str, object]]:
+    """Choose an effective time and retain a safe status for bad/future inputs."""
+    detected = parse_public_time(observed_at, observed_at)
+    detected_moment = datetime.fromisoformat(detected.replace("Z", "+00:00"))
+
+    def parsed(value: str | None) -> tuple[str | None, str]:
+        if value is None or not str(value).strip():
+            return None, "missing"
+        try:
+            return parse_public_time(str(value), detected), "parsed"
+        except AdapterError:
+            return None, "malformed"
+
+    source_reported, source_state = parsed(source_value)
+    aggregator, aggregator_state = parsed(aggregator_value)
+
+    def acceptable(value: str | None) -> bool:
+        if not value:
+            return False
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return (moment - detected_moment).total_seconds() <= 15 * 60
+
+    source_valid = acceptable(source_reported)
+    aggregator_valid = acceptable(aggregator)
+    source_future = source_state == "parsed" and not source_valid
+    aggregator_future = aggregator_state == "parsed" and not aggregator_valid
+
+    if source_valid:
+        effective = str(source_reported)
+        if aggregator_future:
+            status = "future_aggregator_ignored"
+        elif aggregator_state == "malformed":
+            status = "malformed_aggregator_ignored"
+        else:
+            status = "valid"
+    elif aggregator_valid:
+        effective = str(aggregator)
+        status = (
+            "future_source_fallback_aggregator"
+            if source_future
+            else "malformed_source_fallback_aggregator"
+            if source_state == "malformed"
+            else "missing_source_fallback_aggregator"
+        )
+    else:
+        effective = detected
+        if source_future and aggregator_future:
+            status = "future_both_fallback_detection"
+        elif source_future:
+            status = "future_source_fallback_detection"
+        elif source_state == "malformed" and aggregator_state == "malformed":
+            status = "malformed_both_fallback_detection"
+        elif source_state == "malformed":
+            status = "malformed_source_fallback_detection"
+        elif aggregator_future:
+            status = "future_aggregator_fallback_detection"
+        elif aggregator_state == "malformed":
+            status = "malformed_aggregator_fallback_detection"
+        else:
+            status = "missing_source_fallback_detection"
+    metadata: dict[str, object] = {
+        "timestamp_status": status,
+    }
+    if source_reported:
+        metadata["source_reported_at"] = source_reported
+    elif source_state == "malformed":
+        metadata["source_timestamp_raw"] = str(source_value)[:500]
+    if aggregator:
+        metadata["aggregator_published_at"] = aggregator
+    elif aggregator_state == "malformed":
+        metadata["aggregator_timestamp_raw"] = str(aggregator_value)[:500]
+    return effective, metadata
+
+
 def _text(element: ET.Element, names: tuple[str, ...]) -> str:
-    for child in element.iter():
-        local = child.tag.rsplit("}", 1)[-1].lower()
-        if local in names and child.text:
-            return " ".join(child.text.split())
+    # Field-name preference is significant.  A feed may place <updated>
+    # before <published>; callers still get the first preferred field name.
+    for name in names:
+        for child in element.iter():
+            local = child.tag.rsplit("}", 1)[-1].lower()
+            if local == name and child.text:
+                return " ".join(child.text.split())
     return ""
 
 
@@ -98,7 +219,7 @@ def parse_feed(payload: bytes, *, source_url: str, observed_at: str, limit: int 
     observations: list[Observation] = []
     for entry in entries[:limit]:
         title = _text(entry, ("title",))
-        published = _text(entry, ("published", "pubdate", "updated", "date"))
+        published = _text(entry, ("published", "pubdate", "date", "updated"))
         summary = _text(entry, ("summary", "description", "content"))
         external_id = _text(entry, ("id", "guid"))
         link = ""
@@ -115,14 +236,18 @@ def parse_feed(payload: bytes, *, source_url: str, observed_at: str, limit: int 
         if not title or not link:
             continue
         item_url = canonical_url(link, source_url)
+        effective_at, timestamp_metadata = publication_timestamps(
+            published, observed_at
+        )
         observations.append(
             Observation(
                 external_id=external_id or item_url,
                 title=title[:500],
                 url=item_url,
-                published_at=parse_public_time(published, observed_at),
+                published_at=effective_at,
                 summary=re.sub(r"<[^>]+>", " ", summary)[:4000].strip(),
                 language=entry.attrib.get("{http://www.w3.org/XML/1998/namespace}lang", "und"),
+                metadata=timestamp_metadata,
             )
         )
     return observations
@@ -148,23 +273,25 @@ def parse_json(payload: bytes, *, source_url: str, observed_at: str, limit: int 
         if not title or not link:
             continue
         item_url = canonical_url(link, source_url)
+        reported_value = str(
+            row.get("published_at")
+            or row.get("publication_date")
+            or row.get("published")
+            or row.get("date")
+            or ""
+        )
+        effective_at, timestamp_metadata = publication_timestamps(
+            reported_value, observed_at
+        )
         observations.append(
             Observation(
                 external_id=str(row.get("id") or row.get("document_number") or row.get("guid") or item_url),
                 title=title[:500],
                 url=item_url,
-                published_at=parse_public_time(
-                    str(
-                        row.get("published_at")
-                        or row.get("publication_date")
-                        or row.get("published")
-                        or row.get("date")
-                        or ""
-                    ),
-                    observed_at,
-                ),
+                published_at=effective_at,
                 summary=str(row.get("summary") or row.get("abstract") or row.get("description") or "")[:4000],
                 language=str(row.get("language") or "und")[:16],
+                metadata=timestamp_metadata,
             )
         )
     return observations
@@ -185,12 +312,16 @@ def parse_sitemap(payload: bytes, *, source_url: str, observed_at: str, limit: i
         item_url = canonical_url(link, source_url)
         slug = urlsplit(item_url).path.rstrip("/").rsplit("/", 1)[-1]
         title = re.sub(r"[-_]", " ", slug).strip() or item_url
+        effective_at, timestamp_metadata = publication_timestamps(
+            _text(node, ("lastmod",)), observed_at
+        )
         observations.append(
             Observation(
                 external_id=item_url,
                 title=title[:500],
                 url=item_url,
-                published_at=parse_public_time(_text(node, ("lastmod",)), observed_at),
+                published_at=effective_at,
+                metadata=timestamp_metadata,
             )
         )
         if len(observations) >= limit:
@@ -241,8 +372,14 @@ def parse_html_listing(payload: bytes, *, source_url: str, observed_at: str, lim
         if item_url in seen or len(title) < 12:
             continue
         seen.add(item_url)
+        effective_at, timestamp_metadata = publication_timestamps(
+            None, observed_at
+        )
         observations.append(
-            Observation(item_url, title[:500], item_url, observed_at)
+            Observation(
+                item_url, title[:500], item_url, effective_at,
+                metadata=timestamp_metadata,
+            )
         )
         if len(observations) >= limit:
             break
@@ -326,11 +463,16 @@ def _parse_dated_links(
             title = _plain_html(aria.group(1))
         if len(title) < 12 or title.lower() in {"featured", "read more", "learn more"}:
             continue
+        reported_at = _nearest_public_time(text, match.start(), observed_at)
+        effective_at, timestamp_metadata = publication_timestamps(
+            reported_at, observed_at
+        )
         item = Observation(
             external_id=item_url,
             title=title[:500],
             url=item_url,
-            published_at=_nearest_public_time(text, match.start(), observed_at),
+            published_at=effective_at,
+            metadata=timestamp_metadata,
         )
         previous = selected.get(item_url)
         if previous is None or len(item.title) >= len(previous.title):
@@ -406,11 +548,174 @@ def parse_huggingnews(payload: bytes, *, source_url: str, observed_at: str, limi
         if metadata:
             summary += ": " + "; ".join(metadata)
         summary += ". Popularity is not evidence."
-        observations.append(Observation(item_url, title[:500], item_url, current_date, summary))
+        effective_at, timestamp_metadata = publication_timestamps(
+            current_date, observed_at
+        )
+        observations.append(
+            Observation(
+                item_url, title[:500], item_url, effective_at, summary,
+                metadata=timestamp_metadata,
+            )
+        )
         seen.add(item_url)
         if len(observations) >= limit:
             break
     return observations
+
+
+def _huggingnews_millis(value: object, fallback: str) -> str:
+    if value is None:
+        return fallback
+    try:
+        moment = datetime.fromtimestamp(float(value) / 1000, tz=UTC)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise AdapterError("Invalid HuggingNews timestamp") from error
+    return moment.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_huggingnews_json(
+    payload: bytes,
+    *,
+    source_url: str,
+    observed_at: str,
+    limit: int = 200,
+) -> list[Observation]:
+    """Parse the documented anonymous latest-feed contract."""
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AdapterError("Malformed HuggingNews JSON") from error
+    if not isinstance(value, dict):
+        raise AdapterError("HuggingNews JSON is not an object")
+    if isinstance(value.get("dayGroups"), list):
+        groups = value["dayGroups"]
+    elif isinstance(value.get("stories"), list):
+        # The documented anonymous search contract uses a top-level list.
+        groups = [{"stories": value["stories"]}]
+    else:
+        raise AdapterError("HuggingNews JSON does not contain dayGroups or stories")
+    observations: list[Observation] = []
+    for group in groups:
+        if not isinstance(group, dict) or not isinstance(group.get("stories"), list):
+            continue
+        for row in group["stories"]:
+            if not isinstance(row, dict):
+                continue
+            slug = str(row.get("slug") or "").strip()
+            title = str(row.get("title") or "").strip()
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]{2,199}", slug) or len(title) < 12:
+                continue
+            aggregator_value: str | None
+            try:
+                aggregator_value = _huggingnews_millis(row.get("publishedAt"), observed_at)
+            except AdapterError:
+                aggregator_value = str(row.get("publishedAt") or "") or None
+            event_value = str(row.get("eventTimeApprox") or "").strip()
+            effective_at, timestamp_metadata = publication_timestamps(
+                event_value or None,
+                observed_at,
+                aggregator_value=aggregator_value,
+            )
+            topic_tags = [
+                {"slug": str(tag.get("slug") or "")[:100], "name": str(tag.get("name") or "")[:100]}
+                for tag in row.get("topicTags", [])
+                if isinstance(tag, dict) and tag.get("slug")
+            ]
+            topic_names = ", ".join(tag["name"] for tag in topic_tags if tag["name"])
+            observations.append(
+                Observation(
+                    external_id=slug,
+                    title=title[:500],
+                    url=f"https://huggingnews.com/ai/{slug}",
+                    published_at=effective_at,
+                    summary=f"HuggingNews discovery topics: {topic_names}."[:4000],
+                    metadata={
+                        "slug": slug,
+                        **timestamp_metadata,
+                        "event_time_approx": timestamp_metadata.get("source_reported_at"),
+                        "topic_tags": topic_tags,
+                    },
+                )
+            )
+            if len(observations) >= limit:
+                return observations
+    return observations
+
+
+def enrich_huggingnews_detail(observation: Observation, payload: bytes) -> Observation:
+    """Attach bounded reference metadata and public Discovery leads."""
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AdapterError("Malformed HuggingNews detail JSON") from error
+    if not isinstance(value, dict) or str(value.get("slug") or "") != observation.external_id:
+        raise AdapterError("HuggingNews detail does not match the requested story")
+    selected: list[dict[str, object]] = []
+    short_links: set[str] = set()
+    for item in value.get("selectedTweets", []):
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        try:
+            normalized = canonical_url(url, "https://x.com/")
+        except AdapterError:
+            continue
+        if urlsplit(normalized).hostname not in {"x.com", "www.x.com", "twitter.com", "www.twitter.com"}:
+            continue
+        text = str(item.get("text") or "")[:4000]
+        quoted_text = str(item.get("quotedTweetText") or "")[:4000]
+        for candidate in re.findall(r"https://t\.co/[A-Za-z0-9]+", f"{text} {quoted_text}"):
+            short_links.add(candidate)
+        selected.append(
+            {
+                "external_id": normalized,
+                "author_handle": str(item.get("authorHandle") or "").lstrip("@").lower()[:100],
+                "url": normalized,
+                "published_at": _huggingnews_millis(item.get("tweetedAt"), observation.published_at),
+                "text": text,
+                "quoted_text": quoted_text,
+            }
+        )
+    metadata = dict(observation.metadata)
+    metadata.update(
+        {
+            "reference_summary": str(value.get("summary") or "")[:8000],
+            "selected_tweets": selected[:50],
+            "short_links": sorted(short_links)[:50],
+            "distinct_identity_count": len({item["author_handle"] for item in selected if item["author_handle"]}),
+            "detail_fetched": True,
+        }
+    )
+    return Observation(
+        observation.external_id,
+        observation.title,
+        observation.url,
+        observation.published_at,
+        observation.summary,
+        observation.language,
+        metadata,
+    )
+
+
+def parse_huggingnews_momentum(payload: bytes) -> dict[str, dict[str, int]]:
+    """Parse only the public, visible rank and post/account counters."""
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise AdapterError("HuggingNews listing is not UTF-8") from error
+    result: dict[str, dict[str, int]] = {}
+    pattern = re.compile(
+        r"story-row-link[^>]*href=[\"']/(?:ai|cybersecurity|tech|startups|earnings)/(?P<slug>[a-z0-9-]+)[\"'].*?"
+        r"story-rank[^>]*>(?P<rank>\d+)</div>.*?meta-signal[^>]*>(?P<posts>\d+)\s*/\s*(?P<accounts>\d+)</span>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    for match in pattern.finditer(text):
+        result[match.group("slug")] = {
+            "daily_rank": int(match.group("rank")),
+            "post_count": int(match.group("posts")),
+            "account_count": int(match.group("accounts")),
+        }
+    return result
 
 
 def parse_mastodon_signal(payload: bytes, *, source_url: str, observed_at: str, limit: int = 200) -> list[Observation]:
@@ -447,13 +752,17 @@ def parse_mastodon_signal(payload: bytes, *, source_url: str, observed_at: str, 
             continue
         item_url = canonical_url(link, source_url)
         title = re.split(r"(?:\n|(?<=[.!?])\s+)", plain, maxsplit=1)[0].strip()
+        effective_at, timestamp_metadata = publication_timestamps(
+            _text(entry, ("pubdate", "published", "updated")), observed_at
+        )
         observations.append(
             Observation(
                 external_id=_text(entry, ("guid", "id")) or item_url,
                 title=title[:500],
                 url=item_url,
-                published_at=parse_public_time(_text(entry, ("pubdate", "published", "updated")), observed_at),
+                published_at=effective_at,
                 summary=plain[:4000],
+                metadata=timestamp_metadata,
             )
         )
         if len(observations) >= limit:
@@ -484,6 +793,8 @@ def parse_source(
         return parse_cisa_advisories(payload, source_url=source_url, observed_at=observed_at)
     if adapter == "huggingnews":
         return parse_huggingnews(payload, source_url=source_url, observed_at=observed_at)
+    if adapter == "huggingnews_json":
+        return parse_huggingnews_json(payload, source_url=source_url, observed_at=observed_at)
     if adapter == "mastodon_signal":
         return parse_mastodon_signal(payload, source_url=source_url, observed_at=observed_at)
     raise AdapterError(f"Unsupported adapter: {adapter}")

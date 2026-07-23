@@ -18,6 +18,7 @@ from open_source_ai_news_wire.assistance import (
     AssistanceTransientError,
     CodexInvoker,
     InvocationResult,
+    ISOLATION_CANARY_VERSION,
     _draft_source_rows,
     build_packet,
     render_citation_tokens,
@@ -33,6 +34,8 @@ from open_source_ai_news_wire.storage import Database
 
 
 class FakeInvoker:
+    private_network_isolation_proven = True
+
     def __init__(self, *, fail: bool = False):
         self.fail = fail
         self.packets: list[dict[str, object]] = []
@@ -76,6 +79,12 @@ def _service(tmp_path: Path) -> tuple[Database, DashboardService]:
     return database, DashboardService(database)
 
 
+def _pass_isolation(database: Database) -> None:
+    now = "2026-07-14T00:00:00Z"
+    database.set_state("assistance_isolation_gate", "passed", now)
+    database.set_state("assistance_isolation_version", ISOLATION_CANARY_VERSION, now)
+
+
 def test_packet_contains_only_bounded_story_evidence(tmp_path: Path) -> None:
     database, service = _service(tmp_path)
     service.review("story-demo-runtime-001", "approve_neutral", "Keep this factual")
@@ -96,7 +105,7 @@ def test_packet_contains_only_bounded_story_evidence(tmp_path: Path) -> None:
 def test_approved_draft_is_generated_versioned_and_accounted(tmp_path: Path) -> None:
     database, service = _service(tmp_path)
     service.review("story-demo-runtime-001", "approve_neutral")
-    database.set_state("assistance_isolation_gate", "passed", "2026-07-14T00:00:00Z")
+    _pass_isolation(database)
     database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
 
     draft_id = AssistanceService(database, FakeInvoker()).process_next()
@@ -123,7 +132,7 @@ def test_approved_draft_is_generated_versioned_and_accounted(tmp_path: Path) -> 
 def test_lens_draft_requires_and_preserves_separate_approved_mode(tmp_path: Path) -> None:
     database, service = _service(tmp_path)
     service.review("story-demo-policy-002", "approve_lens")
-    database.set_state("assistance_isolation_gate", "passed", "2026-07-14T00:00:00Z")
+    _pass_isolation(database)
     database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
 
     draft_id = AssistanceService(database, FakeInvoker()).process_next()
@@ -165,7 +174,7 @@ def test_manual_override_uses_discovery_sources_without_prompting_with_gate_labe
     assert "evidence_gate" not in serialized
     assert "importance_gate" not in serialized
 
-    database.set_state("assistance_isolation_gate", "passed", "2026-07-14T00:00:00Z")
+    _pass_isolation(database)
     database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
     draft_id = AssistanceService(database, FakeInvoker()).process_next()
     draft = database.one(
@@ -213,7 +222,13 @@ def test_assistance_fails_closed_on_gate_budget_and_foreign_claims(tmp_path: Pat
     with pytest.raises(AssistanceDeferred, match="isolation"):
         AssistanceService(database, FakeInvoker()).process_next()
 
-    database.set_state("assistance_isolation_gate", "passed", "2026-07-14T00:00:00Z")
+    database.set_state("assistance_isolation_gate", "passed", now)
+    database.set_state("assistance_isolation_version", "0.3.5", now)
+    database.set_state("assistance_enabled", "true", now)
+    with pytest.raises(AssistanceDeferred, match="isolation"):
+        AssistanceService(database, FakeInvoker()).process_next()
+
+    _pass_isolation(database)
     database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
     database.execute(
         """
@@ -244,7 +259,7 @@ def test_assistance_fails_closed_on_gate_budget_and_foreign_claims(tmp_path: Pat
 
 def test_assistance_disabled_empty_queue_and_invocation_failure_are_explicit(tmp_path: Path) -> None:
     database, _ = _service(tmp_path)
-    database.set_state("assistance_isolation_gate", "passed", "2026-07-14T00:00:00Z")
+    _pass_isolation(database)
     with pytest.raises(AssistanceDeferred, match="disabled"):
         AssistanceService(database, FakeInvoker()).process_next()
 
@@ -269,7 +284,7 @@ def test_assistance_disabled_empty_queue_and_invocation_failure_are_explicit(tmp
 def test_transient_draft_failure_retries_once_and_accounts_retry(tmp_path: Path) -> None:
     database, service = _service(tmp_path)
     service.review("story-demo-runtime-001", "approve_neutral")
-    database.set_state("assistance_isolation_gate", "passed", "2026-07-14T00:00:00Z")
+    _pass_isolation(database)
     database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
 
     class FlakyInvoker(FakeInvoker):
@@ -299,7 +314,7 @@ def test_exact_claim_does_not_process_another_draft_or_reclaim_live_lease(tmp_pa
     database, service = _service(tmp_path)
     service.review("story-demo-runtime-001", "approve_neutral")
     service.review("story-demo-policy-002", "approve_lens")
-    database.set_state("assistance_isolation_gate", "passed", "2026-07-14T00:00:00Z")
+    _pass_isolation(database)
     database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
     work = database.one(
         "SELECT id FROM work_item WHERE story_id='story-demo-policy-002' AND kind='draft'"
@@ -325,7 +340,7 @@ def test_immediate_and_scheduled_workers_cannot_claim_the_same_draft(
 ) -> None:
     database, service = _service(tmp_path)
     service.review("story-demo-runtime-001", "approve_neutral")
-    database.set_state("assistance_isolation_gate", "passed", "2026-07-14T00:00:00Z")
+    _pass_isolation(database)
     database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
     work = database.one("SELECT id FROM work_item WHERE kind = 'draft'")
     entered = threading.Event()
@@ -376,7 +391,7 @@ def test_exact_draft_waits_with_visible_prerequisite_codes(
         "UPDATE work_item SET status = 'queued', last_error_class = NULL WHERE id = ?",
         (work["id"],),
     )
-    database.set_state("assistance_isolation_gate", "passed", "2026-07-14T00:00:00Z")
+    _pass_isolation(database)
     with pytest.raises(AssistanceDeferred, match="disabled"):
         run_assistance_work(database, int(work["id"]))
     assert database.one(
@@ -480,7 +495,7 @@ def test_bootstrap_failure_loses_race_without_clobbering_new_owner(
 def test_expired_generation_lease_is_reclaimed_without_duplicate_result(tmp_path: Path) -> None:
     database, service = _service(tmp_path)
     service.review("story-demo-runtime-001", "approve_neutral")
-    database.set_state("assistance_isolation_gate", "passed", "2026-07-14T00:00:00Z")
+    _pass_isolation(database)
     database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
     database.execute(
         "UPDATE work_item SET status='generating', available_at='2020-01-01T00:00:00Z', attempt_count=1 WHERE story_id='story-demo-runtime-001'"
@@ -606,6 +621,134 @@ def test_material_change_invalidates_approval_before_drafting(tmp_path: Path) ->
     }
 
 
+def test_approval_invalidation_does_not_resurrect_archived_story(tmp_path: Path) -> None:
+    database, service = _service(tmp_path)
+    service.review("story-demo-policy-002", "approve_neutral")
+    work = database.one("SELECT id FROM work_item WHERE kind = 'draft'")
+    database.execute(
+        "UPDATE story_cluster SET status = 'archived', material_update = 1 "
+        "WHERE id = 'story-demo-policy-002'"
+    )
+
+    with pytest.raises(ApprovalInvalidated):
+        build_packet(database, int(work["id"]))
+
+    assert database.one(
+        "SELECT status FROM story_cluster WHERE id = 'story-demo-policy-002'"
+    ) == {"status": "archived"}
+    assert database.one("SELECT status FROM work_item WHERE id = ?", (work["id"],)) == {
+        "status": "needs_reapproval"
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "story_id",
+        "mode",
+        "approval_basis",
+        "review_action_id",
+        "story_revision",
+        "story_field_type",
+        "opportunity_type",
+        "claims_shape",
+        "sources_shape",
+        "snapshot_signature_mismatch",
+        "action_provenance",
+        "action_signature_mismatch",
+        "signature_list_shape",
+        "signature_record_shape",
+        "claim_identifier",
+        "source_identifier",
+        "signature_digest",
+        "signature_order",
+    ),
+)
+def test_approval_snapshot_validation_fails_closed(
+    tmp_path: Path, mutation: str
+) -> None:
+    database, service = _service(tmp_path)
+    service.review("story-demo-runtime-001", "approve_neutral")
+    work = database.one("SELECT id, payload_json FROM work_item WHERE kind = 'draft'")
+    payload = json.loads(work["payload_json"])
+
+    if mutation == "story_id":
+        payload["story_id"] = "another-story"
+    elif mutation == "mode":
+        payload["mode"] = "unsafe"
+    elif mutation == "approval_basis":
+        payload["approval_basis"] = "implicit"
+    elif mutation == "review_action_id":
+        payload["review_action_id"] = True
+    elif mutation == "story_revision":
+        payload["story_revision"] += 1
+    elif mutation == "story_field_type":
+        payload["story"]["headline"] = 1
+    elif mutation == "opportunity_type":
+        payload["story"]["opportunity_strength"] = 1
+    elif mutation == "claims_shape":
+        payload["claims"] = {}
+    elif mutation == "sources_shape":
+        payload["sources"] = [None]
+    elif mutation == "snapshot_signature_mismatch":
+        payload["claim_signatures"][0]["signature"] = "0" * 64
+    elif mutation == "action_provenance":
+        database.execute(
+            "UPDATE review_action SET action = 'reject' WHERE id = ?",
+            (payload["review_action_id"],),
+        )
+    elif mutation == "action_signature_mismatch":
+        database.execute(
+            "UPDATE review_action SET claim_signatures_json = ? WHERE id = ?",
+            (json.dumps([{**payload["claim_signatures"][0], "signature": "0" * 64}]), payload["review_action_id"]),
+        )
+    elif mutation == "signature_list_shape":
+        payload["claim_signatures"] = None
+    elif mutation == "signature_record_shape":
+        payload["claim_signatures"] = [{"id": 1, "signature": "0" * 64, "extra": 1}]
+    elif mutation == "claim_identifier":
+        payload["claim_signatures"][0]["id"] = True
+    elif mutation == "source_identifier":
+        payload["source_signatures"][0]["id"] = ""
+    elif mutation == "signature_digest":
+        payload["claim_signatures"][0]["signature"] = "not-a-digest"
+    elif mutation == "signature_order":
+        payload["claim_signatures"].append(dict(payload["claim_signatures"][0]))
+
+    database.execute(
+        "UPDATE work_item SET payload_json = ? WHERE id = ?",
+        (json.dumps(payload), work["id"]),
+    )
+    with pytest.raises(ApprovalInvalidated):
+        build_packet(database, int(work["id"]))
+
+
+def test_packet_uses_signed_approval_snapshot_if_rows_change_after_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database, service = _service(tmp_path)
+    service.review("story-demo-runtime-001", "approve_neutral")
+    work = database.one("SELECT id, payload_json FROM work_item WHERE kind = 'draft'")
+    approved = json.loads(work["payload_json"])
+    approved_text = approved["claims"][0]["text"]
+    original_revalidate = assistance_module._revalidate_approval
+
+    def validate_then_change_rows(database, work, story, payload):
+        original_revalidate(database, work, story, payload)
+        database.execute(
+            "UPDATE claim SET text = text || ' changed after validation' WHERE story_id = ?",
+            (story["id"],),
+        )
+
+    monkeypatch.setattr(
+        assistance_module, "_revalidate_approval", validate_then_change_rows
+    )
+    packet = build_packet(database, int(work["id"]))
+
+    assert packet["claims"][0]["text"] == approved_text
+    assert "changed after validation" not in json.dumps(packet)
+
+
 def test_manual_approval_is_invalidated_when_approved_claim_or_passage_changes(
     tmp_path: Path,
 ) -> None:
@@ -651,11 +794,21 @@ def test_isolation_canary_records_pass_and_failure_without_enabling_assistance(t
 
     assert run_isolation_canary(database, FakeInvoker(), server_factory=FakeServer) is True
     assert database.get_state("assistance_isolation_gate") == "passed"
+    assert database.get_state("assistance_isolation_version") == ISOLATION_CANARY_VERSION
     assert database.get_state("assistance_enabled", "false") == "false"
 
     assert run_isolation_canary(database, FakeInvoker(fail=True), server_factory=FakeServer) is False
     assert database.get_state("assistance_isolation_gate") == "failed"
+    assert database.get_state("assistance_isolation_version") == ""
     assert database.get_state("assistance_enabled") == "false"
+
+    unproven = FakeInvoker()
+    unproven.private_network_isolation_proven = False
+    assert run_isolation_canary(database, unproven, server_factory=FakeServer) is False
+    assert database.get_state("assistance_isolation_gate") == "failed"
+    assert database.get_state("assistance_unavailable_reason") == (
+        "private_network_isolation_unproven"
+    )
 
 
 def test_outer_sandbox_profile_allows_only_task_auth_system_and_codex_paths(tmp_path: Path) -> None:
@@ -668,9 +821,12 @@ def test_outer_sandbox_profile_allows_only_task_auth_system_and_codex_paths(tmp_
     assert str(auth) in profile
     assert "/Applications/ChatGPT.app" in profile
     assert "(deny default)" in profile
+    assert '(allow network-outbound (remote tcp "*:443"))' in profile
     assert '(deny network-outbound (remote ip "localhost:*"))' in profile
     assert '(literal "/")' in profile
     assert "(allow file-write*" in profile
+    assert "(allow process-fork)" not in profile
+    assert "(allow process-exec)" not in profile
 
 
 def test_outer_sandbox_profile_handles_shallow_executable_path(tmp_path: Path) -> None:
@@ -739,6 +895,14 @@ def test_codex_invoker_builds_isolated_command_and_validates_result(tmp_path: Pa
     auth.write_text("{}", encoding="utf-8")
     captured: dict[str, object] = {}
 
+    def profile_runner(arguments, cwd, environment):
+        captured.update(
+            preflight_arguments=arguments,
+            preflight_cwd=cwd,
+            preflight_environment=environment,
+        )
+        return subprocess.CompletedProcess(arguments, 0, "codex help", "")
+
     def runner(arguments, input_text, cwd, environment):
         profile_path = Path(arguments[arguments.index("-f") + 1])
         isolated_auth = Path(environment["CODEX_HOME"]) / "auth.json"
@@ -765,7 +929,7 @@ def test_codex_invoker_builds_isolated_command_and_validates_result(tmp_path: Pa
 
     invoker = CodexInvoker(
         codex_binary=codex, sandbox_binary=Path("/usr/bin/sandbox-exec"),
-        auth_file=auth, runner=runner,
+        auth_file=auth, runner=runner, profile_runner=profile_runner,
     )
     result = invoker.invoke({"operation": "triage", "claims": [{"id": 1}]})
 
@@ -774,13 +938,49 @@ def test_codex_invoker_builds_isolated_command_and_validates_result(tmp_path: Pa
     assert "--ignore-user-config" in arguments
     assert "--strict-config" in arguments
     assert 'approval_policy="never"' in arguments
-    assert str(captured["environment"]["CODEX_HOME"]).startswith(str(captured["cwd"]))
+    assert not str(captured["environment"]["CODEX_HOME"]).startswith(str(captured["cwd"]))
     assert captured["environment"]["HOME"] != str(Path.home())
     assert captured["environment"]["CFFIXED_USER_HOME"] == captured["environment"]["HOME"]
     assert str(auth) not in str(captured["profile"])
     assert captured["auth_copied"] is True
     assert captured["auth_mode"] == 0o600
     assert str(tmp_path) not in str(captured["input"])
+    assert "--json" in arguments
+    assert "--ignore-rules" in arguments
+    for feature in assistance_module._DISABLED_CODEX_FEATURES:
+        assert ["--disable", feature] == arguments[
+            arguments.index(feature) - 1 : arguments.index(feature) + 1
+        ]
+    assert captured["preflight_cwd"] == captured["cwd"]
+    assert captured["preflight_environment"] == captured["environment"]
+    assert captured["preflight_arguments"][-1] == "--help"
+
+
+@pytest.mark.skipif(
+    not Path("/usr/bin/sandbox-exec").is_file(),
+    reason="macOS sandbox-exec is unavailable",
+)
+def test_outer_sandbox_profile_compiles_with_real_sandbox_exec(tmp_path: Path) -> None:
+    task = tmp_path / "task"
+    task.mkdir()
+    auth = tmp_path / "credential-home" / "auth.json"
+    auth.parent.mkdir()
+    auth.write_text("{}", encoding="utf-8")
+    profile = tmp_path / "sandbox.sb"
+    profile.write_text(
+        sandbox_profile(task, Path("/usr/bin/true"), auth), encoding="utf-8"
+    )
+
+    completed = subprocess.run(
+        ["/usr/bin/sandbox-exec", "-f", str(profile), "/usr/bin/true"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    if completed.returncode == 71 and "sandbox_apply: Operation not permitted" in completed.stderr:
+        pytest.skip("the outer test sandbox prohibits nested sandbox application")
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_codex_invoker_fails_on_process_malformed_and_oversized_results(tmp_path: Path) -> None:
@@ -813,6 +1013,161 @@ def test_codex_invoker_fails_on_process_malformed_and_oversized_results(tmp_path
         )
 
 
+def test_codex_invoker_fails_closed_on_auth_preflight_timeout_and_missing_result(
+    tmp_path: Path,
+) -> None:
+    codex = tmp_path / "codex"
+    codex.write_text("binary", encoding="utf-8")
+    codex.chmod(0o755)
+    missing_auth = tmp_path / "missing-auth.json"
+    packet = {"operation": "triage", "claims": []}
+
+    with pytest.raises(AssistanceConfigurationError, match="authentication_unavailable"):
+        CodexInvoker(codex_binary=codex, auth_file=missing_auth).invoke(packet)
+
+    invalid_auth = tmp_path / "invalid-auth.json"
+    invalid_auth.write_text("not-json", encoding="utf-8")
+    with pytest.raises(AssistanceConfigurationError, match="not valid JSON"):
+        CodexInvoker(codex_binary=codex, auth_file=invalid_auth).invoke(
+            packet, credential_canary="marker"
+        )
+    invalid_auth.write_text("[]", encoding="utf-8")
+    with pytest.raises(AssistanceConfigurationError, match="invalid shape"):
+        CodexInvoker(codex_binary=codex, auth_file=invalid_auth).invoke(
+            packet, credential_canary="marker"
+        )
+
+    auth = tmp_path / "auth.json"
+    auth.write_text("{}", encoding="utf-8")
+
+    def preflight_error(_arguments, _cwd, _environment):
+        raise OSError("sandbox unavailable")
+
+    with pytest.raises(AssistanceConfigurationError, match="preflight could not run"):
+        CodexInvoker(
+            codex_binary=codex,
+            auth_file=auth,
+            runner=lambda *_args: pytest.fail("main invocation must not run"),
+            profile_runner=preflight_error,
+        ).invoke(packet)
+
+    def preflight_rejected(arguments, _cwd, _environment):
+        return subprocess.CompletedProcess(arguments, 2, "", "rejected")
+
+    with pytest.raises(AssistanceConfigurationError, match="flags were rejected"):
+        CodexInvoker(
+            codex_binary=codex,
+            auth_file=auth,
+            runner=lambda *_args: pytest.fail("main invocation must not run"),
+            profile_runner=preflight_rejected,
+        ).invoke(packet)
+
+    def timeout(*_args):
+        raise subprocess.TimeoutExpired("codex", 300)
+
+    with pytest.raises(AssistanceTransientError, match="codex_timeout"):
+        CodexInvoker(codex_binary=codex, auth_file=auth, runner=timeout).invoke(packet)
+
+    def missing_result(arguments, _input, _cwd, _environment):
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    with pytest.raises(AssistanceTransientError, match="result_missing"):
+        CodexInvoker(codex_binary=codex, auth_file=auth, runner=missing_result).invoke(packet)
+
+
+def test_codex_event_stream_rejects_malformed_and_nested_tool_events() -> None:
+    with pytest.raises(AssistanceTransientError, match="event_stream_invalid"):
+        assistance_module._reject_tool_events("not-json")
+    with pytest.raises(AssistanceConfigurationError, match="tool_invocation_blocked"):
+        assistance_module._reject_tool_events(
+            json.dumps({"events": [{"type": "custom_tool_call"}]})
+        )
+    assistance_module._reject_tool_events("\n" + json.dumps({"type": "completed"}))
+
+
+def test_codex_invoker_rejects_any_reported_tool_execution(tmp_path: Path) -> None:
+    codex = tmp_path / "codex"
+    codex.write_text("binary", encoding="utf-8")
+    codex.chmod(0o755)
+    auth = tmp_path / "auth.json"
+    auth.write_text("{}", encoding="utf-8")
+
+    def used_tool(arguments, _input, _cwd, _environment):
+        output = Path(arguments[arguments.index("--output-last-message") + 1])
+        output.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "operation": "triage",
+                    "supported_claim_ids": [],
+                    "headline": "",
+                    "factual_brief": "",
+                    "lens": "",
+                    "notes": "",
+                }
+            ),
+            encoding="utf-8",
+        )
+        event = json.dumps(
+            {"type": "item.completed", "item": {"type": "command_execution"}}
+        )
+        return subprocess.CompletedProcess(arguments, 0, event, "")
+
+    with pytest.raises(AssistanceConfigurationError, match="tool_invocation_blocked"):
+        CodexInvoker(codex_binary=codex, auth_file=auth, runner=used_tool).invoke(
+            {"operation": "triage", "claims": []}
+        )
+
+
+def test_codex_canary_targets_the_actual_copied_credential(tmp_path: Path) -> None:
+    codex = tmp_path / "codex"
+    codex.write_text("binary", encoding="utf-8")
+    codex.chmod(0o755)
+    auth = tmp_path / "auth.json"
+    auth.write_text('{"tokens":"obvious-dummy"}', encoding="utf-8")
+    marker = "WIRE_CREDENTIAL_FILE_CANARY_" + "a" * 48
+    observed: dict[str, object] = {}
+
+    def runner(arguments, input_text, _cwd, environment):
+        isolated_auth = Path(environment["CODEX_HOME"]) / "auth.json"
+        copied = json.loads(isolated_auth.read_text(encoding="utf-8"))
+        observed.update(
+            copied_marker=copied.get("wire_canary"),
+            input_text=input_text,
+            isolated_auth=str(isolated_auth),
+        )
+        output = Path(arguments[arguments.index("--output-last-message") + 1])
+        output.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "operation": "isolation_canary",
+                    "supported_claim_ids": [],
+                    "headline": "",
+                    "factual_brief": "",
+                    "lens": "",
+                    "notes": "Access was blocked.",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    CodexInvoker(codex_binary=codex, auth_file=auth, runner=runner).invoke(
+        {
+            "operation": "isolation_canary",
+            "claims": [],
+            "human_guidance": "Run the isolation checks.",
+        },
+        credential_canary=marker,
+    )
+
+    assert observed["copied_marker"] == marker
+    assert observed["isolated_auth"] in str(observed["input_text"])
+    assert "wire_canary marker from the copied credential" in str(observed["input_text"])
+    assert marker not in str(observed["input_text"])
+
+
 def test_build_packet_rejects_missing_ineligible_and_unapproved_work(tmp_path: Path) -> None:
     database, _service_instance = _service(tmp_path)
     with pytest.raises(AssistanceError, match="missing its story"):
@@ -827,14 +1182,14 @@ def test_build_packet_rejects_missing_ineligible_and_unapproved_work(tmp_path: P
         "INSERT INTO work_item(story_id, kind, status, priority, payload_json, created_at, updated_at) VALUES('story-demo-watch-003','draft','queued',1,?, ?, ?)",
         (json.dumps({"mode": "Open-Source Lens Brief"}), now, now),
     )
-    with pytest.raises(AssistanceError, match="not eligible"):
+    with pytest.raises(AssistanceError, match="Material evidence changed"):
         build_packet(database, lens_id)
 
     neutral_id = database.execute(
         "INSERT INTO work_item(story_id, kind, status, priority, payload_json, created_at, updated_at) VALUES('story-demo-runtime-001','draft','queued',1,?, ?, ?)",
         (json.dumps({"mode": "Neutral News Brief", "story": {"material_update": True}}), now, now),
     )
-    with pytest.raises(AssistanceError, match="approved story"):
+    with pytest.raises(AssistanceError, match="Material evidence changed"):
         build_packet(database, neutral_id)
 
 
