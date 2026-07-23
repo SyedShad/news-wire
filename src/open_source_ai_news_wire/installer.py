@@ -343,6 +343,7 @@ class LocalInstaller:
         )
         if destination.exists() and not all(path.exists() for path in required):
             shutil.rmtree(destination)
+        created_destination = False
         if not destination.exists():
             staging = Path(tempfile.mkdtemp(prefix=f".{release_id}-", dir=self.releases))
             try:
@@ -389,20 +390,26 @@ class LocalInstaller:
                 )
                 os.chmod(staging / "launcher", 0o700)
                 os.replace(staging, destination)
+                created_destination = True
             except Exception:
                 shutil.rmtree(staging, ignore_errors=True)
                 raise
-        self._verified_manifest(
-            destination,
-            expected_release_id=release_id,
-            expected_source_sha256=source_sha256,
-            expected_commit_sha=str(provenance["commit_sha"]),
-        )
         installed_cli = destination / "launcher"
-        self._checked(
-            [str(installed_cli), "--data-root", str(self.runtime_paths.root), "migrate"],
-            self.source_root,
-        )
+        try:
+            self._verified_manifest(
+                destination,
+                expected_release_id=release_id,
+                expected_source_sha256=source_sha256,
+                expected_commit_sha=str(provenance["commit_sha"]),
+            )
+            self._checked(
+                [str(installed_cli), "--data-root", str(self.runtime_paths.root), "migrate"],
+                self.source_root,
+            )
+        except Exception:
+            if created_destination:
+                shutil.rmtree(destination, ignore_errors=True)
+            raise
         self._switch(destination)
         trusted = bool(
             provenance["git_validation"]["clean_worktree"]

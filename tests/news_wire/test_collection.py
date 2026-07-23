@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+import open_source_ai_news_wire.network as network_module
 
 from open_source_ai_news_wire.adapters import (
     AdapterError,
@@ -38,6 +39,7 @@ from open_source_ai_news_wire.network import (
     SafeHttpClient,
     UnsafeRequest,
     _PinnedTransport,
+    _preferred_addresses,
     _public_address,
     _remaining_seconds,
     resolve_known_short_url,
@@ -173,6 +175,285 @@ def test_system_resolver_and_deadline_helpers_fail_closed(
     with pytest.raises(ConnectionError, match="could not be resolved"):
         system_resolver("example.com")
     assert 0 < _remaining_seconds(datetime.now() + timedelta(seconds=1), 5) <= 5
+
+
+def test_public_address_order_prefers_ipv4_without_dropping_ipv6() -> None:
+    assert _preferred_addresses(
+        ["2606:2800:220:1:248:1893:25c8:1946", "93.184.216.35", "93.184.216.34"]
+    ) == (
+        "93.184.216.34",
+        "93.184.216.35",
+        "2606:2800:220:1:248:1893:25c8:1946",
+    )
+
+
+def test_safe_client_retries_each_validated_pinned_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[str] = []
+
+    class AddressTransport(httpx.BaseTransport):
+        def __init__(self, _host: str, address: str):
+            self.address = address
+
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            attempts.append(self.address)
+            if self.address == "93.184.216.34":
+                raise httpx.ConnectError("no route", request=request)
+            return httpx.Response(
+                200,
+                content=b"ok",
+                headers={"content-type": "text/plain"},
+                request=request,
+            )
+
+    monkeypatch.setattr(network_module, "_PinnedTransport", AddressTransport)
+    with SafeHttpClient(
+        allowed_hosts={"example.com"},
+        resolver=lambda _host: [
+            "2606:2800:220:1:248:1893:25c8:1946",
+            "93.184.216.35",
+            "93.184.216.34",
+        ],
+    ) as client:
+        assert client.fetch("https://example.com/feed").body == b"ok"
+    assert attempts == ["93.184.216.34", "93.184.216.35"]
+
+
+def test_safe_client_uses_validated_ipv6_after_ipv4_routes_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[str] = []
+    ipv6 = "2606:2800:220:1:248:1893:25c8:1946"
+
+    class AddressTransport(httpx.BaseTransport):
+        def __init__(self, _host: str, address: str):
+            self.address = address
+
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            attempts.append(self.address)
+            if self.address == "93.184.216.34":
+                raise httpx.ConnectError("no IPv4 route", request=request)
+            return httpx.Response(
+                200,
+                content=b"ok",
+                headers={"content-type": "text/plain"},
+                request=request,
+            )
+
+    monkeypatch.setattr(network_module, "_PinnedTransport", AddressTransport)
+    with SafeHttpClient(
+        allowed_hosts={"example.com"},
+        resolver=lambda _host: [ipv6, "93.184.216.34"],
+    ) as client:
+        assert client.fetch("https://example.com/feed").status_code == 200
+    assert attempts == ["93.184.216.34", ipv6]
+
+
+def test_safe_client_raises_after_every_validated_address_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[str] = []
+
+    class FailingTransport(httpx.BaseTransport):
+        def __init__(self, _host: str, address: str):
+            self.address = address
+
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            attempts.append(self.address)
+            raise httpx.ConnectError("unreachable", request=request)
+
+    monkeypatch.setattr(network_module, "_PinnedTransport", FailingTransport)
+    with SafeHttpClient(
+        allowed_hosts={"example.com"},
+        resolver=lambda _host: ["93.184.216.35", "93.184.216.34"],
+    ) as client:
+        with pytest.raises(httpx.ConnectError, match="unreachable"):
+            client.fetch("https://example.com/feed")
+    assert attempts == ["93.184.216.34", "93.184.216.35"]
+
+
+def test_source_connection_attempts_are_bounded_after_full_dns_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[str] = []
+    public_addresses = [f"93.184.216.{number}" for number in range(1, 14)]
+
+    class FailingTransport(httpx.BaseTransport):
+        def __init__(self, _host: str, address: str):
+            self.address = address
+
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            attempts.append(self.address)
+            raise httpx.ConnectError("unreachable", request=request)
+
+    monkeypatch.setattr(network_module, "_PinnedTransport", FailingTransport)
+    with SafeHttpClient(
+        allowed_hosts={"example.com"}, resolver=lambda _host: public_addresses
+    ) as client:
+        with pytest.raises(UnsafeRequest, match="connection-attempt limit"):
+            client.fetch("https://example.com/feed")
+    assert attempts == public_addresses[:12]
+
+    attempts.clear()
+    with SafeHttpClient(
+        allowed_hosts={"example.com"},
+        resolver=lambda _host: [*public_addresses, "127.0.0.1"],
+    ) as client:
+        with pytest.raises(UnsafeRequest, match="exclusively to public"):
+            client.fetch("https://example.com/feed")
+    assert attempts == []
+
+
+def test_safe_client_deadline_stops_address_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[str] = []
+    remaining_checks = 0
+
+    class FailingTransport(httpx.BaseTransport):
+        def __init__(self, _host: str, address: str):
+            self.address = address
+
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            attempts.append(self.address)
+            raise httpx.ConnectTimeout("unreachable", request=request)
+
+    def bounded_remaining(_deadline: datetime | None, maximum: float) -> float:
+        nonlocal remaining_checks
+        remaining_checks += 1
+        if remaining_checks >= 10:
+            raise NetworkDeadlineExceeded("Worker network deadline expired")
+        return maximum
+
+    monkeypatch.setattr(network_module, "_PinnedTransport", FailingTransport)
+    monkeypatch.setattr(network_module, "_remaining_seconds", bounded_remaining)
+    with SafeHttpClient(
+        allowed_hosts={"example.com"},
+        resolver=lambda _host: ["93.184.216.35", "93.184.216.34"],
+    ) as client:
+        with pytest.raises(NetworkDeadlineExceeded):
+            client.fetch(
+                "https://example.com/feed",
+                deadline=datetime(2099, 1, 1, tzinfo=UTC),
+            )
+    assert attempts == ["93.184.216.34"]
+
+
+def test_safe_client_does_not_retry_after_read_or_policy_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[str] = []
+
+    class ReadFailureTransport(httpx.BaseTransport):
+        def __init__(self, _host: str, address: str):
+            self.address = address
+
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            attempts.append(self.address)
+            raise httpx.ReadTimeout("slow response", request=request)
+
+    monkeypatch.setattr(network_module, "_PinnedTransport", ReadFailureTransport)
+    with SafeHttpClient(
+        allowed_hosts={"example.com"},
+        resolver=lambda _host: ["93.184.216.35", "93.184.216.34"],
+    ) as client:
+        with pytest.raises(httpx.ReadTimeout):
+            client.fetch("https://example.com/feed")
+    assert attempts == ["93.184.216.34"]
+
+    attempts.clear()
+
+    class PolicyFailureTransport(httpx.BaseTransport):
+        def __init__(self, _host: str, address: str):
+            self.address = address
+
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            attempts.append(self.address)
+            return httpx.Response(
+                200,
+                content=b"not a feed",
+                headers={"content-type": "image/png"},
+                request=request,
+            )
+
+    monkeypatch.setattr(network_module, "_PinnedTransport", PolicyFailureTransport)
+    with SafeHttpClient(
+        allowed_hosts={"example.com"},
+        resolver=lambda _host: ["93.184.216.35", "93.184.216.34"],
+    ) as client:
+        with pytest.raises(UnsafeRequest, match="content type"):
+            client.fetch("https://example.com/feed")
+    assert attempts == ["93.184.216.34"]
+
+
+def test_short_link_retries_each_validated_pinned_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[tuple[str, str]] = []
+
+    class AddressTransport(httpx.BaseTransport):
+        def __init__(self, host: str, address: str):
+            self.host = host
+            self.address = address
+
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            attempts.append((self.host, self.address))
+            if self.address == "93.184.216.34":
+                raise httpx.ConnectTimeout("unreachable", request=request)
+            if self.host == "t.co":
+                return httpx.Response(
+                    302,
+                    headers={"location": "https://publisher.example/article"},
+                    request=request,
+                )
+            return httpx.Response(200, content=b"ok", request=request)
+
+    monkeypatch.setattr(network_module, "_PinnedTransport", AddressTransport)
+    resolved = resolve_known_short_url(
+        "https://t.co/abc123",
+        resolver=lambda _host: ["93.184.216.35", "93.184.216.34"],
+    )
+    assert resolved == "https://publisher.example/article"
+    assert attempts == [
+        ("t.co", "93.184.216.34"),
+        ("t.co", "93.184.216.35"),
+        ("publisher.example", "93.184.216.34"),
+        ("publisher.example", "93.184.216.35"),
+    ]
+
+
+def test_short_link_attempt_cap_spans_redirect_hops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[tuple[str, str]] = []
+    public_addresses = [f"93.184.216.{number}" for number in range(1, 8)]
+
+    class AddressTransport(httpx.BaseTransport):
+        def __init__(self, host: str, address: str):
+            self.host = host
+            self.address = address
+
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            attempts.append((self.host, self.address))
+            if self.host == "t.co" and self.address == public_addresses[5]:
+                return httpx.Response(
+                    302,
+                    headers={"location": "https://publisher.example/article"},
+                    request=request,
+                )
+            raise httpx.ConnectError("unreachable", request=request)
+
+    monkeypatch.setattr(network_module, "_PinnedTransport", AddressTransport)
+    with pytest.raises(UnsafeRequest, match="connection-attempt limit"):
+        resolve_known_short_url(
+            "https://t.co/abc123", resolver=lambda _host: public_addresses
+        )
+    assert len(attempts) == 12
+    assert attempts[:6] == [("t.co", address) for address in public_addresses[:6]]
+    assert attempts[6:] == [
+        ("publisher.example", address) for address in public_addresses[:6]
+    ]
 
 
 def test_safe_client_rejects_unregistered_private_and_credentialed_urls() -> None:
@@ -818,6 +1099,8 @@ def test_completion_registry_enables_validated_non_sec_sources_and_excludes_sec(
             assert definitions[source_id]["validation_status"] == "live-validated"
     assert definitions["sec-ai-company-filings"]["enabled_by_default"] is False
     assert definitions["sec-ai-company-filings"]["validation_status"] == "excluded-by-operator"
+    assert definitions["arxiv-ai"]["url"].endswith("max_results=50")
+    assert definitions["arxiv-ai"]["minimum_interval_minutes"] == 60
 
 
 def test_qualification_has_neutral_broader_lane_and_bounded_open_source_lens() -> None:
@@ -1110,6 +1393,87 @@ def test_deadline_backlog_and_recovered_source_notice(tmp_path: Path) -> None:
     ).scan(trigger="scheduled")
     assert recovered.result == "success"
     assert database.one("SELECT kind FROM alert WHERE kind='recovery'") == {"kind": "recovery"}
+
+
+def test_deadline_during_fetch_becomes_backlog_without_source_failure(
+    tmp_path: Path,
+) -> None:
+    database = _database_with_one_source(tmp_path)
+    database.execute(
+        "UPDATE source_state SET health='healthy', failure_streak=2 WHERE source_id='openai-news'"
+    )
+
+    class DeadlineClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def fetch(self, *_args: object, **_kwargs: object) -> FetchResult:
+            raise NetworkDeadlineExceeded("Worker network deadline expired")
+
+    result = Collector(
+        database,
+        client_factory=lambda _source: DeadlineClient(),  # type: ignore[arg-type]
+        now=lambda: "2026-07-14T10:00:00Z",
+    ).scan(deadline=datetime(2099, 7, 14, 10, 1, tzinfo=UTC))
+
+    assert result.result == "degraded"
+    assert database.one("SELECT queue_remaining FROM scan_run") == {"queue_remaining": 1}
+    assert database.one(
+        "SELECT status, error_class FROM source_transaction"
+    ) == {"status": "deadline", "error_class": "NetworkDeadlineExceeded"}
+    assert database.one(
+        "SELECT health, failure_streak FROM source_state WHERE source_id='openai-news'"
+    ) == {"health": "healthy", "failure_streak": 2}
+
+
+def test_connection_failure_before_deadline_backlog_is_not_whole_mac_offline(
+    tmp_path: Path,
+) -> None:
+    database = _database_with_one_source(tmp_path)
+    set_source_enabled(database, "anthropic-newsroom", True)
+
+    class ErrorClient:
+        def __init__(self, source_id: str):
+            self.source_id = source_id
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def fetch(self, url: str, **_kwargs: object) -> FetchResult:
+            if self.source_id == "anthropic-newsroom":
+                raise httpx.ConnectError(
+                    "unreachable", request=httpx.Request("GET", url)
+                )
+            raise NetworkDeadlineExceeded("Worker network deadline expired")
+
+    result = Collector(
+        database,
+        client_factory=lambda source: ErrorClient(str(source["id"])),  # type: ignore[arg-type]
+        now=lambda: "2026-07-14T10:00:00Z",
+    ).scan(deadline=datetime(2099, 7, 14, 10, 1, tzinfo=UTC))
+
+    assert result.result == "degraded"
+    assert result.offline is False
+    assert database.one("SELECT queue_remaining FROM scan_run") == {"queue_remaining": 1}
+    assert database.query(
+        "SELECT source_id, status FROM source_transaction ORDER BY id"
+    ) == [
+        {"source_id": "anthropic-newsroom", "status": "failed"},
+        {"source_id": "openai-news", "status": "deadline"},
+    ]
+    assert database.one(
+        "SELECT failure_streak FROM source_state WHERE source_id='anthropic-newsroom'"
+    ) == {"failure_streak": 1}
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM diagnostic_event WHERE event_type='offline'"
+    ) == {"count": 0}
+    assert database.get_state("network_offline_active") == ""
 
 
 def test_whole_mac_offline_does_not_advance_source_failure_streak(tmp_path: Path) -> None:

@@ -28,6 +28,9 @@ class NetworkDeadlineExceeded(TimeoutError):
     """Raised before network work that would start after the worker deadline."""
 
 
+_MAX_PINNED_CONNECTION_ATTEMPTS = 12
+
+
 def _validated_public_https_url(value: str) -> tuple[str, str]:
     if not value or len(value) > 2048:
         raise UnsafeRequest("Public link is missing or too long")
@@ -63,6 +66,17 @@ def system_resolver(host: str) -> list[str]:
     except OSError as error:
         raise NetworkUnavailable("The source host could not be resolved") from error
     return sorted(addresses)
+
+
+def _preferred_addresses(addresses: Iterable[str]) -> tuple[str, ...]:
+    """Prefer IPv4 on hosts where this Mac has no working IPv6 route.
+
+    Every returned address has already passed the public-address gate.  The
+    ordering only controls which independently pinned connection is attempted
+    first; it does not relax DNS or peer verification.
+    """
+    parsed = {ipaddress.ip_address(value) for value in addresses}
+    return tuple(str(address) for address in sorted(parsed, key=lambda item: (item.version, item.packed)))
 
 
 def _public_address(value: str) -> bool:
@@ -196,9 +210,7 @@ class SafeHttpClient:
         if not host or host not in self.allowed_hosts:
             raise UnsafeRequest("Host is not registered for this source")
         try:
-            addresses = tuple(
-                sorted({str(ipaddress.ip_address(value)) for value in self.resolver(host)})
-            )
+            addresses = _preferred_addresses(self.resolver(host))
         except ValueError as error:
             raise UnsafeRequest("Source DNS returned an invalid address") from error
         _remaining_seconds(deadline, self.connect_timeout)
@@ -220,6 +232,7 @@ class SafeHttpClient:
     ) -> FetchResult:
         current, _, _ = self._validated(url, deadline=deadline)
         headers: dict[str, str] = {}
+        connection_attempts = 0
         if etag:
             headers["If-None-Match"] = etag
         if last_modified:
@@ -228,59 +241,73 @@ class SafeHttpClient:
             # Revalidate immediately before every connection and redirect hop.
             current, host, addresses = self._validated(current, deadline=deadline)
             _remaining_seconds(deadline, self.connect_timeout)
-            temporary_client: httpx.Client | None = None
-            client = self.client
-            if not self._injected_transport:
-                temporary_client = httpx.Client(
-                    follow_redirects=False,
-                    timeout=self.timeout,
-                    transport=_PinnedTransport(host, addresses[0]),
-                    trust_env=False,
-                    headers=self._headers,
-                )
-                client = temporary_client
-            client.cookies.clear()
-            try:
-                timeout = httpx.Timeout(
-                    connect=_remaining_seconds(deadline, self.connect_timeout),
-                    read=_remaining_seconds(deadline, self.read_timeout),
-                    write=_remaining_seconds(deadline, self.read_timeout),
-                    pool=_remaining_seconds(deadline, self.connect_timeout),
-                )
-                with client.stream("GET", current, headers=headers, timeout=timeout) as response:
-                    client.cookies.clear()
-                    _remaining_seconds(deadline, self.read_timeout)
-                    if response.status_code in {301, 302, 303, 307, 308}:
-                        if redirect_count >= self.maximum_redirects:
-                            raise UnsafeRequest("Too many source redirects")
-                        location = response.headers.get("location")
-                        if not location:
-                            raise UnsafeRequest("Redirect omitted its destination")
-                        current, _, _ = self._validated(
-                            urljoin(current, location), deadline=deadline
-                        )
-                        headers = {}
-                        continue
-                    if response.status_code == 304:
-                        return FetchResult(current, 304, dict(response.headers), b"", True)
-                    response.raise_for_status()
-                    content_type = response.headers.get("content-type", "").lower()
-                    if content_type and not any(
-                        allowed in content_type
-                        for allowed in ("xml", "json", "html", "text/plain", "application/octet-stream")
-                    ):
-                        raise UnsafeRequest(f"Unsupported source content type: {content_type}")
-                    body = bytearray()
-                    for chunk in response.iter_bytes():
+            redirect_target: str | None = None
+            candidates: tuple[str | None, ...] = (
+                (None,) if self._injected_transport else tuple(addresses)
+            )
+            for address_index, address in enumerate(candidates):
+                if connection_attempts >= _MAX_PINNED_CONNECTION_ATTEMPTS:
+                    raise UnsafeRequest("Source connection-attempt limit exceeded")
+                connection_attempts += 1
+                temporary_client: httpx.Client | None = None
+                client = self.client
+                if address is not None:
+                    temporary_client = httpx.Client(
+                        follow_redirects=False,
+                        timeout=self.timeout,
+                        transport=_PinnedTransport(host, address),
+                        trust_env=False,
+                        headers=self._headers,
+                    )
+                    client = temporary_client
+                client.cookies.clear()
+                try:
+                    timeout = httpx.Timeout(
+                        connect=_remaining_seconds(deadline, self.connect_timeout),
+                        read=_remaining_seconds(deadline, self.read_timeout),
+                        write=_remaining_seconds(deadline, self.read_timeout),
+                        pool=_remaining_seconds(deadline, self.connect_timeout),
+                    )
+                    with client.stream("GET", current, headers=headers, timeout=timeout) as response:
+                        client.cookies.clear()
                         _remaining_seconds(deadline, self.read_timeout)
-                        body.extend(chunk)
-                        if len(body) > self.maximum_bytes:
-                            raise ResponseTooLarge("Source response exceeded the configured byte limit")
-                    client.cookies.clear()
-                    return FetchResult(current, response.status_code, dict(response.headers), bytes(body))
-            finally:
-                if temporary_client is not None:
-                    temporary_client.close()
+                        if response.status_code in {301, 302, 303, 307, 308}:
+                            if redirect_count >= self.maximum_redirects:
+                                raise UnsafeRequest("Too many source redirects")
+                            location = response.headers.get("location")
+                            if not location:
+                                raise UnsafeRequest("Redirect omitted its destination")
+                            redirect_target, _, _ = self._validated(
+                                urljoin(current, location), deadline=deadline
+                            )
+                            headers = {}
+                            break
+                        if response.status_code == 304:
+                            return FetchResult(current, 304, dict(response.headers), b"", True)
+                        response.raise_for_status()
+                        content_type = response.headers.get("content-type", "").lower()
+                        if content_type and not any(
+                            allowed in content_type
+                            for allowed in ("xml", "json", "html", "text/plain", "application/octet-stream")
+                        ):
+                            raise UnsafeRequest(f"Unsupported source content type: {content_type}")
+                        body = bytearray()
+                        for chunk in response.iter_bytes():
+                            _remaining_seconds(deadline, self.read_timeout)
+                            body.extend(chunk)
+                            if len(body) > self.maximum_bytes:
+                                raise ResponseTooLarge("Source response exceeded the configured byte limit")
+                        client.cookies.clear()
+                        return FetchResult(current, response.status_code, dict(response.headers), bytes(body))
+                except (httpx.ConnectError, httpx.ConnectTimeout):
+                    if address_index + 1 >= len(candidates):
+                        raise
+                finally:
+                    if temporary_client is not None:
+                        temporary_client.close()
+            if redirect_target is not None:
+                current = redirect_target
+                continue
         raise UnsafeRequest("Redirect processing failed")
 
 
@@ -305,9 +332,7 @@ def resolve_known_short_url(
         _remaining_seconds(deadline, 8)
         normalized, host = _validated_public_https_url(value)
         try:
-            addresses = tuple(
-                sorted({str(ipaddress.ip_address(address)) for address in resolver(host)})
-            )
+            addresses = _preferred_addresses(resolver(host))
         except ValueError as error:
             raise UnsafeRequest("Short-link DNS returned an invalid address") from error
         _remaining_seconds(deadline, 8)
@@ -335,45 +360,61 @@ def resolve_known_short_url(
         else None
     )
     try:
+        connection_attempts = 0
         for redirect_count in range(maximum_redirects + 1):
             current = validate(current)
             host = (urlsplit(current).hostname or "").lower().rstrip(".")
             addresses = resolved_addresses[host]
-            temporary_client: httpx.Client | None = None
-            client = injected_client
-            if client is None:
-                temporary_client = httpx.Client(
-                    follow_redirects=False,
-                    timeout=httpx.Timeout(connect=8, read=10, write=10, pool=8),
-                    transport=_PinnedTransport(host, addresses[0]),
-                    trust_env=False,
-                    headers=headers,
-                )
-                client = temporary_client
-            client.cookies.clear()
-            try:
-                timeout = httpx.Timeout(
-                    connect=_remaining_seconds(deadline, 8),
-                    read=_remaining_seconds(deadline, 10),
-                    write=_remaining_seconds(deadline, 10),
-                    pool=_remaining_seconds(deadline, 8),
-                )
-                with client.stream("GET", current, timeout=timeout) as response:
-                    client.cookies.clear()
-                    _remaining_seconds(deadline, 10)
-                    if response.status_code in {301, 302, 303, 307, 308}:
-                        if redirect_count >= maximum_redirects:
-                            raise UnsafeRequest("Too many short-link redirects")
-                        location = response.headers.get("location")
-                        if not location:
-                            raise UnsafeRequest("Short-link redirect omitted its destination")
-                        current = validate(urljoin(current, location))
-                        continue
-                    response.raise_for_status()
-                    return current
-            finally:
-                if temporary_client is not None:
-                    temporary_client.close()
+            redirect_target: str | None = None
+            candidates: tuple[str | None, ...] = (
+                (None,) if injected_client is not None else tuple(addresses)
+            )
+            for address_index, address in enumerate(candidates):
+                if connection_attempts >= _MAX_PINNED_CONNECTION_ATTEMPTS:
+                    raise UnsafeRequest("Short-link connection-attempt limit exceeded")
+                connection_attempts += 1
+                temporary_client: httpx.Client | None = None
+                client = injected_client
+                if client is None:
+                    assert address is not None
+                    temporary_client = httpx.Client(
+                        follow_redirects=False,
+                        timeout=httpx.Timeout(connect=8, read=10, write=10, pool=8),
+                        transport=_PinnedTransport(host, address),
+                        trust_env=False,
+                        headers=headers,
+                    )
+                    client = temporary_client
+                client.cookies.clear()
+                try:
+                    timeout = httpx.Timeout(
+                        connect=_remaining_seconds(deadline, 8),
+                        read=_remaining_seconds(deadline, 10),
+                        write=_remaining_seconds(deadline, 10),
+                        pool=_remaining_seconds(deadline, 8),
+                    )
+                    with client.stream("GET", current, timeout=timeout) as response:
+                        client.cookies.clear()
+                        _remaining_seconds(deadline, 10)
+                        if response.status_code in {301, 302, 303, 307, 308}:
+                            if redirect_count >= maximum_redirects:
+                                raise UnsafeRequest("Too many short-link redirects")
+                            location = response.headers.get("location")
+                            if not location:
+                                raise UnsafeRequest("Short-link redirect omitted its destination")
+                            redirect_target = validate(urljoin(current, location))
+                            break
+                        response.raise_for_status()
+                        return current
+                except (httpx.ConnectError, httpx.ConnectTimeout):
+                    if address_index + 1 >= len(candidates):
+                        raise
+                finally:
+                    if temporary_client is not None:
+                        temporary_client.close()
+            if redirect_target is not None:
+                current = redirect_target
+                continue
     finally:
         if injected_client is not None:
             injected_client.close()
