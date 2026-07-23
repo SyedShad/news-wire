@@ -334,6 +334,97 @@ def test_install_materializes_uv_python_symlink_inside_release(tmp_path: Path) -
     assert installed_python.stat().st_mode & 0o777 == 0o700
 
 
+def test_install_removes_new_destination_when_artifact_verification_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = Path(__file__).parents[2]
+    database = Database(resolve_runtime_paths(tmp_path / "runtime"))
+    database.initialize()
+
+    def fake_runner(arguments: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        if "build" in arguments:
+            output = Path(arguments[arguments.index("--out-dir") + 1])
+            (output / "wire.whl").write_bytes(b"reviewed wheel bytes")
+        elif "venv" in arguments:
+            environment = Path(arguments[-1])
+            (environment / "bin").mkdir(parents=True)
+            python = environment / "bin" / "python"
+            python.write_text("python", encoding="utf-8")
+            python.chmod(0o700)
+        elif "pip" in arguments:
+            python = Path(arguments[arguments.index("--python") + 1])
+            executable = python.parent / "open-source-ai-news-wire"
+            executable.write_text("#!/bin/sh\n", encoding="utf-8")
+            executable.chmod(0o700)
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    installer = LocalInstaller(
+        source,
+        database.paths,
+        application_root=tmp_path / "app",
+        binary_root=tmp_path / "bin",
+        runner=fake_runner,
+        provenance_runner=_dummy_provenance_runner,
+        allow_unverified_source=True,
+        validation_report=_validation_report(source),
+    )
+    monkeypatch.setattr(
+        installer,
+        "_verified_manifest",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            InstallationError("Installed release artifact is missing or unsafe")
+        ),
+    )
+
+    with pytest.raises(InstallationError, match="artifact is missing or unsafe"):
+        installer.install()
+    assert list(installer.releases.iterdir()) == []
+
+
+def test_install_removes_new_destination_when_migration_command_fails(
+    tmp_path: Path,
+) -> None:
+    source = Path(__file__).parents[2]
+    database = Database(resolve_runtime_paths(tmp_path / "runtime"))
+    database.initialize()
+
+    def fake_runner(arguments: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        if "build" in arguments:
+            output = Path(arguments[arguments.index("--out-dir") + 1])
+            (output / "wire.whl").write_bytes(b"reviewed wheel bytes")
+        elif "venv" in arguments:
+            environment = Path(arguments[-1])
+            (environment / "bin").mkdir(parents=True)
+            python = environment / "bin" / "python"
+            python.write_text("python", encoding="utf-8")
+            python.chmod(0o700)
+        elif "pip" in arguments:
+            python = Path(arguments[arguments.index("--python") + 1])
+            executable = python.parent / "open-source-ai-news-wire"
+            executable.write_text("#!/bin/sh\n", encoding="utf-8")
+            executable.chmod(0o700)
+        elif arguments[0].endswith("/launcher"):
+            return subprocess.CompletedProcess(arguments, 1, "", "migration failed")
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    installer = LocalInstaller(
+        source,
+        database.paths,
+        application_root=tmp_path / "app",
+        binary_root=tmp_path / "bin",
+        runner=fake_runner,
+        provenance_runner=_dummy_provenance_runner,
+        allow_unverified_source=True,
+        validation_report=_validation_report(source),
+    )
+
+    with pytest.raises(InstallationError, match="migration failed"):
+        installer.install()
+    assert list(installer.releases.iterdir()) == []
+    assert installer.current.exists() is False
+    assert installer.launcher.exists() is False
+
+
 @pytest.mark.parametrize(
     ("status_output", "merge_code", "message"),
     (

@@ -23,6 +23,7 @@ from .adapters import (
 )
 from .network import (
     FetchResult,
+    NetworkDeadlineExceeded,
     NetworkUnavailable,
     ResponseTooLarge,
     SafeHttpClient,
@@ -193,13 +194,25 @@ class Collector:
                 )
                 successes += 1
                 discovered += new_count
+            except NetworkDeadlineExceeded as error:
+                self.database.execute(
+                    """
+                    UPDATE source_transaction
+                    SET status = 'deadline', error_class = ?, finished_at = ? WHERE id = ?
+                    """,
+                    (type(error).__name__, self.now(), transaction_id),
+                )
+                backlog = len(sources) - index
+                break
             except (NetworkUnavailable, httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as error:
                 network_failures.append((source, transaction_id, error))
             except Exception as error:
                 self._record_failure(source, transaction_id, error)
                 failures += 1
 
-        offline = bool(network_failures and successes == 0 and failures == 0)
+        offline = bool(
+            network_failures and successes == 0 and failures == 0 and backlog == 0
+        )
         if offline:
             for source, transaction_id, error in network_failures:
                 self.database.execute(

@@ -64,7 +64,7 @@
       "family": "Research",
       "monitoring_role": "Discovery",
       "adapter": "feed",
-      "url": "https://export.arxiv.org/api/query?search_query=cat%3Acs.AI%20OR%20cat%3Acs.LG%20OR%20cat%3Acs.CL&sortBy=submittedDate&sortOrder=descending&max_results=100",
+      "url": "https://export.arxiv.org/api/query?search_query=cat%3Acs.AI%20OR%20cat%3Acs.LG%20OR%20cat%3Acs.CL&sortBy=submittedDate&sortOrder=descending&max_results=50",
       "base_hosts": ["export.arxiv.org"],
       "enabled_by_default": true,
       "parser_version": 1,

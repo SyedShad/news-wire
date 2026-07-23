@@ -52,6 +52,8 @@ open-source-ai-news-wire sources health
 
 Tracked definitions update source metadata without overwriting local enablement or cursors. Disabled entries document access, parser, policy, or operator-exclusion gaps. `sources health` exposes the distinction between runtime health, `validated-unavailable`, and `excluded-by-operator`. Never add credentials or cookie-backed sources.
 
+The HTTPS client validates every DNS result and pins each connection to one validated public address while preserving the registered hostname for TLS. On dual-stack hosts it prefers IPv4 and may try up to 12 validated addresses across the redirect chain, only for connection failures or connection timeouts. It never falls through after a peer mismatch, unsafe redirect, unsupported response, or other policy failure. Worker-deadline exhaustion becomes durable backlog and does not advance a source failure streak.
+
 ## Assistance and drafting
 
 The story page separates qualification from drafting. For a discovery signal:
