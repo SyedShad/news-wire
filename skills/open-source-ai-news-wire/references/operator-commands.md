@@ -59,6 +59,8 @@ The completion pilot uses the additional 72-hour validation and fail-closed auto
 
 Human-approved drafts are dispatched immediately by the local dashboard. `assistance run-pending` remains an operator recovery command; it is not the normal approval path.
 
+If normal drafting is locked, the dashboard offers separately labelled manual neutral and manual lens controls. Each requires the versioned native confirmation, records the unchanged gate snapshot, and dispatches one idempotent draft request. This is an editorial override, not evidence verification; the warning and audit labels never enter content exports.
+
 ## Data deletion
 
 ```bash

@@ -3,7 +3,7 @@
 {% block content %}
 <nav class="breadcrumb" aria-label="Breadcrumb"><a href="{{ url_for('drafts') }}">Drafts</a><span>›</span><span>Version {{ draft.version }}</span></nav>
 <header class="page-header draft-header">
-  <div><p class="kicker">{{ draft.mode }}</p><h1>Edit version {{ draft.version }}</h1><p class="lede">Saving creates a new version and preserves this one in history.</p></div>
+  <div><p class="kicker">{{ draft.mode }}</p><h1>Edit version {{ draft.version }}</h1>{% if draft.manual_override_active %}<p><span class="tag tag-outline">Manually approved</span></p>{% endif %}<p class="lede">Saving creates a new version and preserves this one in history.</p></div>
   <div class="header-actions"><button class="button button-secondary" type="button" data-copy-text="{{ copy_text }}">Copy brief</button><a class="button button-secondary" href="{{ url_for('export_draft_html', draft_id=draft.id) }}">Export HTML</a><a class="button button-dark" href="{{ url_for('export_draft_markdown', draft_id=draft.id) }}">Export Markdown</a></div>
 </header>
 <div class="editor-layout">

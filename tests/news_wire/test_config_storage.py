@@ -158,7 +158,7 @@ def test_v3_migration_preserves_data_and_supersedes_legacy_research(tmp_path: Pa
         connection.commit()
 
     database = Database(paths)
-    assert database.migrate() == 4
+    assert database.migrate() == SCHEMA_VERSION
     assert database.one("SELECT headline FROM story_cluster WHERE id = 'story-one'") == {
         "headline": "AI event"
     }
@@ -224,7 +224,7 @@ def test_v4_migration_requires_reporting_origin_review_and_preserves_draft(tmp_p
         connection.commit()
 
     database = Database(paths)
-    assert database.migrate() == 4
+    assert database.migrate() == SCHEMA_VERSION
     assert database.query(
         "SELECT DISTINCT origin_status FROM evidence_source ORDER BY origin_status"
     ) == [{"origin_status": "needs_review"}]
@@ -233,6 +233,60 @@ def test_v4_migration_requires_reporting_origin_review_and_preserves_draft(tmp_p
     assert database.one("SELECT status, body FROM draft") == {
         "status": "Needs Review",
         "body": "Preserve me",
+    }
+
+
+def test_v5_migration_adds_manual_override_audit_without_changing_existing_candidates(
+    tmp_path: Path,
+) -> None:
+    paths = resolve_runtime_paths(tmp_path / "wire-data")
+    ensure_runtime_layout(paths)
+    now = "2026-07-23T08:00:00Z"
+    with sqlite3.connect(paths.database) as connection:
+        connection.executescript(SCHEMA_V1)
+        for version in (2, 3, 4):
+            for statement in MIGRATIONS[version]:
+                connection.execute(statement)
+        connection.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', '4')"
+        )
+        connection.execute(
+            """
+            INSERT INTO story_cluster(
+                id, slug, headline, summary, lane, openness_class, status, priority,
+                priority_score, freshness, first_public_at, detected_at, created_at, updated_at
+            ) VALUES('story-existing', 'existing', 'Existing story', 'Summary',
+                     'Broader AI News', 'not stated', 'candidate', 'High', 72, 'Fresh',
+                     ?, ?, ?, ?)
+            """,
+            (now, now, now, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO candidate(
+                story_id, evidence_gate, importance_gate, score, score_json, qualified_at
+            ) VALUES('story-existing', 1, 1, 72, '{}', ?)
+            """,
+            (now,),
+        )
+        connection.commit()
+
+    database = Database(paths)
+    assert database.migrate() == SCHEMA_VERSION
+
+    candidate = database.one(
+        """
+        SELECT manual_override, manual_override_at, manual_override_action_id,
+               manual_override_snapshot_json
+        FROM candidate WHERE story_id = 'story-existing'
+        """
+    )
+
+    assert candidate == {
+        "manual_override": 0,
+        "manual_override_at": None,
+        "manual_override_action_id": None,
+        "manual_override_snapshot_json": "{}",
     }
 
 

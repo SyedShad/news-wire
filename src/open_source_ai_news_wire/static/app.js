@@ -17,6 +17,23 @@
     });
   });
 
+  document.querySelectorAll('.review-form').forEach((form) => {
+    form.addEventListener('submit', (event) => {
+      const action = event.submitter?.value || '';
+      if (!action.startsWith('manual_approve_')) return;
+      const version = form.querySelector('[data-manual-confirmation-version]');
+      if (version) version.value = '';
+      const confirmed = window.confirm(
+        'Qualification requirements have not passed. Manual approval will create a draft from the currently available sources. Continue?'
+      );
+      if (!confirmed) {
+        event.preventDefault();
+        return;
+      }
+      if (version) version.value = 'manual_override_v1';
+    });
+  });
+
   const refreshStatus = async () => {
     if (document.hidden) return;
     try {

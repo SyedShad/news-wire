@@ -12,7 +12,7 @@
       </div>
       <div class="table-main">
         <strong>{{ entry.headline if entry.entry_kind == 'draft' else entry.story_headline }}</strong>
-        <small>{{ entry.mode }} · {{ entry.lane }}{% if entry.entry_kind == 'request' %} · {{ entry.status_message }}{% endif %}</small>
+        <small>{{ entry.mode }} · {{ entry.lane }}{% if entry.approval_basis == 'manual_override' %} · Manually approved{% endif %}{% if entry.entry_kind == 'request' %} · {{ entry.status_message }}{% endif %}</small>
       </div>
       <div class="table-date">{{ entry.updated_at|wire_time }}<span>→</span></div>
     </a>

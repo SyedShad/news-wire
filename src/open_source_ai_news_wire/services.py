@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import html
+import ipaddress
 import re
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Callable
@@ -33,6 +34,7 @@ from .evidence import (
 INLINE_SOURCE_LINK_RE = re.compile(r"\[([^\]\n]{1,200})\]\(<(https://[^>\n]{1,2048})>\)")
 ANY_MARKDOWN_LINK_RE = re.compile(r"\[[^\]\n]+\]\([^\)\n]+\)")
 RAW_HTML_RE = re.compile(r"</?[A-Za-z][^>]*>")
+MANUAL_CONFIRMATION_VERSION = "manual_override_v1"
 
 
 def utc_now() -> str:
@@ -201,6 +203,13 @@ class DashboardService:
             "SELECT * FROM review_action WHERE story_id = ? ORDER BY created_at DESC",
             (story_id,),
         )
+        for action in story["actions"]:
+            try:
+                snapshot = json.loads(str(action.get("approval_snapshot_json") or "{}"))
+            except json.JSONDecodeError:
+                snapshot = {}
+            action["approval_basis"] = str(snapshot.get("approval_basis") or "")
+            action["qualification_snapshot"] = snapshot.get("qualification_snapshot") or {}
         story["drafts"] = self.database.query(
             "SELECT * FROM draft WHERE story_id = ? ORDER BY version DESC",
             (story_id,),
@@ -282,7 +291,44 @@ class DashboardService:
         ) or {}
         story["qualification"] = qualification_state(self.database, story_id)
         story["qualification"]["lock_reasons"] = self._qualification_lock_reasons(story)
+        story["candidate_basis"] = story["qualification"]["candidate_basis"]
+        story["manual_override_active"] = story["qualification"]["manual_override_active"]
+        story["draft_eligible"] = story["qualification"]["draft_eligible"]
+        latest_draft = story["drafts"][0] if story["drafts"] else None
+        story["draft_request_allowed"] = bool(
+            not latest_draft
+            or (
+                latest_draft["status"] == "Needs Review"
+                and story["status"] == "candidate"
+            )
+        )
+        manual_sources = self._draft_sources(story_id, allow_discovery=True)
+        story["manual_override_allowed"] = bool(
+            story["status"] not in {"archived", "withdrawn"}
+            and story["claims"]
+            and any(source.get("citation_allowed") for source in manual_sources)
+            and story["draft_request_allowed"]
+        )
+        if story["manual_override_allowed"]:
+            story["manual_override_lock_reason"] = ""
+        elif not story["draft_request_allowed"]:
+            story["manual_override_lock_reason"] = (
+                "A current draft already exists. Revise it from Drafts & history."
+            )
+        else:
+            story["manual_override_lock_reason"] = (
+                "Manual approval requires an active story with at least one claim and one safe public source."
+            )
         story["draft_request"] = self.draft_status(story_id)
+        story["approval_basis"] = (
+            story["draft_request"]["approval_basis"]
+            if story["draft_request"]
+            else "manual_override"
+            if story["manual_override_active"]
+            else "verified"
+            if story["qualification"]["verified_qualified"]
+            else ""
+        )
         return story
 
     @staticmethod
@@ -306,10 +352,14 @@ class DashboardService:
             reasons.append("The open-source lens requires a Strong or Moderate opportunity.")
         return reasons
 
-    def _draft_sources(self, story_id: str) -> list[dict[str, Any]]:
+    def _draft_sources(
+        self, story_id: str, *, allow_discovery: bool = False
+    ) -> list[dict[str, Any]]:
         from .assistance import _story_sources
 
-        return _story_sources(self.database, story_id)
+        return _story_sources(
+            self.database, story_id, allow_discovery=allow_discovery
+        )
 
     def queue_evidence_inspection(
         self, story_id: str, url: str, acquisition_method: str
@@ -586,6 +636,11 @@ class DashboardService:
         for draft in drafts:
             draft["entry_kind"] = "draft"
             draft["display_status"] = str(draft["status"])
+            try:
+                snapshot = json.loads(str(draft.get("approval_snapshot_json") or "{}"))
+            except json.JSONDecodeError:
+                snapshot = {}
+            draft["approval_basis"] = str(snapshot.get("approval_basis") or "verified")
 
         requests = self.database.query(
             """
@@ -609,6 +664,7 @@ class DashboardService:
                     "display_status": status["label"],
                     "status_code": status["status"],
                     "status_message": status["message"],
+                    "approval_basis": str(payload.get("approval_basis") or "verified"),
                 }
             )
         return sorted(
@@ -709,8 +765,15 @@ class DashboardService:
                 "story_id": story_id,
                 "draft_id": draft_id,
                 "updated_at": work["updated_at"],
+                "approval_basis": "verified",
             }
         )
+        try:
+            payload = json.loads(str(work.get("payload_json") or "{}"))
+        except json.JSONDecodeError:
+            payload = {}
+        status["approval_basis"] = str(payload.get("approval_basis") or "verified")
+        status["manual_override_active"] = status["approval_basis"] == "manual_override"
         if status["status"] == "ready" and not draft:
             status.update(
                 {
@@ -753,6 +816,18 @@ class DashboardService:
         )
         if draft:
             draft["sources"] = json.loads(draft.get("sources_json") or "[]")
+            try:
+                approval_snapshot = json.loads(
+                    str(draft.get("approval_snapshot_json") or "{}")
+                )
+            except json.JSONDecodeError:
+                approval_snapshot = {}
+            draft["approval_basis"] = str(
+                approval_snapshot.get("approval_basis") or "verified"
+            )
+            draft["manual_override_active"] = (
+                draft["approval_basis"] == "manual_override"
+            )
             draft["source_rows"] = [self._source_parts(source) for source in draft["sources"]]
             draft["history"] = self.database.query(
                 "SELECT id, version, status, updated_at FROM draft WHERE story_id = ? ORDER BY version DESC",
@@ -794,8 +869,16 @@ class DashboardService:
             draft["comparison"] = comparison
         return draft
 
-    def review(self, story_id: str, action: str, reason: str = "") -> str:
-        allowed = {"archive", "approve_neutral", "approve_lens", "withdraw"}
+    def review(
+        self,
+        story_id: str,
+        action: str,
+        reason: str = "",
+        confirmation_version: str = "",
+    ) -> str:
+        verified_actions = {"approve_neutral", "approve_lens"}
+        manual_actions = {"manual_approve_neutral", "manual_approve_lens"}
+        allowed = {"archive", "withdraw", *verified_actions, *manual_actions}
         if action not in allowed:
             raise ValueError("Unsupported review action")
         story = self.database.one("SELECT * FROM story_cluster WHERE id = ?", (story_id,))
@@ -811,25 +894,65 @@ class DashboardService:
             new_status = "archived"
         elif action == "withdraw":
             new_status = "withdrawn"
-        elif action in {"approve_neutral", "approve_lens"}:
-            qualification = recalculate_story_qualification(self.database, story_id)
+        elif action in verified_actions | manual_actions:
+            manual_override = action in manual_actions
+            qualification = (
+                qualification_state(self.database, story_id)
+                if manual_override
+                else recalculate_story_qualification(self.database, story_id)
+            )
             story = self.database.one("SELECT * FROM story_cluster WHERE id = ?", (story_id,)) or story
-            if not qualification["qualified"]:
+            if story["status"] in {"archived", "withdrawn"}:
+                raise ValueError("Archived or withdrawn stories cannot be approved for drafting")
+            if manual_override and confirmation_version != MANUAL_CONFIRMATION_VERSION:
+                raise ValueError("Manual approval requires the current confirmation prompt")
+            if not manual_override and not qualification["qualified"]:
                 raise ValueError("Evidence and importance qualification must pass before drafting")
-            if story["status"] not in {"candidate", "draft_ready", "approved"}:
+            if not manual_override and story["status"] not in {"candidate", "draft_ready", "approved"}:
                 raise ValueError("Only verified candidates can be approved for drafting")
-            if action == "approve_lens":
-                if story["opportunity_strength"] not in {"Strong", "Moderate"}:
+            claims = self.database.query(
+                "SELECT id, text, status, volatility FROM claim WHERE story_id = ? ORDER BY id",
+                (story_id,),
+            )
+            sources = self._draft_sources(
+                story_id, allow_discovery=manual_override
+            )
+            if manual_override and not claims:
+                raise ValueError("Manual approval requires at least one stored claim")
+            if manual_override and not any(
+                source.get("citation_allowed") for source in sources
+            ):
+                raise ValueError("Manual approval requires at least one safe public source")
+            lens_action = action in {"approve_lens", "manual_approve_lens"}
+            if lens_action:
+                if (
+                    not manual_override
+                    and story["opportunity_strength"] not in {"Strong", "Moderate"}
+                ):
                     raise ValueError("An open-source lens requires a Strong or Moderate opportunity")
                 mode = "Open-Source Lens Brief"
             else:
                 mode = "Neutral News Brief"
             new_status = "approved"
             work_kind = "draft"
+            approval_basis = "manual_override" if manual_override else "verified"
+            gate_snapshot = {
+                "evidence_gate": bool(qualification["evidence_gate"]),
+                "importance_gate": bool(qualification["effective_importance"]),
+                "automated_importance": bool(qualification["automated_importance"]),
+                "effective_importance": bool(qualification["effective_importance"]),
+                "lens_gate": story.get("opportunity_strength") in {"Strong", "Moderate"},
+                "lens_eligible": story.get("opportunity_strength") in {"Strong", "Moderate"},
+                "candidate_basis": str(qualification["candidate_basis"]),
+            }
             work_payload = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "mode": mode,
                 "reason": reason.strip(),
+                "approval_basis": approval_basis,
+                "manual_override": manual_override,
+                "confirmation_version": confirmation_version if manual_override else "",
+                "qualification_snapshot": gate_snapshot,
                 "approval_snapshot_at": now,
                 "story": {
                     "id": story["id"],
@@ -839,14 +962,27 @@ class DashboardService:
                     "freshness": story["freshness"],
                     "material_update": bool(story["material_update"]),
                 },
-                "claims": self.database.query(
-                    "SELECT id, status, volatility FROM claim WHERE story_id = ? ORDER BY id",
-                    (story_id,),
-                ),
-                "sources": self._draft_sources(story_id),
+                "claims": claims,
+                "sources": sources,
             }
         with self.database.transaction() as connection:
             if work_kind:
+                latest_existing_draft = connection.execute(
+                    """
+                    SELECT status FROM draft
+                    WHERE story_id = ?
+                    ORDER BY version DESC LIMIT 1
+                    """,
+                    (story_id,),
+                ).fetchone()
+                if latest_existing_draft and latest_existing_draft["status"] != "Needs Review":
+                    raise ValueError(
+                        "A completed draft already exists; revise it from Drafts & history"
+                    )
+                if latest_existing_draft and story["status"] != "candidate":
+                    raise ValueError(
+                        "A replacement draft requires a candidate whose current draft needs review"
+                    )
                 existing = connection.execute(
                     """
                     SELECT id, status FROM work_item
@@ -907,6 +1043,37 @@ class DashboardService:
             )
             if work_kind:
                 work_payload["review_action_id"] = int(action_cursor.lastrowid)
+                connection.execute(
+                    "UPDATE review_action SET approval_snapshot_json = ? WHERE id = ?",
+                    (
+                        Database.json(work_payload),
+                        int(action_cursor.lastrowid),
+                    ),
+                )
+                if action in manual_actions:
+                    connection.execute(
+                        """
+                        INSERT INTO candidate(
+                            story_id, evidence_gate, importance_gate, score, score_json,
+                            manual_override, manual_override_at, manual_override_action_id,
+                            manual_override_snapshot_json
+                        ) VALUES(?, ?, ?, ?, '{}', 1, ?, ?, ?)
+                        ON CONFLICT(story_id) DO UPDATE SET
+                            manual_override = 1,
+                            manual_override_at = excluded.manual_override_at,
+                            manual_override_action_id = excluded.manual_override_action_id,
+                            manual_override_snapshot_json = excluded.manual_override_snapshot_json
+                        """,
+                        (
+                            story_id,
+                            int(qualification["evidence_gate"]),
+                            int(qualification["automated_importance"]),
+                            int(story["priority_score"]),
+                            now,
+                            int(action_cursor.lastrowid),
+                            Database.json(gate_snapshot),
+                        ),
+                    )
                 work_cursor = connection.execute(
                     """
                     INSERT INTO work_item(
@@ -1012,10 +1179,20 @@ class DashboardService:
             raise ValueError("Open-source lens text requires an approved lens brief")
         if lens_value:
             story = self.database.one(
-                "SELECT opportunity_strength FROM story_cluster WHERE id = ?",
+                """
+                SELECT s.opportunity_strength, COALESCE(c.manual_override, 0) AS manual_override
+                FROM story_cluster s LEFT JOIN candidate c ON c.story_id = s.id
+                WHERE s.id = ?
+                """,
                 (original["story_id"],),
             )
-            if not story or story["opportunity_strength"] not in {"Strong", "Moderate"}:
+            if (
+                not story
+                or (
+                    story["opportunity_strength"] not in {"Strong", "Moderate"}
+                    and not original["manual_override_active"]
+                )
+            ):
                 raise ValueError("Open-source lens text requires a Strong or Moderate opportunity")
         now = utc_now()
         with self.database.transaction() as connection:
@@ -1028,13 +1205,16 @@ class DashboardService:
                 """
                 INSERT INTO draft(
                     story_id, mode, status, version, headline, metadata, body, lens,
-                    sources_json, created_at, updated_at, supersedes_id
-                ) VALUES(?, ?, 'Current', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    sources_json, created_at, updated_at, supersedes_id,
+                    provenance_json, approval_snapshot_json
+                ) VALUES(?, ?, 'Current', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     original["story_id"], original["mode"], int(current_version) + 1,
                     headline_value, metadata_value, body_value, lens_value,
                     original["sources_json"], now, now, draft_id,
+                    original.get("provenance_json") or "{}",
+                    original.get("approval_snapshot_json") or "{}",
                 ),
             )
             connection.execute(
@@ -1322,13 +1502,32 @@ class DashboardService:
             raw_url = ""
         try:
             parsed = urlsplit(raw_url)
+            hostname = parsed.hostname or ""
+            try:
+                literal_address = ipaddress.ip_address(hostname)
+            except ValueError:
+                literal_address = None
+            blocked_address = bool(
+                literal_address
+                and (
+                    literal_address.is_private
+                    or literal_address.is_loopback
+                    or literal_address.is_link_local
+                    or literal_address.is_multicast
+                    or literal_address.is_reserved
+                    or literal_address.is_unspecified
+                )
+            )
             safe_url = (
                 raw_url
                 if parsed.scheme == "https"
-                and bool(parsed.hostname)
+                and bool(hostname)
                 and not parsed.username
                 and not parsed.password
                 and parsed.port in {None, 443}
+                and hostname.casefold() != "localhost"
+                and not hostname.casefold().endswith(".localhost")
+                and not blocked_address
                 else ""
             )
         except ValueError:
@@ -1337,7 +1536,8 @@ class DashboardService:
 
     @classmethod
     def _validate_draft_links(cls, value: str, sources: list[Any]) -> None:
-        if RAW_HTML_RE.search(value):
+        without_links = INLINE_SOURCE_LINK_RE.sub("", value)
+        if RAW_HTML_RE.search(without_links):
             raise ValueError("Draft text cannot contain raw HTML")
         allowed_urls = {
             cls._source_parts(source)["url"]
@@ -1347,7 +1547,6 @@ class DashboardService:
         for match in INLINE_SOURCE_LINK_RE.finditer(value):
             if match.group(2) not in allowed_urls:
                 raise ValueError("Draft links must use URLs from the confirmed evidence snapshot")
-        without_links = INLINE_SOURCE_LINK_RE.sub("", value)
         if ANY_MARKDOWN_LINK_RE.search(without_links):
             raise ValueError("Draft links must use safe source Markdown")
         if re.search(r"https?://", without_links, re.I):

@@ -219,7 +219,13 @@
         {% if not story.qualification.evidence_gate %}<p class="muted">Qualification remains locked until one Event source or two independent original reporting publishers are confirmed.</p>{% endif %}
       </form>
       {% else %}
-      <div class="qualified-state"><strong>Candidate qualification recorded</strong><p>Drafting still requires the separate human approval checkpoint.</p></div>
+      <div class="qualified-state">
+        {% if story.manual_override_active and not story.qualification.verified_qualified %}
+        <strong>Manually approved</strong><p>The human override is recorded. Automated evidence and importance results remain unchanged.</p>
+        {% else %}
+        <strong>Candidate qualification recorded</strong><p>Drafting still requires the separate human approval checkpoint.</p>
+        {% endif %}
+      </div>
       {% endif %}
     </section>
 
@@ -233,6 +239,7 @@
 
   <aside class="review-panel panel"{% if story.draft_request %} data-draft-status-url="{{ url_for('story_draft_status', story_id=story.id) }}" data-draft-active="{{ 'true' if story.draft_request.active else 'false' }}" data-draft-auto-open="{{ 'true' if auto_open_draft else 'false' }}"{% endif %}>
     <p class="section-index">Draft approval</p><h2>Approve a drafting mode</h2>
+    {% if story.manual_override_active %}<p><span class="tag tag-outline">Manually approved</span></p>{% endif %}
     {% if story.draft_request %}
     <div class="approval-pending draft-state draft-state-{{ story.draft_request.status }}" role="status" aria-live="polite">
       <small>Draft generation</small>
@@ -247,25 +254,39 @@
     </div>
     {% endif %}
     {% if not story.draft_request or story.draft_request.status == 'needs_reapproval' %}
+    {% set neutral_normal_available = story.qualification.qualified and story.status in ['candidate','draft_ready'] and story.draft_request_allowed %}
+    {% set lens_normal_available = neutral_normal_available and story.opportunity_strength in ['Strong','Moderate'] %}
     <p class="muted">Qualification never creates a draft. Approve one mode explicitly when the story is ready.</p>
-    {% if story.status not in ['candidate','draft_ready'] %}<div class="approval-lock"><strong>Neutral brief locked</strong><p>Qualify this story as a candidate first.</p></div>{% endif %}
-    {% if story.opportunity_strength not in ['Strong','Moderate'] %}<div class="approval-lock"><strong>Open-source lens locked</strong><p>No Strong or Moderate opportunity is recorded.</p></div>{% endif %}
+    {% if not neutral_normal_available %}<div class="approval-lock"><strong>Neutral brief locked</strong><p>The normal evidence and importance qualification has not passed.</p></div>{% endif %}
+    {% if not lens_normal_available %}<div class="approval-lock"><strong>Open-source lens locked</strong><p>The normal qualification or Strong/Moderate lens requirement has not passed.</p></div>{% endif %}
     <form action="{{ url_for('review_story', story_id=story.id) }}" method="post" class="review-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="confirmation_version" value="" data-manual-confirmation-version>
       <label>Guidance or reason <span>optional</span><textarea name="reason" rows="3" placeholder="What should the next step preserve or investigate?"></textarea></label>
-      <button class="action-choice choice-neutral" name="action" value="approve_neutral" type="submit" {{ 'disabled' if story.status not in ['candidate','draft_ready'] else '' }}>
+      <button class="action-choice choice-neutral" name="action" value="approve_neutral" type="submit" {{ 'disabled' if not neutral_normal_available else '' }}>
         <span><strong>Approve and create neutral draft</strong><small>Start a facts-first draft immediately</small></span><b>→</b>
       </button>
-      <button class="action-choice choice-lens" name="action" value="approve_lens" type="submit" {{ 'disabled' if story.status not in ['candidate','draft_ready'] or story.opportunity_strength not in ['Strong','Moderate'] else '' }}>
+      <button class="action-choice choice-lens" name="action" value="approve_lens" type="submit" {{ 'disabled' if not lens_normal_available else '' }}>
         <span><strong>Approve and create open-source lens draft</strong><small>Start neutral reporting + labelled analysis immediately</small></span><b>→</b>
       </button>
+      {% if not neutral_normal_available %}
+      <button class="action-choice choice-neutral" name="action" value="manual_approve_neutral" type="submit" data-manual-override-action {{ 'disabled' if not story.manual_override_allowed else '' }}>
+        <span><strong>Manually approve and create neutral draft</strong><small>Override qualification and start a facts-first draft</small></span><b>→</b>
+      </button>
+      {% endif %}
+      {% if not lens_normal_available %}
+      <button class="action-choice choice-lens" name="action" value="manual_approve_lens" type="submit" data-manual-override-action {{ 'disabled' if not story.manual_override_allowed else '' }}>
+        <span><strong>Manually approve and create open-source lens draft</strong><small>Override qualification and start the labelled lens draft</small></span><b>→</b>
+      </button>
+      {% endif %}
+      {% if not story.manual_override_allowed %}<p class="muted">{{ story.manual_override_lock_reason }}</p>{% endif %}
       <div class="secondary-actions">
         <button name="action" value="archive" type="submit">Archive</button>
       </div>
     </form>
     {% endif %}
     {% if story.actions %}
-    <div class="action-history"><h3>Decision history</h3>{% for action in story.actions[:4] %}<div><span>{{ action.action|replace('_',' ') }}</span><small>{{ action.created_at|wire_time }}</small></div>{% endfor %}</div>
+    <div class="action-history"><h3>Decision history</h3>{% for action in story.actions[:4] %}<div><span>{{ action.action|replace('_',' ') }}</span><small>{{ action.created_at|wire_time }}</small>{% if action.approval_basis == 'manual_override' %}<small>Manual override · Evidence {{ 'passed' if action.qualification_snapshot.evidence_gate else 'locked' }} · Importance {{ 'passed' if action.qualification_snapshot.effective_importance else 'locked' }} · Lens {{ 'eligible' if action.qualification_snapshot.lens_eligible else 'not eligible' }}</small>{% endif %}</div>{% endfor %}</div>
     {% endif %}
   </aside>
 </div>
