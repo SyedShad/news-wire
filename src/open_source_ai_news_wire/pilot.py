@@ -67,38 +67,39 @@ class PilotManager:
         return (notifier or NativeNotifier(self.database)).send_canary()
 
     def extend_validation(self, *, auto_activate: bool) -> PilotStatus:
-        if not auto_activate:
-            raise PilotGateError("The extended validation command requires --auto-activate")
-        if self.database.get_state("notification_canary_status", "not_run") != "passed":
-            raise PilotGateError("A successful native notification canary is required")
-        workflow = self.database.one(
-            """
-            SELECT 1 AS present
-            FROM story_cluster s
-            WHERE EXISTS (
-                SELECT 1 FROM evidence_source e
-                WHERE e.story_id = s.id AND e.status = 'confirmed'
+        if auto_activate:
+            if self.database.get_state("notification_canary_status", "not_run") != "passed":
+                raise PilotGateError("A successful native notification canary is required")
+            workflow = self.database.one(
+                """
+                SELECT 1 AS present
+                FROM story_cluster s
+                WHERE EXISTS (
+                    SELECT 1 FROM evidence_source e
+                    WHERE e.story_id = s.id AND e.status = 'confirmed'
+                )
+                  AND EXISTS (
+                    SELECT 1 FROM review_action r
+                    WHERE r.story_id = s.id AND r.action IN ('approve_neutral', 'approve_lens')
+                )
+                  AND EXISTS (
+                    SELECT 1 FROM draft d
+                    WHERE d.story_id = s.id AND d.version >= 2
+                )
+                LIMIT 1
+                """
             )
-              AND EXISTS (
-                SELECT 1 FROM review_action r
-                WHERE r.story_id = s.id AND r.action IN ('approve_neutral', 'approve_lens')
-            )
-              AND EXISTS (
-                SELECT 1 FROM draft d
-                WHERE d.story_id = s.id AND d.version >= 2
-            )
-            LIMIT 1
-            """
-        )
-        if not workflow:
-            raise PilotGateError(
-                "A confirmed-evidence, human-approved, revised live draft is required before validation can be armed"
-            )
+            if not workflow:
+                raise PilotGateError(
+                    "A confirmed-evidence, human-approved, revised live draft is required before validation can be armed"
+                )
         now = self._now_value()
         if not self.database.get_state("pilot_started_at", ""):
             self.database.set_state("pilot_started_at", now, now)
         self.database.set_state("pilot_validation_started_at", now, now)
-        self.database.set_state("pilot_auto_activate_armed", "true", now)
+        self.database.set_state(
+            "pilot_auto_activate_armed", "true" if auto_activate else "false", now
+        )
         self.database.set_state("pilot_status", "extended_shadow", now)
         self.database.set_state("shadow_mode", "true", now)
         self.database.set_state("notifications_enabled", "false", now)

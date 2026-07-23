@@ -88,12 +88,13 @@ If the canary fails, leave assistance disabled and use the dashboard's human-cla
 open-source-ai-news-wire pilot start-shadow
 open-source-ai-news-wire pilot status
 open-source-ai-news-wire pilot notification-canary
+open-source-ai-news-wire pilot extend-validation
 open-source-ai-news-wire pilot extend-validation --auto-activate
 open-source-ai-news-wire pilot readiness
 open-source-ai-news-wire pilot activate-notifications --confirm-reviewed
 ```
 
-Before extending validation, complete one real confirmed-evidence workflow through candidate qualification, human-approved neutral drafting, and a saved revision. The canary may prompt for macOS notification permission. Extending validation preserves the original pilot history and begins an additional 72-hour repair-validation epoch.
+`pilot extend-validation` begins an unarmed 72-hour containment epoch in shadow mode. It preserves the original pilot history and cannot enable notifications when the window ends. Use `--auto-activate` only when automatic notification activation has been explicitly authorized; that armed path requires a successful notification canary and one real confirmed-evidence workflow through candidate qualification, human-approved neutral drafting, and a saved revision.
 
 The worker activates notifications automatically only after every readiness gate passes: schema and database integrity, active scheduler, a healthy post-repair success from every enabled source, empty durable queue, safe disk state, assistance isolation, successful canary, and offline-alert suppression. Activation writes a watermark, so the historical inbox backlog is never delivered as native notifications. A failed gate leaves the system in shadow mode with explicit blockers. Drafting and publishing remain human-controlled.
 
