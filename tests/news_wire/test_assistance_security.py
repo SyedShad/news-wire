@@ -57,10 +57,19 @@ def _connect(host: str = "chatgpt.com", *, headers: str = "") -> bytes:
 def test_connect_parser_accepts_only_exact_reviewed_hosts() -> None:
     request = parse_connect_request(_connect())
     assert (request.host, request.port) == ("chatgpt.com", 443)
+    regional = parse_connect_request(
+        _connect("sdmntprcentralus.oaiusercontent.com")
+    )
+    assert (regional.host, regional.port) == (
+        "sdmntprcentralus.oaiusercontent.com",
+        443,
+    )
 
     cases = (
         (b"GET / HTTP/1.1\r\nHost: chatgpt.com\r\n\r\n", "malformed"),
         (_connect("example.com"), "host_blocked"),
+        (_connect("ab.chatgpt.com"), "host_blocked"),
+        (_connect("unexpected.oaiusercontent.com"), "host_blocked"),
         (_connect("127.0.0.1"), "ip_literal"),
         (_connect("[::1]"), "ip_literal"),
         (b"CONNECT chatgpt.com:80 HTTP/1.1\r\nHost: chatgpt.com:80\r\n\r\n", "port_blocked"),

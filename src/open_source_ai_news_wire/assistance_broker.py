@@ -17,12 +17,21 @@ from dataclasses import dataclass
 from typing import Any
 
 
-BROKER_POLICY_VERSION = "connect-v1"
+BROKER_POLICY_VERSION = "connect-v2"
 REVIEWED_CODEX_HOSTS = frozenset(
     {
         "chatgpt.com",
         "auth.openai.com",
         "api.openai.com",
+        # The Apple-signed ChatGPT-bundled Codex client selects one of these
+        # exact regional OpenAI service hosts for account-backed inference.
+        # Keep this list explicit: parent-domain and wildcard access are not
+        # permitted by the broker policy.
+        "sdmntprcentralus.oaiusercontent.com",
+        "sdmntprnorthcentralus.oaiusercontent.com",
+        "sdmntprsoutheastus3.oaiusercontent.com",
+        "sdmntprsouthcentralus.oaiusercontent.com",
+        "sdmntprwestus3.oaiusercontent.com",
     }
 )
 _MAX_CONNECT_HEADER = 8192

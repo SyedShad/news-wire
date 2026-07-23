@@ -15,7 +15,7 @@ The dashboard is loopback-only, random-port, and one-time-link protected. It sha
 
 Codex assistance is optional and receives only a minimal packet of public URLs, short passages, claims, evidence IDs, and task metadata. Release 0.3.7 verifies the ChatGPT-bundled Codex binary's Apple signature, OpenAI team ID, path, version, SHA-256, and CDHash. The invocation uses ignored user configuration, no-tools policy, strict JSON output, and an outer macOS sandbox that denies child processes and all network endpoints except one ephemeral loopback broker port.
 
-The broker accepts strict CONNECT requests only for reviewed ChatGPT/OpenAI hostnames on port 443. It rejects credentials, IP literals, unsafe or special DNS answers, peer mismatches, malformed requests, and unreviewed hosts. It connects by validated numeric address while tunnelling TLS unchanged, so Codex still verifies the destination hostname and certificate. The broker and copied ChatGPT login are destroyed after each invocation.
+The broker accepts strict CONNECT requests only for an explicit, reviewed set of ChatGPT/OpenAI hostnames on port 443. The set contains no wildcard or parent-domain grants; the regional `oaiusercontent.com` service names required by the signed bundled client are listed individually. Analytics and feedback are disabled, and `ab.chatgpt.com` remains blocked. The broker rejects credentials, IP literals, unsafe or special DNS answers, peer mismatches, malformed requests, and every unreviewed host. It connects by validated numeric address while tunnelling TLS unchanged, so Codex still verifies the destination hostname and certificate. The broker and copied ChatGPT login are destroyed after each invocation.
 
 ## Fail-closed controls
 
