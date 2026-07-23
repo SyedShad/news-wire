@@ -1,18 +1,13 @@
 name: OSV-Scanner
 
-# Scheduled OSV-Scanner workflow for vulnerability drift detection.
-# Scans the repository lockfiles (uv.lock, mcp/go.sum) on a weekly schedule
-# and uploads results to GitHub code scanning, so newly disclosed CVEs in
-# the dependency tree are visible even between PRs.
-#
-# Advisory-first: fail-on-vuln is false until maintainers confirm a clean
-# baseline, matching the pattern in security.yml.
-#
-# Separate from the pip-audit job in security.yml (which runs on every PR
-# and push) and from the dependency-review gate (which blocks on new
-# vulnerable deps at PR time). This workflow fills the scheduled-drift gap.
+# OSV scans both release changes and weekly vulnerability drift. The reporter
+# is a blocking PR gate while the report artifact is retained even on failure.
 
 on:
+  pull_request:
+  push:
+    branches:
+      - main
   schedule:
     # Weekly, Mondays at 12:30 UTC.
     - cron: "30 12 * * 1"
@@ -21,7 +16,7 @@ on:
 permissions: {}
 
 jobs:
-  scan-scheduled:
+  scan:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -48,9 +43,10 @@ jobs:
             --output=results.sarif
             --new=results.json
             --gh-annotations=true
-            --fail-on-vuln=false
+            --fail-on-vuln=true
 
       - name: Retain OSV report
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: osv-scanner-sarif
