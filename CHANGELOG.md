@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Open Source AI News Wire releases**
+
+## [0.3.7] - 2026-07-24
+
+### Added
+
+- Assisted drafting now uses a short-lived loopback CONNECT broker that permits only reviewed ChatGPT/OpenAI hosts while preserving end-to-end TLS.
+- One release-bound assistance authority exposes current readiness, attestation expiry, Codex identity, login state, failure reason, and pending work.
+- Every approved request receives a deterministic editable draft shell when assisted generation is unavailable.
+- High-attention Discovery links can enter bounded evidence inspection without becoming verification until a human confirms them.
+
+### Changed
+
+- Aggregator timestamps are stored as discovery times and no longer become a linked article's First-Public Time automatically.
+- Recently discovered articles with an unknown original date display `Newly surfaced`, receive zero freshness points, and cannot be Breaking or Fresh.
+- Scheduler health is derived from the current LaunchAgent instead of a cached application-state value.
+
+### Fixed
+
+- The audited orphaned evidence proposal is marked as superseded by its fetched duplicate without deleting either record.
+- Social and aggregator relevance no longer treats an AI hashtag alone as sufficient topical evidence.
+- Successful Codex endpoint failover no longer causes an otherwise valid assisted draft to be discarded.
+
+### Security
+
+- The broker rejects unknown hosts, credentials, IP literals, unsafe DNS answers, rebinding, private or special networks, malformed CONNECT requests, and unexpected peers.
+- Assistance fails closed when the signed bundled Codex identity, broker policy, sandbox, attestation, or approval snapshot drifts.
+
+## [0.3.6] - 2026-07-23
+
+### Added
+
+- Schema 7 records story and material revisions, versioned observation hashes, source revisions, publication-time status, and exact approval claim/source signatures.
+- Approval snapshots bind model invocation to the exact reviewed claim, source, relationship, provenance, and signed-content set.
+- Diagnostics record future timestamps, hash rebasing, false-update repair, short-link caps, and assistance isolation failures.
+
+### Changed
+
+- Publication parsers prefer `published` or `pubDate` over `updated`, regardless of XML element order.
+- Source breadth is calculated from distinct normalized publisher or account identities rather than raw source rows.
+- Assisted drafting remains disabled until a current filesystem, credential, network, and approval-snapshot isolation policy passes.
+
+### Fixed
+
+- Parser, hash-version, formatting, metadata, engagement, and duplicate changes cannot create editorial material updates.
+- Two confirmed false material-update timestamps are conditionally repaired without deleting their story or source history.
+- Live ranking no longer falls back from a valid zero importance or review score to historical priority.
+- Short-link attempts, including failures, share one 12-attempt scan cap and respect the worker deadline.
+
+### Security
+
+- Public HTTPS requests validate and pin every connection to an approved public address while preserving hostname, certificate, and redirect checks.
+- Any approved claim or source drift transitions draft work to `needs_reapproval` before model invocation.
+
 ## [0.3.5] - 2026-07-23
 
 ### Added
@@ -50,6 +104,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Manual submissions require CSRF protection plus the current versioned confirmation value, and remain unavailable for archived, withdrawn, claim-less, or source-less stories.
 - Internal gate, warning, and manual-override labels are rejected from generated content and never appear in Markdown or HTML exports.
 
+## [0.3.3] - 2026-07-21
+
+### Added
+
+- Schema 4 stores hosting publisher, original reporting publisher, original URL, provenance type, and suggested versus human-confirmed origin.
+- Evidence review now distinguishes original reporting, syndication, citation, and unknown provenance.
+- Draft packets use validated citation tokens that render as safe portable Markdown links.
+
+### Changed
+
+- Independent Reporting evidence is counted by confirmed original publisher rather than hosting domain.
+- Claim relationships display the natural label `Reports or attributes the claim` while preserving the existing internal value.
+- Drafting prompts require named publication attribution and a compact two-paragraph structure.
+
+### Fixed
+
+- Multiple hosts repeating or citing the same original report count as one reporting origin.
+- Mechanical phrases such as `Reporting attributes` are rejected from generated briefs.
+- HTML export renders only validated inline Markdown links and escapes all other content.
+
 ## [0.3.2] - 2026-07-21
 
 ### Added
@@ -84,6 +158,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - CISA remains disabled because the declared product client receives HTTP 403; the application does not disguise its user agent or bypass access controls.
 - SEC collection remains excluded by operator choice and makes no requests.
+
+## [0.3.0] - 2026-07-14
+
+### Added
+
+- Local loopback-only review dashboard with Overview, Review inbox, Drafts, Sources and health, Schedule and usage, and Settings and data.
+- Local SQLite corpus, content-addressed evidence, deterministic source adapters, clustering, evidence qualification, watches, corrections, drafts, diagnostics, and purge previews.
+- User-level macOS scheduling at minute `00` and `30` with bounded recovery and explicit older catch-up intervals.
+- Neutral and separately labelled open-source-lens drafting behind explicit human approval.
+
+### Security
+
+- Runtime data is kept outside Git, the interface is loopback-only, and publishing remains manual.
+- No API key, paid fallback, cloud synchronization, backup, or destination integration is included.
+
+**Inherited Last30Days history**
+
+The entries below predate the Open Source AI News Wire application and are preserved for upstream attribution.
 
 ## [3.14.0] - 2026-07-12
 
