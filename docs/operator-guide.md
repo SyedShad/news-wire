@@ -13,6 +13,10 @@ open-source-ai-news-wire dashboard
 
 Use `schedule run-now` for an immediate bounded scan. A second trigger coalesces into the durable queue instead of starting another worker.
 
+The review inbox opens to `Review Now`: unresolved signals, watches, and candidates whose First-Public Time or genuine material update is within 24 hours. It is ordered by current review score and limited to 25 stories per page. Use `Newest first` when chronological triage is more useful, `Older Context` for material outside the live window, and `All History` for audit work. Catch-up remains an ingestion label and never makes old news fresh.
+
+Cards separate durable impact, current attention, and verification. A high-engagement item may read `High attention · verification pending`; source or account breadth never qualifies the evidence gate.
+
 ## Scheduling
 
 ```bash

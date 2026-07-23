@@ -39,13 +39,13 @@
   <section class="panel priority-panel">
     <div class="panel-heading">
       <div><p class="section-index">01</p><h2>Priority wire</h2></div>
-      <a href="{{ url_for('inbox') }}">See all {{ data.counts.candidates + data.counts.watches + data.counts.draft_ready }} items</a>
+      <a href="{{ url_for('inbox') }}">See all {{ data.counts.review_now }} current items</a>
     </div>
     <div class="story-list">
       {% for story in data.top_stories %}
         {% include "partials/story_card.html" %}
       {% else %}
-        <div class="empty-state"><strong>No qualified stories yet.</strong><span>The next scout will add new signals here.</span></div>
+        <div class="empty-state"><strong>No current review work.</strong><span>The next scout will add new signals here.</span></div>
       {% endfor %}
     </div>
   </section>

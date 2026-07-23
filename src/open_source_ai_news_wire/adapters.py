@@ -7,7 +7,7 @@ import html
 import json
 import re
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
@@ -26,6 +26,7 @@ class Observation:
     published_at: str
     summary: str = ""
     language: str = "und"
+    metadata: dict[str, object] = field(default_factory=dict)
 
     @property
     def fingerprint(self) -> str:
@@ -34,7 +35,12 @@ class Observation:
 
     @property
     def content_hash(self) -> str:
-        return hashlib.sha256(f"{self.title}\n{self.summary}".encode("utf-8")).hexdigest()
+        # Mutable counters and other attention metadata must not promote a
+        # routine rescan into a material editorial update.  Adapters may
+        # provide a stable claim-bearing summary while retaining their full
+        # display summary and metrics separately.
+        material_summary = str(self.metadata.get("material_summary", self.summary))
+        return hashlib.sha256(f"{self.title}\n{material_summary}".encode("utf-8")).hexdigest()
 
 
 def canonical_url(value: str, base_url: str) -> str:
@@ -413,6 +419,162 @@ def parse_huggingnews(payload: bytes, *, source_url: str, observed_at: str, limi
     return observations
 
 
+def _huggingnews_millis(value: object, fallback: str) -> str:
+    if value is None:
+        return fallback
+    try:
+        moment = datetime.fromtimestamp(float(value) / 1000, tz=UTC)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise AdapterError("Invalid HuggingNews timestamp") from error
+    return moment.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_huggingnews_json(
+    payload: bytes,
+    *,
+    source_url: str,
+    observed_at: str,
+    limit: int = 200,
+) -> list[Observation]:
+    """Parse the documented anonymous latest-feed contract."""
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AdapterError("Malformed HuggingNews JSON") from error
+    if not isinstance(value, dict):
+        raise AdapterError("HuggingNews JSON is not an object")
+    if isinstance(value.get("dayGroups"), list):
+        groups = value["dayGroups"]
+    elif isinstance(value.get("stories"), list):
+        # The documented anonymous search contract uses a top-level list.
+        groups = [{"stories": value["stories"]}]
+    else:
+        raise AdapterError("HuggingNews JSON does not contain dayGroups or stories")
+    observations: list[Observation] = []
+    for group in groups:
+        if not isinstance(group, dict) or not isinstance(group.get("stories"), list):
+            continue
+        for row in group["stories"]:
+            if not isinstance(row, dict):
+                continue
+            slug = str(row.get("slug") or "").strip()
+            title = str(row.get("title") or "").strip()
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]{2,199}", slug) or len(title) < 12:
+                continue
+            try:
+                published_at = _huggingnews_millis(row.get("publishedAt"), observed_at)
+            except AdapterError:
+                continue
+            event_value = str(row.get("eventTimeApprox") or "").strip()
+            if event_value:
+                try:
+                    event_at = parse_public_time(event_value, published_at)
+                except AdapterError:
+                    event_at = published_at
+            else:
+                event_at = published_at
+            topic_tags = [
+                {"slug": str(tag.get("slug") or "")[:100], "name": str(tag.get("name") or "")[:100]}
+                for tag in row.get("topicTags", [])
+                if isinstance(tag, dict) and tag.get("slug")
+            ]
+            topic_names = ", ".join(tag["name"] for tag in topic_tags if tag["name"])
+            observations.append(
+                Observation(
+                    external_id=slug,
+                    title=title[:500],
+                    url=f"https://huggingnews.com/ai/{slug}",
+                    published_at=event_at,
+                    summary=f"HuggingNews discovery topics: {topic_names}."[:4000],
+                    metadata={
+                        "slug": slug,
+                        "aggregator_published_at": published_at,
+                        "event_time_approx": event_at,
+                        "topic_tags": topic_tags,
+                    },
+                )
+            )
+            if len(observations) >= limit:
+                return observations
+    return observations
+
+
+def enrich_huggingnews_detail(observation: Observation, payload: bytes) -> Observation:
+    """Attach bounded reference metadata and public Discovery leads."""
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AdapterError("Malformed HuggingNews detail JSON") from error
+    if not isinstance(value, dict) or str(value.get("slug") or "") != observation.external_id:
+        raise AdapterError("HuggingNews detail does not match the requested story")
+    selected: list[dict[str, object]] = []
+    short_links: set[str] = set()
+    for item in value.get("selectedTweets", []):
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        try:
+            normalized = canonical_url(url, "https://x.com/")
+        except AdapterError:
+            continue
+        if urlsplit(normalized).hostname not in {"x.com", "www.x.com", "twitter.com", "www.twitter.com"}:
+            continue
+        text = str(item.get("text") or "")[:4000]
+        quoted_text = str(item.get("quotedTweetText") or "")[:4000]
+        for candidate in re.findall(r"https://t\.co/[A-Za-z0-9]+", f"{text} {quoted_text}"):
+            short_links.add(candidate)
+        selected.append(
+            {
+                "external_id": normalized,
+                "author_handle": str(item.get("authorHandle") or "").lstrip("@").lower()[:100],
+                "url": normalized,
+                "published_at": _huggingnews_millis(item.get("tweetedAt"), observation.published_at),
+                "text": text,
+                "quoted_text": quoted_text,
+            }
+        )
+    metadata = dict(observation.metadata)
+    metadata.update(
+        {
+            "reference_summary": str(value.get("summary") or "")[:8000],
+            "selected_tweets": selected[:50],
+            "short_links": sorted(short_links)[:50],
+            "distinct_identity_count": len({item["author_handle"] for item in selected if item["author_handle"]}),
+            "detail_fetched": True,
+        }
+    )
+    return Observation(
+        observation.external_id,
+        observation.title,
+        observation.url,
+        observation.published_at,
+        observation.summary,
+        observation.language,
+        metadata,
+    )
+
+
+def parse_huggingnews_momentum(payload: bytes) -> dict[str, dict[str, int]]:
+    """Parse only the public, visible rank and post/account counters."""
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise AdapterError("HuggingNews listing is not UTF-8") from error
+    result: dict[str, dict[str, int]] = {}
+    pattern = re.compile(
+        r"story-row-link[^>]*href=[\"']/(?:ai|cybersecurity|tech|startups|earnings)/(?P<slug>[a-z0-9-]+)[\"'].*?"
+        r"story-rank[^>]*>(?P<rank>\d+)</div>.*?meta-signal[^>]*>(?P<posts>\d+)\s*/\s*(?P<accounts>\d+)</span>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    for match in pattern.finditer(text):
+        result[match.group("slug")] = {
+            "daily_rank": int(match.group("rank")),
+            "post_count": int(match.group("posts")),
+            "account_count": int(match.group("accounts")),
+        }
+    return result
+
+
 def parse_mastodon_signal(payload: bytes, *, source_url: str, observed_at: str, limit: int = 200) -> list[Observation]:
     try:
         root = ET.fromstring(payload)
@@ -484,6 +646,8 @@ def parse_source(
         return parse_cisa_advisories(payload, source_url=source_url, observed_at=observed_at)
     if adapter == "huggingnews":
         return parse_huggingnews(payload, source_url=source_url, observed_at=observed_at)
+    if adapter == "huggingnews_json":
+        return parse_huggingnews_json(payload, source_url=source_url, observed_at=observed_at)
     if adapter == "mastodon_signal":
         return parse_mastodon_signal(payload, source_url=source_url, observed_at=observed_at)
     raise AdapterError(f"Unsupported adapter: {adapter}")

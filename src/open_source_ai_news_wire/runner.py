@@ -166,7 +166,7 @@ class Worker:
                         (now.isoformat().replace("+00:00", "Z"), watch["id"]),
                     )
                     connection.execute(
-                        "UPDATE story_cluster SET status = 'signal', watch_status = 'Expired', updated_at = ? WHERE id = ? AND status = 'watch'",
+                        "UPDATE story_cluster SET status = 'signal', priority = 'Standard', watch_status = 'Expired', updated_at = ? WHERE id = ? AND status = 'watch'",
                         (now.isoformat().replace("+00:00", "Z"), watch["story_id"]),
                     )
                     continue

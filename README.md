@@ -7,7 +7,8 @@ Reporting is neutral by default. The evidence-qualified path offers a separately
 ## V1 capabilities
 
 - Dated registry covering official AI organizations, open ecosystems, research, government and law, corporate filings, safety and security, independent reporting, aggregators, public newsletters, and accessible social signals.
-- Incremental RSS/Atom, JSON, sitemap, GitHub-release, research-feed, and dedicated dated Anthropic, Meta, CISA, HuggingNews, and Mastodon adapters with bounded SSRF-resistant networking.
+- Incremental RSS/Atom, JSON, sitemap, GitHub-release, research-feed, and dedicated dated Anthropic, Meta, CISA, HuggingNews JSON, and Mastodon adapters with bounded SSRF-resistant networking.
+- Dynamic 24-hour Review Now ranking that separates durable importance, current review priority, source momentum, and verification; older context and material-update re-entry remain explicit.
 - Evidence-aware clustering, primary/independent-confirmation gates, evidence-first qualification, separately audited manual candidate overrides, candidate and watch lifecycles, correction handling, and 72-hour automatic recovery.
 - Local SQLite and content-addressed evidence storage outside Git, with explicit migration, diagnostics, integrity, storage-pressure, and purge operations.
 - User-level macOS LaunchAgent at minute `00` and `30`, plus login/load recovery. It runs while the Mac is locked and awake, but does not prevent sleep or change power policy.
@@ -36,7 +37,7 @@ Open the on-demand interface with:
 
 The dashboard binds only to loopback, selects a random port, and requires its one-time process-local access link. See [docs/operator-guide.md](docs/operator-guide.md) for routine operation and recovery.
 
-Release `0.3.4` uses schema version 5. Reporting qualification follows the human-confirmed original publisher, so syndications of one report cannot masquerade as independent confirmation. When normal qualification is locked, the dashboard can record a separately warned manual override and immediately create either drafting mode from the stored claims and safe public sources. Automated gate results remain unchanged, while generated drafts and exports contain no internal warning language. The half-hour worker remains a recovery fallback. After completing a real evidence-to-revised-draft workflow, run the notification canary and `pilot extend-validation --auto-activate`; `pilot readiness` reports every activation gate.
+Release `0.3.5` uses schema version 6. `Review Now` contains only unresolved stories published or materially updated within 24 hours and calculates its score from the current clock; older work moves to `Older Context`, while `Newest first` is available as an alternate sort. HuggingNews uses its documented anonymous JSON API, preserves its approximate event time, and exposes selected public posts and safely resolved links as Discovery leads. Source breadth and engagement affect attention only and can never satisfy verification. Reporting qualification continues to follow the human-confirmed original publisher, and manual drafting approval remains a separately warned editorial override. The half-hour worker remains the recovery fallback.
 
 ## Development and verification
 

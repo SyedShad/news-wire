@@ -1,0 +1,20 @@
+{
+  "dayGroups": [
+    {
+      "dayKey": "2026-07-23",
+      "stories": [
+        {
+          "slug": "open-model-release-abc123",
+          "title": "Open Lab Releases a New Open-Weight AI Model",
+          "publishedAt": 1784793600000,
+          "eventTimeApprox": "2026-07-23T07:15:00Z",
+          "topicTags": [
+            {"slug": "ai-open-models", "name": "AI Open Source"}
+          ]
+        }
+      ]
+    }
+  ],
+  "hasMore": false,
+  "lastUpdatedAt": 1784797200000
+}

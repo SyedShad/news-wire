@@ -6,7 +6,7 @@ import ipaddress
 import socket
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -21,6 +21,21 @@ class ResponseTooLarge(RuntimeError):
 
 class NetworkUnavailable(ConnectionError):
     """Raised when the host network cannot currently resolve a public source."""
+
+
+def _validated_public_https_url(value: str) -> tuple[str, str]:
+    if not value or len(value) > 2048:
+        raise UnsafeRequest("Public link is missing or too long")
+    parsed = urlsplit(value)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.scheme.lower() != "https" or not host:
+        raise UnsafeRequest("Public links must use HTTPS")
+    if parsed.username or parsed.password:
+        raise UnsafeRequest("Embedded URL credentials are prohibited")
+    if parsed.port not in {None, 443}:
+        raise UnsafeRequest("Public links must use the standard HTTPS port")
+    normalized = urlunsplit(("https", host, parsed.path or "/", parsed.query, ""))
+    return normalized, host
 
 
 Resolver = Callable[[str], Iterable[str]]
@@ -158,3 +173,61 @@ class SafeHttpClient:
                 self.client.cookies.clear()
                 return FetchResult(current, response.status_code, dict(response.headers), bytes(body))
         raise UnsafeRequest("Redirect processing failed")
+
+
+def resolve_known_short_url(
+    url: str,
+    *,
+    short_hosts: Iterable[str] = ("t.co",),
+    resolver: Resolver = system_resolver,
+    transport: httpx.BaseTransport | None = None,
+    maximum_redirects: int = 4,
+) -> str:
+    """Resolve an allowlisted public short URL without relaxing source fetch rules."""
+    current, initial_host = _validated_public_https_url(url)
+    allowed_short_hosts = {host.lower().rstrip(".") for host in short_hosts}
+    if initial_host not in allowed_short_hosts:
+        raise UnsafeRequest("Only known public short-link hosts may be resolved")
+
+    resolved_addresses: dict[str, tuple[str, ...]] = {}
+
+    def validate(value: str) -> str:
+        normalized, host = _validated_public_https_url(value)
+        addresses = tuple(sorted(set(resolver(host))))
+        if not addresses or any(not _public_address(address) for address in addresses):
+            raise UnsafeRequest("Short-link hop did not resolve exclusively to public addresses")
+        previous = resolved_addresses.get(host)
+        if previous is not None and previous != addresses:
+            raise UnsafeRequest("Short-link DNS resolution changed during one request")
+        resolved_addresses[host] = addresses
+        return normalized
+
+    client = httpx.Client(
+        follow_redirects=False,
+        timeout=httpx.Timeout(connect=8, read=10, write=10, pool=8),
+        transport=transport,
+        trust_env=False,
+        headers={
+            "User-Agent": "OpenSourceAINewsWire/0.3.5 (+local viability pilot)",
+            "Accept": "text/html, application/xhtml+xml;q=0.8, */*;q=0.1",
+        },
+    )
+    try:
+        for redirect_count in range(maximum_redirects + 1):
+            current = validate(current)
+            with client.stream("GET", current) as response:
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    if redirect_count >= maximum_redirects:
+                        raise UnsafeRequest("Too many short-link redirects")
+                    location = response.headers.get("location")
+                    if not location:
+                        raise UnsafeRequest("Short-link redirect omitted its destination")
+                    current = validate(urljoin(current, location))
+                    client.cookies.clear()
+                    continue
+                response.raise_for_status()
+                client.cookies.clear()
+                return current
+    finally:
+        client.close()
+    raise UnsafeRequest("Short-link redirect processing failed")

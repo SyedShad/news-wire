@@ -1,0 +1,19 @@
+{
+  "query": "open models",
+  "stories": [
+    {
+      "slug": "valid-open-model-story-abc123",
+      "title": "A Valid Open Model Story With Search Context",
+      "publishedAt": 1784793600000,
+      "eventTimeApprox": "not-a-time",
+      "topicTags": []
+    },
+    {
+      "slug": "invalid-time-story-abc123",
+      "title": "An Invalid Timestamp Does Not Disable the Whole Feed",
+      "publishedAt": "invalid"
+    },
+    {"slug": "missing-title-abc123", "publishedAt": 1784793600000}
+  ],
+  "truncated": false
+}

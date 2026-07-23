@@ -17,6 +17,7 @@ Operate the local, destination-neutral AI news-monitoring and editorial-review s
 ## Choose the workflow
 
 - For current coverage, source health, queue state, or usage: inspect `status`, `sources health`, or launch `dashboard`.
+- For editorial triage: use the default 24-hour `Review Now` queue. Breaking means at most two hours, Fresh means over two through 24 hours, and an older story re-enters only as Updated after a genuine material development. Use `Newest first` when chronology matters; use `Older Context` or `All History` deliberately.
 - For a signal the human wants to verify normally: inspect its linked public page or attach a public HTTPS source, confirm the source role and claim relationships, then qualify it. Reporting evidence also requires a human-confirmed original publisher and provenance type; syndications or citations of one origin count once. Normal qualification requires one first-party Event source or two independent original reporting publishers; only automated importance may be overridden, with a recorded reason.
 - For a signal the human explicitly chooses despite locked gates: use the dashboard's **Manually approve and create** control for the selected mode. The native confirmation records a manual override of evidence, importance, and lens eligibility without changing those automated results. Do not describe this as verification. Archived, withdrawn, claim-less, or source-less stories cannot use it.
 - For fresh retrieval: use `schedule run-now` or `scan --trigger manual`. Do not create parallel scans; the worker coalesces overlap.
@@ -36,6 +37,7 @@ Operate the local, destination-neutral AI news-monitoring and editorial-review s
 - Never publish automatically.
 - Keep normal-path reporting neutral unless a Strong or Moderate open-source opportunity has a specific mechanism, evidence, counterargument, and explicit lens approval. A human-confirmed manual lens override may bypass that eligibility check; preserve the labelled lens structure and editorial tradeoffs.
 - Treat discovery feeds and popularity as signals, not verification.
+- Treat HuggingNews summaries, selected public posts, source breadth, ranks, and engagement as Discovery momentum only. Safely inspected linked pages still require human role and provenance confirmation before they affect verification.
 - Keep normal qualification and drafting approval separate. Manual candidate approval is a distinct, warned override that may bypass drafting gates but must preserve their failed state and its audit snapshot.
 - Never place manual-override badges, gate names, or system labels such as `unverified` or `provisional` into draft copy or exports.
 - Preserve First-Public Time during catch-up; do not relabel older material as breaking.

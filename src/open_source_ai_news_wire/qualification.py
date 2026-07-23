@@ -60,6 +60,9 @@ class Qualification:
     freshness: str
     score: int
     impact_score: int
+    novelty_score: int
+    source_significance: int
+    importance_score: int
     priority: str
     importance_gate: bool
     opportunity_strength: str | None
@@ -69,7 +72,51 @@ class Qualification:
     reasons: tuple[str, ...]
 
 
-def qualify(observation: Observation, source: dict[str, object], *, observed_at: str) -> Qualification:
+def importance_components(
+    title: str,
+    summary: str,
+    source_roles: list[str] | tuple[str, ...],
+    *,
+    novelty: int,
+    assume_relevant: bool = False,
+) -> dict[str, int]:
+    """Return durable importance components without any age contribution."""
+    text = f"{title} {summary}".lower()
+    relevant = assume_relevant or bool(_contains(text, AI_TERMS))
+    impact_matches = _contains(text, IMPACT_TERMS)
+    material = min(40, 12 + len(impact_matches) * 7) if relevant else 0
+    significance = max(
+        (10 if role == "Event" else 7 if role == "Reporting" else 3 for role in source_roles),
+        default=0,
+    )
+    novelty_score = max(0, min(10, int(novelty)))
+    return {
+        "material_importance": material,
+        "novelty": novelty_score,
+        "source_significance": significance,
+        "total": min(60, material + novelty_score + significance),
+    }
+
+
+def freshness_points(age_hours: float) -> int:
+    if age_hours <= 2:
+        return 15
+    if age_hours <= 6:
+        return 12
+    if age_hours <= 12:
+        return 9
+    if age_hours <= 24:
+        return 5
+    return 0
+
+
+def qualify(
+    observation: Observation,
+    source: dict[str, object],
+    *,
+    observed_at: str,
+    novelty: int = 10,
+) -> Qualification:
     text = _normalized_text(observation)
     ai_matches = _contains(text, AI_TERMS)
     family = str(source.get("family", ""))
@@ -102,22 +149,26 @@ def qualify(observation: Observation, source: dict[str, object], *, observed_at:
     published = datetime.fromisoformat(observation.published_at.replace("Z", "+00:00"))
     detected = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
     age_hours = max(0.0, (detected.astimezone(UTC) - published.astimezone(UTC)).total_seconds() / 3600)
-    freshness = "Breaking" if age_hours <= 2 else "Fresh" if age_hours <= 6 else "Catch-Up"
+    freshness = "Breaking" if age_hours <= 2 else "Fresh" if age_hours <= 24 else "Older"
 
-    impact_matches = _contains(text, IMPACT_TERMS)
-    impact_score = min(40, 12 + len(impact_matches) * 7) if relevant else 0
-    time_score = 20 if freshness == "Breaking" else 12 if freshness == "Fresh" else 4
-    freshness_score = 15 if freshness == "Breaking" else 10 if freshness == "Fresh" else 3
-    novelty_score = 10
     role = str(source.get("monitoring_role", "Discovery"))
-    source_score = 10 if role == "Event" else 7 if role == "Reporting" else 3
-    score = min(100, impact_score + time_score + freshness_score + novelty_score + source_score)
-    importance_gate = relevant and impact_score >= 26 and score >= 60
+    components = importance_components(
+        observation.title,
+        observation.summary,
+        [role],
+        novelty=novelty,
+        assume_relevant=relevant,
+    )
+    impact_matches = _contains(text, IMPACT_TERMS)
+    impact_score = components["material_importance"]
+    evidence_score = 15 if role == "Event" else 0
+    score = min(100, components["total"] + evidence_score + freshness_points(age_hours))
+    importance_gate = relevant and impact_score >= 26 and components["total"] >= 40
     priority = (
         "Urgent"
-        if score >= 80 and impact_score >= 33
+        if score >= 80
         else "High"
-        if score >= 60 and impact_score >= 26
+        if score >= 65
         else "Standard"
     )
 
@@ -148,6 +199,9 @@ def qualify(observation: Observation, source: dict[str, object], *, observed_at:
         freshness=freshness,
         score=score,
         impact_score=impact_score,
+        novelty_score=components["novelty"],
+        source_significance=components["source_significance"],
+        importance_score=components["total"],
         priority=priority,
         importance_gate=importance_gate,
         opportunity_strength=opportunity_strength,

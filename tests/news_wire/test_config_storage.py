@@ -290,6 +290,60 @@ def test_v5_migration_adds_manual_override_audit_without_changing_existing_candi
     }
 
 
+def test_v6_migration_adds_dynamic_ranking_state_without_reusing_generic_update_time(
+    tmp_path: Path,
+) -> None:
+    paths = resolve_runtime_paths(tmp_path / "wire-data")
+    ensure_runtime_layout(paths)
+    old = "2026-07-13T08:00:00Z"
+    recent_generic_update = "2026-07-23T08:00:00Z"
+    with sqlite3.connect(paths.database) as connection:
+        connection.executescript(SCHEMA_V1)
+        for version in (2, 3, 4, 5):
+            for statement in MIGRATIONS[version]:
+                connection.execute(statement)
+        connection.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', '5')")
+        connection.execute(
+            """
+            INSERT INTO story_cluster(
+                id, slug, headline, summary, lane, openness_class, status, priority,
+                priority_score, freshness, first_public_at, detected_at,
+                watch_status, material_update, created_at, updated_at
+            ) VALUES('old-watch', 'old-watch', 'AI model security release', 'AI regulation update',
+                     'Broader AI News', 'not stated', 'signal', 'High potential', 88,
+                     'Breaking', ?, ?, 'Expired', 1, ?, ?)
+            """,
+            (old, old, old, recent_generic_update),
+        )
+        connection.execute(
+            """
+            INSERT INTO source_item(
+                story_id, source_name, source_role, title, url, published_at
+            ) VALUES('old-watch', 'Old discovery feed', 'Discovery',
+                     'AI model security release', 'https://example.com/story', ?)
+            """,
+            (old,),
+        )
+        connection.commit()
+
+    database = Database(paths)
+    assert database.migrate() == 6
+    story = database.one(
+        """
+        SELECT importance_score, material_updated_at, ingestion_context, priority,
+               priority_score, freshness FROM story_cluster WHERE id = 'old-watch'
+        """
+    )
+    assert story["importance_score"] > 0
+    assert story["material_updated_at"] is None
+    assert story["ingestion_context"] == "legacy"
+    assert story["priority"] == "Standard"
+    assert story["priority_score"] == 88
+    assert story["freshness"] == "Breaking"
+    assert database.one("SELECT COUNT(*) AS count FROM discovery_lead") == {"count": 0}
+    assert database.one("SELECT COUNT(*) AS count FROM momentum_snapshot") == {"count": 0}
+
+
 def test_storage_pressure_levels_can_be_forced(tmp_path: Path) -> None:
     database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
     database.initialize()

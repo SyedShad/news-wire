@@ -15,7 +15,7 @@ from typing import Any
 from .config import RuntimePaths, ensure_runtime_layout
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class MigrationRequired(RuntimeError):
@@ -445,6 +445,47 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE candidate ADD COLUMN manual_override_action_id INTEGER REFERENCES review_action(id)",
         "ALTER TABLE candidate ADD COLUMN manual_override_snapshot_json TEXT NOT NULL DEFAULT '{}'",
     ),
+    6: (
+        "ALTER TABLE story_cluster ADD COLUMN importance_score INTEGER NOT NULL DEFAULT 0 CHECK(importance_score BETWEEN 0 AND 60)",
+        "ALTER TABLE story_cluster ADD COLUMN importance_json TEXT NOT NULL DEFAULT '{}'",
+        "ALTER TABLE story_cluster ADD COLUMN material_updated_at TEXT",
+        "ALTER TABLE story_cluster ADD COLUMN ingestion_context TEXT NOT NULL DEFAULT 'legacy'",
+        """
+        CREATE TABLE discovery_lead (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            story_id TEXT NOT NULL REFERENCES story_cluster(id) ON DELETE CASCADE,
+            via_source_id TEXT NOT NULL REFERENCES source_registry(id) ON DELETE CASCADE,
+            external_id TEXT NOT NULL,
+            identity_key TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            published_at TEXT NOT NULL,
+            lead_type TEXT NOT NULL DEFAULT 'public_post',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(via_source_id, external_id)
+        )
+        """,
+        """
+        CREATE TABLE momentum_snapshot (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            story_id TEXT NOT NULL REFERENCES story_cluster(id) ON DELETE CASCADE,
+            source_id TEXT NOT NULL REFERENCES source_registry(id) ON DELETE CASCADE,
+            captured_at TEXT NOT NULL,
+            native_score REAL NOT NULL DEFAULT 0,
+            post_count INTEGER,
+            account_count INTEGER,
+            daily_rank INTEGER,
+            distinct_identity_count INTEGER NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            UNIQUE(story_id, source_id, captured_at)
+        )
+        """,
+        "CREATE INDEX idx_story_current_review ON story_cluster(status, first_public_at DESC, material_updated_at DESC)",
+        "CREATE INDEX idx_discovery_lead_story ON discovery_lead(story_id, identity_key)",
+        "CREATE INDEX idx_momentum_story_time ON momentum_snapshot(story_id, captured_at DESC)",
+    ),
 }
 
 
@@ -689,6 +730,59 @@ class Database:
                                 }),
                             ),
                         )
+                if version == 5:
+                    from .qualification import importance_components
+
+                    rows = connection.execute(
+                        "SELECT id, headline, summary FROM story_cluster"
+                    ).fetchall()
+                    for row in rows:
+                        roles = [
+                            str(item["source_role"])
+                            for item in connection.execute(
+                                "SELECT DISTINCT source_role FROM source_item WHERE story_id = ?",
+                                (row["id"],),
+                            ).fetchall()
+                        ]
+                        components = importance_components(
+                            str(row["headline"]),
+                            str(row["summary"]),
+                            roles,
+                            # Schema 6 deliberately does not pretend that a
+                            # legacy record's novelty can be reconstructed.
+                            novelty=0,
+                            assume_relevant=True,
+                        )
+                        connection.execute(
+                            """
+                            UPDATE story_cluster
+                            SET importance_score = ?, importance_json = ?,
+                                material_updated_at = NULL, ingestion_context = 'legacy'
+                            WHERE id = ?
+                            """,
+                            (components["total"], self.json(components), row["id"]),
+                        )
+                        connection.execute(
+                            """
+                            UPDATE candidate
+                            SET importance_gate = MAX(importance_gate, ?)
+                            WHERE story_id = ?
+                            """,
+                            (
+                                int(
+                                    components["material_importance"] >= 26
+                                    and components["total"] >= 40
+                                ),
+                                row["id"],
+                            ),
+                        )
+                    connection.execute(
+                        """
+                        UPDATE story_cluster
+                        SET priority = 'Standard'
+                        WHERE watch_status = 'Expired' AND status = 'signal'
+                        """
+                    )
                 connection.execute(
                     "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                     (str(target),),

@@ -13,9 +13,23 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from .adapters import AdapterError, Observation, parse_source
-from .network import FetchResult, NetworkUnavailable, ResponseTooLarge, SafeHttpClient, UnsafeRequest
+from .adapters import (
+    AdapterError,
+    Observation,
+    enrich_huggingnews_detail,
+    parse_huggingnews_momentum,
+    parse_source,
+)
+from .network import (
+    FetchResult,
+    NetworkUnavailable,
+    ResponseTooLarge,
+    SafeHttpClient,
+    UnsafeRequest,
+    resolve_known_short_url,
+)
 from .qualification import Qualification, qualify
+from .evidence import publisher_key
 from .settings import load_settings
 from .source_registry import synchronize_sources
 from .storage import Database
@@ -63,10 +77,12 @@ class Collector:
         *,
         client_factory: ClientFactory = _default_client_factory,
         now: Callable[[], str] = utc_now,
+        short_link_resolver: Callable[[str], str] = resolve_known_short_url,
     ):
         self.database = database
         self.client_factory = client_factory
         self.now = now
+        self.short_link_resolver = short_link_resolver
 
     def scan(
         self,
@@ -141,19 +157,24 @@ class Collector:
                         etag=source.get("etag"),
                         last_modified=source.get("last_modified"),
                     )
-                observations = [] if fetched.not_modified else parse_source(
-                    str(source["adapter"]),
-                    fetched.body,
-                    source_url=fetched.url,
-                    observed_at=self.now(),
-                )
-                observations = self._contextualize_release_titles(source, observations)
-                observations = self._definition_filtered_observations(source, observations)
-                observations = self._incremental_observations(
-                    source, observations, interval_start, interval_end
-                )
+                    observations = [] if fetched.not_modified else parse_source(
+                        str(source["adapter"]),
+                        fetched.body,
+                        source_url=fetched.url,
+                        observed_at=self.now(),
+                    )
+                    observations = self._contextualize_release_titles(source, observations)
+                    observations = self._contextualize_native_metrics(source, observations)
+                    observations = self._definition_filtered_observations(source, observations)
+                    if source["adapter"] == "huggingnews_json" and observations:
+                        observations = self._huggingnews_momentum(client, observations)
+                    observations = self._incremental_observations(
+                        source, observations, interval_start, interval_end
+                    )
+                    if source["adapter"] == "huggingnews_json" and observations:
+                        observations = self._huggingnews_details(client, source, observations)
                 new_count = self._record_success(
-                    source, transaction_id, fetched, observations
+                    source, transaction_id, fetched, observations, trigger=trigger
                 )
                 successes += 1
                 discovered += new_count
@@ -259,9 +280,145 @@ class Collector:
                     item.published_at,
                     item.summary,
                     item.language,
+                    item.metadata,
                 )
             )
         return contextualized
+
+    @staticmethod
+    def _contextualize_native_metrics(
+        source: dict[str, Any], observations: list[Observation]
+    ) -> list[Observation]:
+        if source.get("id") != "hacker-news-ai":
+            return observations
+        enriched: list[Observation] = []
+        for item in observations:
+            points_match = re.search(r"\bPoints:\s*(\d+)", item.summary, re.IGNORECASE)
+            comments_match = re.search(r"#\s*Comments:\s*(\d+)", item.summary, re.IGNORECASE)
+            points = int(points_match.group(1)) if points_match else 0
+            comments = int(comments_match.group(1)) if comments_match else 0
+            metadata = dict(item.metadata)
+            metadata.update(
+                {
+                    "points": points,
+                    "comments": comments,
+                    "native_score": float(points + comments * 2),
+                    "material_summary": re.sub(
+                        r"\s*Points:\s*\d+\s*#\s*Comments:\s*\d+\s*$",
+                        "",
+                        item.summary,
+                        flags=re.IGNORECASE,
+                    ).strip(),
+                }
+            )
+            enriched.append(
+                Observation(
+                    item.external_id,
+                    item.title,
+                    item.url,
+                    item.published_at,
+                    item.summary,
+                    item.language,
+                    metadata,
+                )
+            )
+        return enriched
+
+    def _huggingnews_momentum(
+        self,
+        client: SafeHttpClient,
+        observations: list[Observation],
+    ) -> list[Observation]:
+        try:
+            visible = client.fetch("https://huggingnews.com/")
+            metrics = parse_huggingnews_momentum(visible.body)
+        except Exception:
+            metrics = {}
+        enriched: list[Observation] = []
+        for item in observations:
+            metadata = dict(item.metadata)
+            metadata.update(metrics.get(item.external_id, {}))
+            posts = int(metadata.get("post_count") or 0)
+            accounts = int(metadata.get("account_count") or 0)
+            if posts or accounts:
+                metadata["native_score"] = float(accounts * 2 + posts)
+            enriched.append(
+                Observation(
+                    item.external_id,
+                    item.title,
+                    item.url,
+                    item.published_at,
+                    item.summary,
+                    item.language,
+                    metadata,
+                )
+            )
+        return enriched
+
+    def _huggingnews_details(
+        self,
+        client: SafeHttpClient,
+        source: dict[str, Any],
+        observations: list[Observation],
+    ) -> list[Observation]:
+        enriched: list[Observation] = []
+        resolved_count = 0
+        for index, item in enumerate(observations):
+            prior = self.database.one(
+                "SELECT content_hash, metadata_json FROM raw_observation WHERE source_id = ? AND external_id = ?",
+                (source["id"], item.external_id),
+            )
+            prior_metadata: dict[str, Any] = {}
+            if prior:
+                try:
+                    prior_metadata = json.loads(str(prior.get("metadata_json") or "{}"))
+                except json.JSONDecodeError:
+                    prior_metadata = {}
+            needs_detail = (
+                not prior
+                or prior.get("content_hash") != item.content_hash
+                or not prior_metadata.get("detail_fetched")
+            )
+            if not needs_detail or index >= 25:
+                enriched.append(item)
+                continue
+            try:
+                detail = client.fetch(
+                    f"https://api.huggingnews.com/api/stories/{item.external_id}"
+                )
+                detailed = enrich_huggingnews_detail(item, detail.body)
+                metadata = dict(detailed.metadata)
+                public_links: list[dict[str, str]] = []
+                for short_url in metadata.get("short_links", []):
+                    if resolved_count >= 12:
+                        break
+                    try:
+                        final_url = self.short_link_resolver(str(short_url))
+                    except Exception:
+                        continue
+                    resolved_count += 1
+                    if urlsplit(final_url).hostname in {
+                        "x.com", "www.x.com", "twitter.com", "www.twitter.com",
+                    }:
+                        continue
+                    public_links.append(
+                        {"short_url": str(short_url), "url": final_url}
+                    )
+                metadata["public_links"] = public_links
+                enriched.append(
+                    Observation(
+                        detailed.external_id,
+                        detailed.title,
+                        detailed.url,
+                        detailed.published_at,
+                        detailed.summary,
+                        detailed.language,
+                        metadata,
+                    )
+                )
+            except Exception:
+                enriched.append(item)
+        return enriched
 
     @staticmethod
     def _definition_filtered_observations(
@@ -329,11 +486,16 @@ class Collector:
             published = datetime.fromisoformat(item.published_at.replace("Z", "+00:00"))
             newer = cursor_time is None or (published, item.external_id) > (cursor_time, cursor_external)
             prior = self.database.one(
-                "SELECT content_hash FROM raw_observation WHERE source_id = ? AND external_id = ?",
+                "SELECT content_hash, metadata_json FROM raw_observation WHERE source_id = ? AND external_id = ?",
                 (source["id"], item.external_id),
             )
             changed = bool(prior and prior["content_hash"] != item.content_hash)
-            if newer or changed:
+            metadata_changed = bool(
+                prior
+                and str(prior.get("metadata_json") or "{}")
+                != Database.json({"summary": item.summary, **item.metadata})
+            )
+            if newer or changed or metadata_changed:
                 result.append(item)
         return result
 
@@ -352,6 +514,8 @@ class Collector:
         transaction_id: int,
         fetched: FetchResult,
         observations: list[Observation],
+        *,
+        trigger: str,
     ) -> int:
         observed_at = self.now()
         cursor = source.get("cursor")
@@ -364,7 +528,7 @@ class Collector:
             for observation in observations:
                 prior = connection.execute(
                     """
-                    SELECT external_id, content_hash FROM raw_observation
+                    SELECT external_id, content_hash, metadata_json FROM raw_observation
                     WHERE source_id = ? AND (external_id = ? OR fingerprint = ?)
                     ORDER BY CASE WHEN external_id = ? THEN 0 ELSE 1 END
                     LIMIT 1
@@ -380,6 +544,7 @@ class Collector:
                 if prior and prior["external_id"] != observation.external_id:
                     continue
                 material_update = bool(prior and prior["content_hash"] != observation.content_hash)
+                metadata_payload = {"summary": observation.summary, **observation.metadata}
                 connection.execute(
                     """
                     INSERT INTO raw_observation(
@@ -400,16 +565,43 @@ class Collector:
                         source["id"], observation.external_id, observation.url,
                         observation.title, observation.published_at, observed_at,
                         observation.language, observation.fingerprint,
-                        observation.content_hash, Database.json({"summary": observation.summary}),
+                        observation.content_hash, Database.json(metadata_payload),
                     ),
                 )
+                story_id: str | None = None
                 if not prior or material_update:
-                    qualification = qualify(observation, source, observed_at=observed_at)
+                    existing_story = self._find_story(connection, observation) if not prior else None
+                    qualification = qualify(
+                        observation,
+                        source,
+                        observed_at=observed_at,
+                        novelty=8 if material_update else 3 if existing_story else 10,
+                    )
                     if qualification.relevant:
-                        self._persist_story(
-                            connection, source, observation, qualification, observed_at, material_update
+                        story_id = self._persist_story(
+                            connection,
+                            source,
+                            observation,
+                            qualification,
+                            observed_at,
+                            material_update,
+                            ingestion_context=(
+                                "recovery" if trigger == "recovery" else
+                                "extended" if trigger == "extended" else
+                                "scheduled"
+                            ),
                         )
                     changed += 1
+                else:
+                    existing_story = self._find_story(connection, observation)
+                    story_id = str(existing_story["id"]) if existing_story else None
+                if story_id:
+                    self._record_discovery_leads(
+                        connection, story_id, source, observation, observed_at
+                    )
+                    self._record_momentum_snapshot(
+                        connection, story_id, source, observation, observed_at
+                    )
             connection.execute(
                 """
                 UPDATE source_state
@@ -453,6 +645,178 @@ class Collector:
                     ),
                 )
         return changed
+
+    @staticmethod
+    def _record_discovery_leads(
+        connection: Any,
+        story_id: str,
+        source: dict[str, Any],
+        observation: Observation,
+        observed_at: str,
+    ) -> None:
+        leads = observation.metadata.get("selected_tweets", [])
+        if not isinstance(leads, list):
+            return
+        for lead in leads:
+            if not isinstance(lead, dict) or not lead.get("url"):
+                continue
+            identity = str(lead.get("author_handle") or "unknown").lower()[:120]
+            external_id = str(lead.get("external_id") or lead["url"])
+            connection.execute(
+                """
+                INSERT INTO discovery_lead(
+                    story_id, via_source_id, external_id, identity_key,
+                    display_name, url, published_at, lead_type,
+                    metadata_json, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, 'public_post', ?, ?, ?)
+                ON CONFLICT(via_source_id, external_id) DO UPDATE SET
+                    story_id=excluded.story_id,
+                    identity_key=excluded.identity_key,
+                    display_name=excluded.display_name,
+                    url=excluded.url,
+                    published_at=excluded.published_at,
+                    metadata_json=excluded.metadata_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    story_id,
+                    source["id"],
+                    external_id,
+                    identity,
+                    f"@{identity}" if identity != "unknown" else "Public source post",
+                    str(lead["url"]),
+                    str(lead.get("published_at") or observation.published_at),
+                    Database.json({
+                        "text": str(lead.get("text") or "")[:4000],
+                        "quoted_text": str(lead.get("quoted_text") or "")[:4000],
+                        "discovery_via": source["name"],
+                    }),
+                    observed_at,
+                    observed_at,
+                ),
+            )
+        public_links = observation.metadata.get("public_links", [])
+        if not isinstance(public_links, list):
+            return
+        for link in public_links:
+            if not isinstance(link, dict) or not link.get("url"):
+                continue
+            final_url = str(link["url"])
+            external_id = hashlib.sha256(final_url.encode("utf-8")).hexdigest()
+            connection.execute(
+                """
+                INSERT INTO discovery_lead(
+                    story_id, via_source_id, external_id, identity_key,
+                    display_name, url, published_at, lead_type,
+                    metadata_json, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, 'Public link discovered via HuggingNews', ?, ?, 'public_link', ?, ?, ?)
+                ON CONFLICT(via_source_id, external_id) DO UPDATE SET
+                    story_id=excluded.story_id, url=excluded.url,
+                    metadata_json=excluded.metadata_json, updated_at=excluded.updated_at
+                """,
+                (
+                    story_id,
+                    source["id"],
+                    external_id,
+                    (urlsplit(final_url).hostname or "unknown").lower(),
+                    final_url,
+                    observation.published_at,
+                    Database.json({
+                        "short_url": str(link.get("short_url") or ""),
+                        "discovery_via": source["name"],
+                    }),
+                    observed_at,
+                    observed_at,
+                ),
+            )
+            evidence = connection.execute(
+                "SELECT id FROM evidence_source WHERE story_id = ? AND canonical_url = ?",
+                (story_id, final_url),
+            ).fetchone()
+            if evidence:
+                continue
+            evidence_cursor = connection.execute(
+                """
+                INSERT INTO evidence_source(
+                    story_id, requested_url, canonical_url, publisher_key,
+                    acquisition_method, proposed_role, status, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, 'discovery_enrichment', 'Reporting', 'queued', ?, ?)
+                """,
+                (
+                    story_id,
+                    final_url,
+                    final_url,
+                    publisher_key(final_url),
+                    observed_at,
+                    observed_at,
+                ),
+            )
+            evidence_id = int(evidence_cursor.lastrowid)
+            idempotency_key = "evidence:" + story_id + ":" + hashlib.sha256(
+                final_url.encode("utf-8")
+            ).hexdigest()
+            connection.execute(
+                """
+                INSERT INTO work_item(
+                    kind, story_id, status, priority, payload_json, created_at,
+                    updated_at, idempotency_key, available_at
+                ) VALUES('evidence_enrichment', ?, 'queued', 70, ?, ?, ?, ?, ?)
+                ON CONFLICT(idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+                """,
+                (
+                    story_id,
+                    Database.json({"schema_version": 1, "evidence_source_id": evidence_id}),
+                    observed_at,
+                    observed_at,
+                    idempotency_key,
+                    observed_at,
+                ),
+            )
+
+    @staticmethod
+    def _record_momentum_snapshot(
+        connection: Any,
+        story_id: str,
+        source: dict[str, Any],
+        observation: Observation,
+        observed_at: str,
+    ) -> None:
+        metadata = observation.metadata
+        post_count = int(metadata.get("post_count") or 0)
+        account_count = max(
+            int(metadata.get("account_count") or 0),
+            int(metadata.get("distinct_identity_count") or 0),
+        )
+        daily_rank = int(metadata.get("daily_rank") or 0)
+        native_score = float(metadata.get("native_score") or 0)
+        if not any((post_count, account_count, daily_rank, native_score)):
+            return
+        connection.execute(
+            """
+            INSERT INTO momentum_snapshot(
+                story_id, source_id, captured_at, native_score, post_count,
+                account_count, daily_rank, distinct_identity_count, metadata_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(story_id, source_id, captured_at) DO UPDATE SET
+                native_score=excluded.native_score,
+                post_count=excluded.post_count,
+                account_count=excluded.account_count,
+                daily_rank=excluded.daily_rank,
+                distinct_identity_count=excluded.distinct_identity_count,
+                metadata_json=excluded.metadata_json
+            """,
+            (
+                story_id,
+                source["id"],
+                observed_at,
+                native_score,
+                post_count or None,
+                account_count or None,
+                daily_rank or None,
+                account_count,
+                Database.json({"adapter": source["adapter"]}),
+            ),
+        )
 
     def _record_failure(self, source: dict[str, Any], transaction_id: int, error: Exception) -> None:
         now = self.now()
@@ -532,6 +896,7 @@ class Collector:
         qualification: Qualification,
         observed_at: str,
         material_update: bool,
+        ingestion_context: str,
     ) -> str:
         story = self._find_story(connection, observation)
         role = str(source["monitoring_role"])
@@ -542,7 +907,7 @@ class Collector:
                 f"{observation.fingerprint}:{observation.published_at}".encode("utf-8")
             ).hexdigest()[:20]
             evidence_gate = role == "Event"
-            status = "candidate" if evidence_gate and qualification.importance_gate else "watch" if role == "Discovery" and qualification.score >= 70 and qualification.impact_score >= 26 else "signal"
+            status = "candidate" if evidence_gate and qualification.importance_gate else "watch" if role == "Discovery" and qualification.score >= 65 and qualification.impact_score >= 26 else "signal"
             priority = "High potential" if status == "watch" else qualification.priority
             slug = re.sub(r"[^a-z0-9]+", "-", observation.title.lower()).strip("-")[:100]
             connection.execute(
@@ -551,8 +916,9 @@ class Collector:
                     id, slug, headline, summary, lane, openness_class, status,
                     priority, priority_score, freshness, first_public_at, detected_at,
                     opportunity_strength, relevance_bridge, counterargument,
-                    watch_expires_at, watch_status, material_update, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    watch_expires_at, watch_status, material_update, created_at, updated_at,
+                    importance_score, importance_json, material_updated_at, ingestion_context
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     story_id, slug or story_id, observation.title,
@@ -564,6 +930,15 @@ class Collector:
                     (datetime.fromisoformat(observed_at.replace("Z", "+00:00")) + timedelta(hours=24)).isoformat().replace("+00:00", "Z") if status == "watch" else None,
                     "Active" if status == "watch" else None,
                     int(material_update), observed_at, observed_at,
+                    qualification.importance_score,
+                    Database.json({
+                        "material_importance": qualification.impact_score,
+                        "novelty": qualification.novelty_score,
+                        "source_significance": qualification.source_significance,
+                        "total": qualification.importance_score,
+                    }),
+                    observed_at if material_update else None,
+                    ingestion_context,
                 ),
             )
 
@@ -585,8 +960,8 @@ class Collector:
                     ),
                 )
                 connection.execute(
-                    "UPDATE story_cluster SET material_update = 1, updated_at = ? WHERE id = ?",
-                    (observed_at, story_id),
+                    "UPDATE story_cluster SET material_update = 1, material_updated_at = ?, updated_at = ? WHERE id = ?",
+                    (observed_at, observed_at, story_id),
                 )
                 affected = connection.execute(
                     "UPDATE draft SET status = 'Needs Review', updated_at = ? WHERE story_id = ? AND status = 'Current'",
@@ -664,7 +1039,7 @@ class Collector:
             and row["reporting_origin_key"]
         }
         evidence_gate = event_count >= 1 or len(reporting_publishers) >= 2
-        current = connection.execute("SELECT status, priority_score FROM story_cluster WHERE id = ?", (story_id,)).fetchone()
+        current = connection.execute("SELECT status, priority_score, importance_score FROM story_cluster WHERE id = ?", (story_id,)).fetchone()
         new_status = current["status"]
         if evidence_gate and qualification.importance_gate and new_status in {"signal", "watch"}:
             new_status = "candidate"
@@ -672,10 +1047,23 @@ class Collector:
         connection.execute(
             """
             UPDATE story_cluster SET first_public_at = ?, status = ?, priority = ?,
-                priority_score = MAX(priority_score, ?), material_update = MAX(material_update, ?), updated_at = ?
+                priority_score = MAX(priority_score, ?), material_update = MAX(material_update, ?),
+                material_updated_at = CASE WHEN ? = 1 THEN ? ELSE material_updated_at END,
+                importance_score = MAX(importance_score, ?), importance_json = ?, updated_at = ?
             WHERE id = ?
             """,
-            (first_public, new_status, priority, qualification.score, int(material_update), observed_at, story_id),
+            (
+                first_public, new_status, priority, qualification.score,
+                int(material_update), int(material_update), observed_at,
+                qualification.importance_score,
+                Database.json({
+                    "material_importance": qualification.impact_score,
+                    "novelty": qualification.novelty_score,
+                    "source_significance": qualification.source_significance,
+                    "total": qualification.importance_score,
+                }),
+                observed_at, story_id,
+            ),
         )
         connection.execute(
             """
@@ -690,7 +1078,12 @@ class Collector:
             """,
             (
                 story_id, int(evidence_gate), int(qualification.importance_gate),
-                qualification.score, Database.json({"reasons": qualification.reasons, "impact": qualification.impact_score}),
+                qualification.importance_score, Database.json({
+                    "reasons": qualification.reasons,
+                    "impact": qualification.impact_score,
+                    "importance": qualification.importance_score,
+                    "ranking_version": 2,
+                }),
                 observed_at if evidence_gate and qualification.importance_gate else None,
             ),
         )

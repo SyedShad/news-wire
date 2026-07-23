@@ -18,6 +18,9 @@ from open_source_ai_news_wire.adapters import (
     parse_anthropic_newsroom,
     parse_cisa_advisories,
     parse_huggingnews,
+    parse_huggingnews_json,
+    enrich_huggingnews_detail,
+    parse_huggingnews_momentum,
     parse_json,
     parse_mastodon_signal,
     parse_meta_ai_blog,
@@ -27,7 +30,13 @@ from open_source_ai_news_wire.adapters import (
 )
 from open_source_ai_news_wire.collector import Collector, _default_client_factory, _similarity, _title_tokens
 from open_source_ai_news_wire.config import resolve_runtime_paths
-from open_source_ai_news_wire.network import ResponseTooLarge, SafeHttpClient, UnsafeRequest
+from open_source_ai_news_wire.demo import seed_demo_data
+from open_source_ai_news_wire.network import (
+    ResponseTooLarge,
+    SafeHttpClient,
+    UnsafeRequest,
+    resolve_known_short_url,
+)
 from open_source_ai_news_wire.qualification import qualify
 from open_source_ai_news_wire.source_registry import set_source_enabled, synchronize_sources
 from open_source_ai_news_wire.storage import Database
@@ -97,6 +106,64 @@ def test_safe_client_rejects_protocol_redirect_and_content_type_edge_cases() -> 
             client.fetch("https://example.com/binary")
         result = client.fetch("https://example.com/ok", last_modified="yesterday")
         assert result.body == b"ok"
+
+
+def test_known_short_link_resolution_validates_every_public_https_hop() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "t.co":
+            return httpx.Response(
+                302,
+                headers={"location": "https://publisher.example/article"},
+                request=request,
+            )
+        return httpx.Response(200, content=b"article", request=request)
+
+    resolved = resolve_known_short_url(
+        "https://t.co/abc123",
+        resolver=PUBLIC_IP,
+        transport=httpx.MockTransport(handler),
+    )
+    assert resolved == "https://publisher.example/article"
+
+    with pytest.raises(UnsafeRequest, match="known public short-link"):
+        resolve_known_short_url(
+            "https://example.com/not-short",
+            resolver=PUBLIC_IP,
+            transport=httpx.MockTransport(handler),
+        )
+
+
+def test_known_short_link_rejects_private_redirect_and_dns_change() -> None:
+    private_redirect = httpx.MockTransport(
+        lambda request: httpx.Response(
+            302,
+            headers={"location": "https://private.example/article"},
+            request=request,
+        )
+    )
+    with pytest.raises(UnsafeRequest, match="exclusively to public"):
+        resolve_known_short_url(
+            "https://t.co/abc123",
+            resolver=lambda host: ["127.0.0.1"] if host == "private.example" else PUBLIC_IP(host),
+            transport=private_redirect,
+        )
+
+    calls = 0
+
+    def changing_resolver(_host: str) -> list[str]:
+        nonlocal calls
+        calls += 1
+        return ["93.184.216.34" if calls == 1 else "93.184.216.35"]
+
+    same_host_redirect = httpx.MockTransport(
+        lambda request: httpx.Response(302, headers={"location": "/again"}, request=request)
+    )
+    with pytest.raises(UnsafeRequest, match="DNS resolution changed"):
+        resolve_known_short_url(
+            "https://t.co/abc123",
+            resolver=changing_resolver,
+            transport=same_host_redirect,
+        )
 
 
 def test_feed_json_sitemap_and_canonical_normalization() -> None:
@@ -191,6 +258,115 @@ def test_dedicated_source_fixtures_preserve_dates_roles_and_discovery_metadata()
     assert [item.external_id for item in mastodon] == ["https://social.example/@lab/1"]
 
 
+def test_huggingnews_documented_json_preserves_event_time_tags_and_public_leads() -> None:
+    fixtures = Path(__file__).parent / "fixtures"
+    rows = parse_huggingnews_json(
+        (fixtures / "huggingnews_latest.json").read_bytes(),
+        source_url="https://api.huggingnews.com/api/stories",
+        observed_at="2026-07-23T09:00:00Z",
+    )
+    assert rows[0].external_id == "open-model-release-abc123"
+    assert rows[0].published_at == "2026-07-23T07:15:00Z"
+    assert rows[0].metadata["aggregator_published_at"] != rows[0].published_at
+    assert rows[0].metadata["topic_tags"][0]["slug"] == "ai-open-models"
+
+    enriched = enrich_huggingnews_detail(
+        rows[0], (fixtures / "huggingnews_detail.json").read_bytes()
+    )
+    assert enriched.metadata["reference_summary"] == "Reference-only summary."
+    assert len(enriched.metadata["selected_tweets"]) == 1
+    assert enriched.metadata["distinct_identity_count"] == 1
+    assert enriched.metadata["detail_fetched"] is True
+    assert enriched.metadata["short_links"] == ["https://t.co/abc123"]
+
+
+def test_huggingnews_search_shape_and_missing_fields_degrade_per_item() -> None:
+    fixtures = Path(__file__).parent / "fixtures"
+    rows = parse_huggingnews_json(
+        (fixtures / "huggingnews_search.json").read_bytes(),
+        source_url="https://api.huggingnews.com/api/stories?query=open%20models",
+        observed_at="2026-07-23T09:00:00Z",
+    )
+    assert [item.external_id for item in rows] == ["valid-open-model-story-abc123"]
+    assert rows[0].published_at == rows[0].metadata["aggregator_published_at"]
+
+    with pytest.raises(AdapterError, match="dayGroups or stories"):
+        parse_huggingnews_json(
+            b'{"unexpected": []}',
+            source_url="https://api.huggingnews.com/api/stories",
+            observed_at="2026-07-23T09:00:00Z",
+        )
+
+
+def test_huggingnews_visible_momentum_is_optional_structured_discovery_data() -> None:
+    payload = b'''<a class="story-row-link" href="/ai/open-model-release-abc123"><div class="story-row"><div class="story-rank">2</div><div class="story-title">Open model</div><span class="meta-signal">34/25</span></div></a>'''
+    assert parse_huggingnews_momentum(payload) == {
+        "open-model-release-abc123": {
+            "daily_rank": 2,
+            "post_count": 34,
+            "account_count": 25,
+        }
+    }
+    assert parse_huggingnews_momentum(b"<html>layout changed</html>") == {}
+
+
+def test_huggingnews_detail_and_optional_momentum_enrichment_are_bounded(
+    tmp_path: Path,
+) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    synchronize_sources(database)
+    fixtures = Path(__file__).parent / "fixtures"
+    item = parse_huggingnews_json(
+        (fixtures / "huggingnews_latest.json").read_bytes(),
+        source_url="https://api.huggingnews.com/api/stories",
+        observed_at="2026-07-23T09:00:00Z",
+    )[0]
+    homepage = b'''<a class="story-row-link" href="/ai/open-model-release-abc123"><div class="story-row"><div class="story-rank">2</div><span class="meta-signal">34/25</span></div></a>'''
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "huggingnews.com":
+            return httpx.Response(200, content=homepage, request=request)
+        return httpx.Response(
+            200,
+            content=(fixtures / "huggingnews_detail.json").read_bytes(),
+            headers={"content-type": "application/json"},
+            request=request,
+        )
+
+    with SafeHttpClient(
+        allowed_hosts={"api.huggingnews.com", "huggingnews.com"},
+        resolver=PUBLIC_IP,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        collector = Collector(
+            database,
+            short_link_resolver=lambda _url: "https://publisher.example/report",
+        )
+        momentum = collector._huggingnews_momentum(client, [item])
+        enriched = collector._huggingnews_details(
+            client, {"id": "hugging-news"}, momentum
+        )
+
+    assert enriched[0].metadata["daily_rank"] == 2
+    assert enriched[0].metadata["native_score"] == 84.0
+    assert enriched[0].metadata["public_links"] == [
+        {"short_url": "https://t.co/abc123", "url": "https://publisher.example/report"}
+    ]
+
+    failing = httpx.MockTransport(
+        lambda request: (_ for _ in ()).throw(httpx.ConnectError("offline", request=request))
+    )
+    with SafeHttpClient(
+        allowed_hosts={"api.huggingnews.com", "huggingnews.com"},
+        resolver=PUBLIC_IP,
+        transport=failing,
+    ) as client:
+        assert Collector(database)._huggingnews_momentum(client, [item])[0].metadata.get(
+            "native_score"
+        ) is None
+
+
 def test_dedicated_parsers_reject_malformed_or_non_utf8_payloads() -> None:
     observed = "2026-07-17T10:00:00Z"
     for parser, url in (
@@ -214,6 +390,85 @@ def test_github_release_headline_is_grounded_in_repository_identity() -> None:
     assert rows[0].title == "Transformers v5.14.1 released"
 
 
+def test_hacker_news_engagement_changes_do_not_become_material_updates() -> None:
+    first = Observation(
+        "hn-1",
+        "A material AI announcement",
+        "https://example.com/announcement",
+        "2026-07-23T08:00:00Z",
+        "Article URL: https://example.com/announcement Points: 5 # Comments: 1",
+    )
+    second = Observation(
+        "hn-1",
+        "A material AI announcement",
+        "https://example.com/announcement",
+        "2026-07-23T08:00:00Z",
+        "Article URL: https://example.com/announcement Points: 500 # Comments: 99",
+    )
+    source = {"id": "hacker-news-ai"}
+    first_enriched = Collector._contextualize_native_metrics(source, [first])[0]
+    second_enriched = Collector._contextualize_native_metrics(source, [second])[0]
+
+    assert first_enriched.content_hash == second_enriched.content_hash
+    assert first_enriched.metadata["native_score"] < second_enriched.metadata["native_score"]
+
+
+def test_huggingnews_public_links_queue_proposals_without_verifying_them(
+    tmp_path: Path,
+) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    seed_demo_data(database)
+    observation = Observation(
+        "story-slug",
+        "A high-attention AI development",
+        "https://huggingnews.com/ai/story-slug",
+        "2026-07-23T08:00:00Z",
+        metadata={
+            "selected_tweets": [],
+            "public_links": [
+                {
+                    "short_url": "https://t.co/abc123",
+                    "url": "https://publisher.example/report",
+                }
+            ],
+        },
+    )
+    with database.transaction() as connection:
+        Collector._record_discovery_leads(
+            connection,
+            "story-demo-watch-003",
+            {"id": "huggingnews", "name": "HuggingNews"},
+            observation,
+            "2026-07-23T09:00:00Z",
+        )
+        Collector._record_discovery_leads(
+            connection,
+            "story-demo-watch-003",
+            {"id": "huggingnews", "name": "HuggingNews"},
+            observation,
+            "2026-07-23T09:01:00Z",
+        )
+
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM discovery_lead WHERE lead_type = 'public_link'"
+    ) == {"count": 1}
+    assert database.one(
+        "SELECT status, proposed_role, acquisition_method FROM evidence_source WHERE canonical_url = ?",
+        ("https://publisher.example/report",),
+    ) == {
+        "status": "queued",
+        "proposed_role": "Reporting",
+        "acquisition_method": "discovery_enrichment",
+    }
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM work_item WHERE kind = 'evidence_enrichment'"
+    ) == {"count": 1}
+    assert database.one(
+        "SELECT evidence_gate FROM candidate WHERE story_id = 'story-demo-watch-003'"
+    ) == {"evidence_gate": 0}
+
+
 def test_completion_registry_enables_validated_non_sec_sources_and_excludes_sec() -> None:
     payload = json.loads(
         (Path(__file__).parents[2] / "src/open_source_ai_news_wire/definitions/sources.json").read_text(encoding="utf-8")
@@ -223,7 +478,7 @@ def test_completion_registry_enables_validated_non_sec_sources_and_excludes_sec(
         "anthropic-newsroom": "anthropic_newsroom",
         "meta-ai-blog": "meta_ai_blog",
         "cisa-ai-security": "cisa_advisories",
-        "hugging-news": "huggingnews",
+        "hugging-news": "huggingnews_json",
         "mastodon-ai-signal": "mastodon_signal",
     }
     for source_id, adapter in expected.items():
