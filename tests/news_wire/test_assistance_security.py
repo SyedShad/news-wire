@@ -766,6 +766,11 @@ def test_broker_lifecycle_and_state_use_fake_server(
     broker._record_failure("first")
     broker._record_failure("second")
     assert broker.failure_code == "first"
+    prioritized = broker_module.ConnectBroker(allowed_hosts=["chatgpt.com"])
+    prioritized._record_failure("broker_transport_failed")
+    prioritized._record_failure("broker_peer_mismatch")
+    prioritized._record_failure("broker_dns_failed")
+    assert prioritized.failure_code == "broker_peer_mismatch"
     broker.stop()
     peer.close()
     assert server_holder[0].shutdown_called is True

@@ -29,6 +29,7 @@ from . import __version__
 from .assistance_broker import (
     BROKER_POLICY_VERSION,
     REVIEWED_CODEX_HOSTS,
+    TRANSIENT_BROKER_FAILURES,
     BrokerError,
     ConnectBroker,
 )
@@ -43,7 +44,7 @@ from .storage import SCHEMA_VERSION, Database
 
 
 PROMPT_VERSION = "v3"
-ISOLATION_CANARY_VERSION = "0.3.7-v2"
+ISOLATION_CANARY_VERSION = "0.3.7-v3"
 ISOLATION_ATTESTATION_HOURS = 24
 ISOLATION_ATTESTATION_STATE = "assistance_isolation_attestation"
 EXPECTED_CODEX_TEAM_ID = "2DC432GLL2"
@@ -867,29 +868,29 @@ class CodexInvoker:
                     "codex_timeout: Codex draft generation timed out"
                 ) from error
             broker_failure = broker_context.failure_code
-            if broker_failure:
-                error_type = (
-                    AssistanceTransientError
-                    if broker_failure in {
-                        "broker_dns_failed",
-                        "broker_upstream_unavailable",
-                        "broker_transport_failed",
-                        "broker_idle_timeout",
-                    }
-                    else AssistanceConfigurationError
+            if broker_failure and broker_failure not in TRANSIENT_BROKER_FAILURES:
+                raise AssistanceConfigurationError(
+                    f"{broker_failure}: Secure CONNECT broker rejected the request"
                 )
-                raise error_type(f"{broker_failure}: Secure CONNECT broker rejected the request")
             if result.returncode != 0:
                 deferred = _codex_deferred_condition(result)
                 if deferred:
                     raise AssistanceDeferred(
                         f"{deferred}: Saved ChatGPT account action is required"
                     )
+                if broker_failure:
+                    raise AssistanceTransientError(
+                        f"{broker_failure}: Secure CONNECT broker could not complete the request"
+                    )
                 raise AssistanceTransientError(
                     f"codex_process_failed: Codex exited with status {result.returncode}"
                 )
             _reject_tool_events(result.stdout)
             if not result_path.is_file():
+                if broker_failure:
+                    raise AssistanceTransientError(
+                        f"{broker_failure}: Secure CONNECT broker could not complete the request"
+                    )
                 raise AssistanceTransientError(
                     "codex_result_missing: Codex did not write the bounded result file"
                 )
