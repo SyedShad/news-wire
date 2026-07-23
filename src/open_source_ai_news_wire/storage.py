@@ -15,7 +15,7 @@ from typing import Any
 from .config import RuntimePaths, ensure_runtime_layout
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class MigrationRequired(RuntimeError):
@@ -438,6 +438,12 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE evidence_source ADD COLUMN origin_confirmed_at TEXT",
         "ALTER TABLE evidence_source ADD COLUMN origin_confirmation_action_id INTEGER REFERENCES review_action(id)",
         "CREATE INDEX idx_evidence_source_origin ON evidence_source(reporting_origin_key, origin_status, confirmed_role, status)",
+    ),
+    5: (
+        "ALTER TABLE candidate ADD COLUMN manual_override INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE candidate ADD COLUMN manual_override_at TEXT",
+        "ALTER TABLE candidate ADD COLUMN manual_override_action_id INTEGER REFERENCES review_action(id)",
+        "ALTER TABLE candidate ADD COLUMN manual_override_snapshot_json TEXT NOT NULL DEFAULT '{}'",
     ),
 }
 

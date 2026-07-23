@@ -13,6 +13,7 @@ from open_source_ai_news_wire.installer import InstalledRelease
 from open_source_ai_news_wire.pilot import PilotReadiness, PilotStatus
 from open_source_ai_news_wire.runner import WorkerResult
 from open_source_ai_news_wire.scheduler import SchedulerStatus
+from open_source_ai_news_wire.storage import SCHEMA_VERSION
 
 
 class FakeWorker:
@@ -29,7 +30,7 @@ class FakeWorker:
 def test_cli_migrate_scan_and_catch_up(monkeypatch, tmp_path: Path, capsys) -> None:
     root = tmp_path / "runtime"
     assert cli.main(["--data-root", str(root), "migrate"]) == 0
-    assert "version 4" in capsys.readouterr().out
+    assert f"version {SCHEMA_VERSION}" in capsys.readouterr().out
 
     FakeWorker.calls.clear()
     monkeypatch.setattr(cli, "Worker", FakeWorker)

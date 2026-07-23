@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-07-23
+
+### Added
+
+- Evidence-locked active stories now expose explicit manual neutral and open-source-lens approval controls behind a native browser confirmation.
+- Schema 5 preserves the manual-candidate timestamp, review action, unchanged gate snapshot, and approval basis without rewriting automated qualification.
+- Manual approvals dispatch immediately and may use safe stored Discovery-source attribution without promoting that material to qualifying evidence.
+
+### Changed
+
+- Story, draft-status, draft-history, and draft-editor views distinguish manually approved work from evidence-qualified work.
+- Material changes to an approved claim or source passage invalidate either approval path and require a fresh human confirmation.
+
+### Security
+
+- Manual submissions require CSRF protection plus the current versioned confirmation value, and remain unavailable for archived, withdrawn, claim-less, or source-less stories.
+- Internal gate, warning, and manual-override labels are rejected from generated content and never appear in Markdown or HTML exports.
+
 ## [0.3.2] - 2026-07-21
 
 ### Added

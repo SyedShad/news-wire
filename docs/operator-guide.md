@@ -53,9 +53,13 @@ The story page separates qualification from drafting. For a discovery signal:
 1. Use **Inspect linked source** or attach another public HTTPS source.
 2. After the bounded fetch completes, confirm its Event, Reporting, or Discovery role and map it to the claims it directly supports, reports or attributes, contradicts, or contextualizes.
 3. For Reporting evidence, confirm whether the hosted page is original, syndicated, or citing another publication. Confirm or correct the suggested original publisher; suggestions never qualify a story by themselves.
-4. The evidence gate requires one confirmed first-party Event source or two independent original reporting publishers. Two hosts repeating the same original report count once. The gate cannot be overridden.
+4. The normal evidence gate requires one confirmed first-party Event source or two independent original reporting publishers. Two hosts repeating the same original report count once. Manual approval never changes a failed gate into a passed gate.
 5. When evidence passes, **Qualify as candidate**. If automated importance did not pass, record the human editorial reason; this changes neither the automated score nor the evidence result.
 6. Separately approve and create a Neutral News Brief or, for a Strong or Moderate opportunity, an Open-Source Lens Brief. The dashboard dispatches that approved draft immediately and opens the editor when generation finishes in the active story tab.
+
+When the normal drafting controls are locked, **Manually approve and create neutral draft** and **Manually approve and create open-source lens draft** provide an explicit human override. The browser asks for confirmation before submission. Confirming records the current evidence, importance, and lens states; marks the story as human-selected; and dispatches the selected draft immediately. No written reason is required. This path can override all three drafting gates, but it does not verify a source, change the automated score, or reclassify Discovery material as qualifying evidence. Archived, withdrawn, claim-less, and source-less stories remain ineligible.
+
+For a manual override only, a stored safe public Discovery URL may be linked and named naturally in the draft. The internal **Manually approved** badge and failed-gate record remain in the dashboard and audit history; they are never included in copied content or Markdown, HTML, or content JSON exports. Publication remains a separate manual action.
 
 Official pages prove that an announcement was made. Use **Reports or attributes the claim** for announcement or promotional claims unless the page directly establishes the factual claim. Excluding evidence preserves the audit record and invalidates qualification or pending drafts when the gate no longer passes.
 
@@ -68,7 +72,7 @@ open-source-ai-news-wire assistance check-isolation
 open-source-ai-news-wire assistance enable
 ```
 
-If the canary fails, leave assistance disabled and use the dashboard's human-classification states. Drafts are generated only from an approved work item; a material source change invalidates the approval snapshot. The durable queue remains the recovery path if the immediate dispatcher is interrupted. A transient generation failure receives one automatic retry, then the story and Drafts pages expose a manual retry without creating another approval.
+If the canary fails, leave assistance disabled and use the dashboard's human-classification states. Drafts are generated only from an approved work item; a material claim or source-passage change invalidates the approval snapshot, including a manual override. The durable queue remains the recovery path if the immediate dispatcher is interrupted. A transient generation failure receives one automatic retry, then the story and Drafts pages expose a manual retry without creating another approval.
 
 ## Pilot activation
 

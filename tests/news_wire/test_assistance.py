@@ -117,7 +117,7 @@ def test_approved_draft_is_generated_versioned_and_accounted(tmp_path: Path) -> 
     draft = database.one("SELECT body, sources_json, provenance_json FROM draft WHERE id = ?", (draft_id,))
     assert "According to [Demo Runtime Project](<https://example.invalid/runtime/release>)" in draft["body"]
     assert "[[source:" not in draft["body"]
-    assert '"prompt_version":"v2"' in draft["provenance_json"]
+    assert '"prompt_version":"v3"' in draft["provenance_json"]
 
 
 def test_lens_draft_requires_and_preserves_separate_approved_mode(tmp_path: Path) -> None:
@@ -131,6 +131,73 @@ def test_lens_draft_requires_and_preserves_separate_approved_mode(tmp_path: Path
     draft = database.one("SELECT mode, lens FROM draft WHERE id = ?", (draft_id,))
     assert draft["mode"] == "Open-Source Lens Brief"
     assert "separate" in draft["lens"]
+
+
+@pytest.mark.parametrize(
+    ("action", "expected_operation"),
+    (
+        ("manual_approve_neutral", "draft_neutral"),
+        ("manual_approve_lens", "draft_lens"),
+    ),
+)
+def test_manual_override_uses_discovery_sources_without_prompting_with_gate_labels(
+    tmp_path: Path, action: str, expected_operation: str
+) -> None:
+    database, service = _service(tmp_path)
+    service.review(
+        "story-demo-watch-003",
+        action,
+        confirmation_version="manual_override_v1",
+    )
+    work = database.one("SELECT id FROM work_item WHERE kind = 'draft'")
+
+    packet = build_packet(database, int(work["id"]))
+
+    assert packet["operation"] == expected_operation
+    assert packet["policy"]["stored_discovery_citations_allowed"] is True
+    assert packet["policy"]["discovery_sources_cannot_support_claims"] is False
+    assert all("status" not in claim for claim in packet["claims"])
+    assert all(source["source_role"] == "Discovery" for source in packet["sources"])
+    assert all(source["citation_allowed"] for source in packet["sources"])
+    serialized = json.dumps(packet).casefold()
+    assert "unverified" not in serialized
+    assert "provisional" not in serialized
+    assert "evidence_gate" not in serialized
+    assert "importance_gate" not in serialized
+
+    database.set_state("assistance_isolation_gate", "passed", "2026-07-14T00:00:00Z")
+    database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
+    draft_id = AssistanceService(database, FakeInvoker()).process_next()
+    draft = database.one(
+        "SELECT mode, body, lens, sources_json, approval_snapshot_json FROM draft WHERE id = ?",
+        (draft_id,),
+    )
+    assert draft["mode"] == (
+        "Open-Source Lens Brief" if expected_operation == "draft_lens" else "Neutral News Brief"
+    )
+    assert "https://example.invalid/conference/session" in draft["body"]
+    assert "unverified" not in (draft["body"] + draft["lens"]).casefold()
+    assert "provisional" not in (draft["body"] + draft["lens"]).casefold()
+    assert json.loads(draft["approval_snapshot_json"])["approval_basis"] == "manual_override"
+    assert any(source["role"] == "Discovery" for source in json.loads(draft["sources_json"]))
+    markdown = service.draft_markdown(int(draft_id))
+    html_export = service.draft_html(int(draft_id))
+    for exported in (markdown, html_export):
+        assert "Manually approved" not in exported
+        assert "manual override" not in exported.casefold()
+        assert "unverified" not in exported.casefold()
+        assert "provisional" not in exported.casefold()
+    if expected_operation == "draft_lens":
+        revised_id = service.save_draft(
+            int(draft_id),
+            draft["mode"],
+            "AGI Development · Breaking",
+            draft["body"],
+            draft["lens"] + "\n\nA human revision preserves the tradeoff.",
+        )
+        revised = service.get_draft(revised_id)
+        assert revised["manual_override_active"] is True
+        assert "human revision" in revised["lens"].casefold()
 
 
 def test_assistance_fails_closed_on_gate_budget_and_foreign_claims(tmp_path: Path) -> None:
@@ -508,9 +575,12 @@ def test_natural_attribution_tokens_are_validated_rendered_and_deduplicated() ->
 
     for bad_body, message in (
         ("Reporting attributes the proposal to officials.", "artificial"),
+        ("This remains unverified pending another source.", "internal qualification"),
+        ("This provisional report describes the proposal.", "internal qualification"),
+        ("The evidence gate has not passed.", "internal qualification"),
         ("According to https://news.yahoo.example/report, it happened.", "citation tokens"),
-        ("According to [[source:registry:3]], it happened.", "not confirmed"),
-        ("According to [[source:missing]], it happened.", "not confirmed"),
+        ("According to [[source:registry:3]], it happened.", "not approved"),
+        ("According to [[source:missing]], it happened.", "not approved"),
         ("According to <script>alert(1)</script>, it happened.", "unsafe HTML"),
     ):
         with pytest.raises(AssistanceError, match=message):
@@ -534,6 +604,31 @@ def test_material_change_invalidates_approval_before_drafting(tmp_path: Path) ->
     assert database.one("SELECT status FROM story_cluster WHERE id = 'story-demo-policy-002'") == {
         "status": "candidate"
     }
+
+
+def test_manual_approval_is_invalidated_when_approved_claim_or_passage_changes(
+    tmp_path: Path,
+) -> None:
+    database, service = _service(tmp_path)
+    service.review(
+        "story-demo-watch-003",
+        "manual_approve_neutral",
+        confirmation_version="manual_override_v1",
+    )
+    work = database.one("SELECT id FROM work_item WHERE kind = 'draft'")
+    database.execute(
+        "UPDATE source_item SET passage = passage || ' Material update.' WHERE story_id = 'story-demo-watch-003'"
+    )
+
+    with pytest.raises(ApprovalInvalidated):
+        build_packet(database, int(work["id"]))
+
+    assert database.one("SELECT status FROM work_item WHERE id = ?", (work["id"],)) == {
+        "status": "needs_reapproval"
+    }
+    state = service.get_story("story-demo-watch-003")
+    assert state["manual_override_active"] is True
+    assert state["status"] == "candidate"
 
 
 def test_isolation_canary_records_pass_and_failure_without_enabling_assistance(tmp_path: Path) -> None:

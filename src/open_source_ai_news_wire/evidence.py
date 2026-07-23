@@ -421,6 +421,15 @@ def qualification_state(database: Database, story_id: str) -> dict[str, Any]:
     automated_importance = bool(candidate.get("importance_gate"))
     importance_override = bool(candidate.get("importance_override"))
     effective_importance = automated_importance or importance_override
+    manual_override_active = bool(candidate.get("manual_override"))
+    verified_qualified = evidence_gate and effective_importance
+    candidate_basis = (
+        "evidence"
+        if verified_qualified
+        else "manual_override"
+        if manual_override_active
+        else "unqualified"
+    )
     return {
         "evidence_gate": evidence_gate,
         "event_count": int(has_event),
@@ -430,7 +439,13 @@ def qualification_state(database: Database, story_id: str) -> dict[str, Any]:
         "importance_override": importance_override,
         "importance_override_reason": candidate.get("importance_override_reason", ""),
         "effective_importance": effective_importance,
-        "qualified": evidence_gate and effective_importance,
+        "qualified": verified_qualified,
+        "verified_qualified": verified_qualified,
+        "manual_override_active": manual_override_active,
+        "manual_override_at": candidate.get("manual_override_at"),
+        "manual_override_action_id": candidate.get("manual_override_action_id"),
+        "candidate_basis": candidate_basis,
+        "draft_eligible": verified_qualified or manual_override_active,
     }
 
 
@@ -463,7 +478,11 @@ def recalculate_story_qualification(database: Database, story_id: str) -> dict[s
                 "UPDATE candidate SET qualified_at = COALESCE(qualified_at, ?) WHERE story_id = ?",
                 (now, story_id),
             )
-        elif not state["evidence_gate"] and story["status"] in {"candidate", "approved", "draft_ready"}:
+        elif (
+            not state["evidence_gate"]
+            and not state["manual_override_active"]
+            and story["status"] in {"candidate", "approved", "draft_ready"}
+        ):
             active_watch = connection.execute(
                 "SELECT 1 FROM watch_notice WHERE story_id = ? AND status = 'active'",
                 (story_id,),

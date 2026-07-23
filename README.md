@@ -2,13 +2,13 @@
 
 Open Source AI News Wire is a local-first monitor for fresh open-ecosystem, AGI, and broader AI developments. It collects public no-login sources, clusters and qualifies evidence deterministically, and presents the result in a secured local review dashboard.
 
-Reporting is neutral by default. A separately labelled open-source lens is available only when a Strong or Moderate opportunity is supported and a human approves the editorial work. The system never publishes automatically.
+Reporting is neutral by default. The evidence-qualified path offers a separately labelled open-source lens when a Strong or Moderate opportunity is supported. A distinct, warned manual-approval path can override the drafting gates without changing their recorded results. The system never publishes automatically.
 
 ## V1 capabilities
 
 - Dated registry covering official AI organizations, open ecosystems, research, government and law, corporate filings, safety and security, independent reporting, aggregators, public newsletters, and accessible social signals.
 - Incremental RSS/Atom, JSON, sitemap, GitHub-release, research-feed, and dedicated dated Anthropic, Meta, CISA, HuggingNews, and Mastodon adapters with bounded SSRF-resistant networking.
-- Evidence-aware clustering, primary/independent-confirmation gates, evidence-first manual qualification with recorded importance overrides, candidate and watch lifecycles, correction handling, and 72-hour automatic recovery.
+- Evidence-aware clustering, primary/independent-confirmation gates, evidence-first qualification, separately audited manual candidate overrides, candidate and watch lifecycles, correction handling, and 72-hour automatic recovery.
 - Local SQLite and content-addressed evidence storage outside Git, with explicit migration, diagnostics, integrity, storage-pressure, and purge operations.
 - User-level macOS LaunchAgent at minute `00` and `30`, plus login/load recovery. It runs while the Mac is locked and awake, but does not prevent sleep or change power policy.
 - Packet-only Codex assistance behind a mandatory isolation canary and local usage budget. No API key or paid fallback is supported.
@@ -36,7 +36,7 @@ Open the on-demand interface with:
 
 The dashboard binds only to loopback, selects a random port, and requires its one-time process-local access link. See [docs/operator-guide.md](docs/operator-guide.md) for routine operation and recovery.
 
-Release `0.3.3` uses schema version 4. Reporting qualification now follows the human-confirmed original publisher, so syndications of one report cannot masquerade as independent confirmation. Approved drafts use natural named attribution with safe, portable Markdown source links. Explicit draft approval still starts generation immediately; the half-hour worker remains a recovery fallback. After completing a real evidence-to-revised-draft workflow, run the notification canary and `pilot extend-validation --auto-activate`; `pilot readiness` reports every activation gate.
+Release `0.3.4` uses schema version 5. Reporting qualification follows the human-confirmed original publisher, so syndications of one report cannot masquerade as independent confirmation. When normal qualification is locked, the dashboard can record a separately warned manual override and immediately create either drafting mode from the stored claims and safe public sources. Automated gate results remain unchanged, while generated drafts and exports contain no internal warning language. The half-hour worker remains a recovery fallback. After completing a real evidence-to-revised-draft workflow, run the notification canary and `pilot extend-validation --auto-activate`; `pilot readiness` reports every activation gate.
 
 ## Development and verification
 

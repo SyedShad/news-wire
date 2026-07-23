@@ -156,6 +156,87 @@ def test_review_action_and_source_toggle_are_functional(app: Flask, client) -> N
     assert b"status-disabled" in source_page.data
 
 
+def test_locked_story_offers_confirmed_manual_override_without_weakening_normal_actions(
+    app: Flask, client
+) -> None:
+    rendered = client.get("/stories/story-demo-watch-003")
+    assert rendered.status_code == 200
+    assert b"Manually approve and create neutral draft" in rendered.data
+    assert b"Manually approve and create open-source lens draft" in rendered.data
+    assert b'data-manual-override-action' in rendered.data
+    assert b'data-manual-confirmation-version' in rendered.data
+
+    token = csrf(client)
+    missing_confirmation = client.post(
+        "/stories/story-demo-watch-003/review",
+        data={
+            "csrf_token": token,
+            "action": "manual_approve_neutral",
+            "confirmation_version": "",
+        },
+    )
+    assert missing_confirmation.status_code == 303
+    assert app.config["DATABASE"].one(
+        "SELECT status FROM story_cluster WHERE id = 'story-demo-watch-003'"
+    ) == {"status": "watch"}
+    assert app.config["DATABASE"].one(
+        "SELECT COUNT(*) AS count FROM review_action WHERE action LIKE 'manual_approve_%'"
+    )["count"] == 0
+
+    forged = client.post(
+        "/stories/story-demo-watch-003/review",
+        data={
+            "csrf_token": token,
+            "action": "manual_approve_unknown",
+            "confirmation_version": "manual_override_v1",
+        },
+    )
+    assert forged.status_code == 303
+    assert app.config["DATABASE"].one(
+        "SELECT COUNT(*) AS count FROM work_item WHERE kind = 'draft'"
+    )["count"] == 0
+
+    approved = client.post(
+        "/stories/story-demo-watch-003/review",
+        data={
+            "csrf_token": token,
+            "action": "manual_approve_lens",
+            "confirmation_version": "manual_override_v1",
+        },
+    )
+    assert approved.status_code == 303
+    assert approved.headers["Location"].endswith(
+        "/stories/story-demo-watch-003?draft_started=1"
+    )
+    work = app.config["DATABASE"].one(
+        "SELECT payload_json FROM work_item WHERE story_id = 'story-demo-watch-003'"
+    )
+    assert json.loads(work["payload_json"])["approval_basis"] == "manual_override"
+    approved_page = client.get(approved.headers["Location"])
+    assert b"Manually approved" in approved_page.data
+
+
+def test_manual_override_requires_csrf_and_browser_cancel_contract(app: Flask, client) -> None:
+    rejected = client.post(
+        "/stories/story-demo-watch-003/review",
+        data={
+            "action": "manual_approve_neutral",
+            "confirmation_version": "manual_override_v1",
+        },
+    )
+    assert rejected.status_code == 400
+    assert app.config["DATABASE"].one(
+        "SELECT COUNT(*) AS count FROM work_item WHERE kind = 'draft'"
+    )["count"] == 0
+
+    javascript = client.get("/static/app.js")
+    assert b"Qualification requirements have not passed" in javascript.data
+    assert b"Manual approval will create a draft from the currently available sources" in javascript.data
+    assert b"window.confirm" in javascript.data
+    assert b"event.preventDefault()" in javascript.data
+    assert b"manual_override_v1" in javascript.data
+
+
 def test_sources_expose_cursor_failure_and_recovery_state(client) -> None:
     rendered = client.get("/sources")
     assert b"Cursor" in rendered.data

@@ -370,9 +370,15 @@ def create_app(
     def review_story(story_id: str) -> Response:
         action = request.form.get("action", "")
         reason = request.form.get("reason", "")
+        confirmation_version = request.form.get("confirmation_version", "")
         draft_started = False
         try:
-            status = service.review(story_id, action, reason)
+            status = service.review(
+                story_id,
+                action,
+                reason,
+                confirmation_version=confirmation_version,
+            )
         except (ValueError, LookupError) as error:
             flash(str(error), "error")
         else:
@@ -398,7 +404,7 @@ def create_app(
         status = service.draft_status(story_id)
         if not status:
             return jsonify({"schema_version": 1, "status": "not_requested", "active": False})
-        payload = {"schema_version": 1, **status}
+        payload = {"schema_version": 2, **status}
         payload["draft_url"] = (
             url_for("draft_detail", draft_id=status["draft_id"])
             if status.get("draft_id")

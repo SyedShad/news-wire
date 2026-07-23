@@ -1,6 +1,6 @@
 """Open Source AI News Wire application package."""
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"
 
 from .web import create_app
 

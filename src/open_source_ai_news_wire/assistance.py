@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import ipaddress
 import logging
 import os
 import re
@@ -27,7 +28,7 @@ from .evidence import publisher_display_name
 from .storage import Database
 
 
-PROMPT_VERSION = "v2"
+PROMPT_VERSION = "v3"
 CITATION_TOKEN_RE = re.compile(r"\[\[source:([A-Za-z0-9:_-]{1,120})\]\]")
 RAW_MARKDOWN_LINK_RE = re.compile(r"\[[^\]\n]+\]\([^\)\n]+\)")
 RAW_HTML_RE = re.compile(r"</?[A-Za-z][^>]*>")
@@ -198,6 +199,12 @@ class CodexInvoker:
             profile.write_text(
                 sandbox_profile(task, self.codex_binary, isolated_auth), encoding="utf-8"
             )
+            discovery_instruction = (
+                "Citation tokens supplied for stored Discovery sources may be used for natural "
+                "source attribution. "
+                if packet.get("policy", {}).get("stored_discovery_citations_allowed")
+                else "Do not use tokens for Discovery-only sources. "
+            )
             prompt = (
                 "Process only the supplied Open Source AI News Wire packet. "
                 "Do not add facts, URLs, or claims. Do not access files or networks for evidence. "
@@ -205,8 +212,9 @@ class CodexInvoker:
                 "then give context and clearly state remaining uncertainty. Attribute claims naturally "
                 "to named publications. Never write 'Reporting attributes' or 'the reporting says'. "
                 "On the first meaningful source mention, insert only its supplied citation_token; "
-                "do not write raw URLs, Markdown links, HTML, or tokens for Discovery-only sources. "
-                "Keep reporting neutral unless the packet explicitly authorizes a separate lens. "
+                "do not write raw URLs, Markdown links, or HTML. "
+                + discovery_instruction
+                + "Keep reporting neutral unless the packet explicitly authorizes a separate lens. "
                 "Return exactly one JSON object matching the supplied schema.\nPACKET:\n"
                 + packet_text
             )
@@ -277,12 +285,34 @@ def validate_result(packet: dict[str, Any], result: dict[str, Any]) -> None:
 def _safe_https_url(value: str) -> str:
     try:
         parsed = urlsplit(value.strip())
+        hostname = parsed.hostname or ""
+        literal_address = None
+        try:
+            literal_address = ipaddress.ip_address(hostname)
+        except ValueError:
+            pass
+        blocked_address = bool(
+            literal_address
+            and (
+                literal_address.is_private
+                or literal_address.is_loopback
+                or literal_address.is_link_local
+                or literal_address.is_multicast
+                or literal_address.is_reserved
+                or literal_address.is_unspecified
+            )
+        )
+        blocked_name = hostname.casefold() == "localhost" or hostname.casefold().endswith(
+            ".localhost"
+        )
         safe = (
             parsed.scheme == "https"
-            and bool(parsed.hostname)
+            and bool(hostname)
             and not parsed.username
             and not parsed.password
             and parsed.port in {None, 443}
+            and not blocked_address
+            and not blocked_name
         )
     except ValueError:
         return ""
@@ -303,12 +333,28 @@ def _validate_generated_citations(packet: dict[str, Any], result: dict[str, Any]
     headline = str(result["headline"])
     if CITATION_TOKEN_RE.search(headline) or RAW_MARKDOWN_LINK_RE.search(headline) or RAW_HTML_RE.search(headline):
         raise AssistanceError("Draft headlines cannot contain citation markup or HTML")
+    if re.search(r"\b(unverified|provisional)\b", headline.casefold()) or any(
+        phrase in headline.casefold()
+        for phrase in ("evidence gate", "importance gate", "manual override", "manually approved")
+    ):
+        raise AssistanceError("Draft exposes internal qualification language")
     all_tokens: list[str] = []
     for field in ("factual_brief", "lens"):
         value = str(result[field])
         lowered = value.casefold()
         if "reporting attributes" in lowered or "the reporting says" in lowered:
             raise AssistanceError("Draft uses artificial unnamed reporting attribution")
+        if re.search(r"\b(unverified|provisional)\b", lowered) or any(
+            phrase in lowered
+            for phrase in (
+                "evidence gate",
+                "importance gate",
+                "manual override",
+                "manually approved",
+                "qualification requirements",
+            )
+        ):
+            raise AssistanceError("Draft exposes internal qualification language")
         if RAW_HTML_RE.search(value):
             raise AssistanceError("Draft output contains unsafe HTML")
         if re.search(r"https?://", value, re.I) or RAW_MARKDOWN_LINK_RE.search(value):
@@ -317,10 +363,10 @@ def _validate_generated_citations(packet: dict[str, Any], result: dict[str, Any]
         if "[[source:" in CITATION_TOKEN_RE.sub("", value):
             raise AssistanceError("Draft output contains a malformed citation token")
         if any(token not in allowed for token in tokens):
-            raise AssistanceError("Draft cites a source that is not confirmed for attribution")
+            raise AssistanceError("Draft cites a source that is not approved for attribution")
         all_tokens.extend(tokens)
     if allowed and not CITATION_TOKEN_RE.findall(str(result["factual_brief"])):
-        raise AssistanceError("Draft must attribute its factual brief to a confirmed source")
+        raise AssistanceError("Draft must attribute its factual brief to an approved source")
     if len(all_tokens) != len(set(all_tokens)):
         raise AssistanceError("Draft repeats an inline source citation")
 
@@ -335,7 +381,7 @@ def render_citation_tokens(packet: dict[str, Any], value: str) -> str:
     def replace(match: re.Match[str]) -> str:
         source = allowed.get(match.group(1))
         if not source:
-            raise AssistanceError("Draft cites a source that is not confirmed for attribution")
+            raise AssistanceError("Draft cites a source that is not approved for attribution")
         label = _markdown_label(str(source.get("citation_label") or "Source"))
         url = _safe_https_url(str(source.get("citation_url") or ""))
         if not label or not url:
@@ -345,7 +391,9 @@ def render_citation_tokens(packet: dict[str, Any], value: str) -> str:
     return CITATION_TOKEN_RE.sub(replace, value)
 
 
-def _citation_fields(source: dict[str, Any]) -> dict[str, Any]:
+def _citation_fields(
+    source: dict[str, Any], *, allow_discovery: bool = False
+) -> dict[str, Any]:
     role = str(source.get("source_role") or "")
     url = _safe_https_url(str(source.get("url") or ""))
     hosting = " ".join(
@@ -370,6 +418,12 @@ def _citation_fields(source: dict[str, Any]) -> dict[str, Any]:
         citation_url = url
         allowed = bool(citation_url)
         dedupe_key = f"event:{source.get('publisher_key') or citation_url}"
+    elif role == "Discovery" and allow_discovery:
+        label = publisher_display_name(url) if url else ""
+        label = label or hosting or str(source.get("source_name") or source.get("title") or "Source")
+        citation_url = url
+        allowed = bool(citation_url)
+        dedupe_key = f"manual-discovery:{citation_url or source.get('evidence_key')}"
     else:
         label = str(source.get("source_name") or source.get("title") or hosting or "Source")
         citation_url = url
@@ -378,6 +432,10 @@ def _citation_fields(source: dict[str, Any]) -> dict[str, Any]:
     signature_payload = {
         "role": role,
         "url": url,
+        "title": str(source.get("title") or ""),
+        "passage_digest": hashlib.sha256(
+            str(source.get("passage") or "").encode("utf-8")
+        ).hexdigest(),
         "origin": origin,
         "origin_url": origin_url,
         "origin_status": origin_status,
@@ -396,7 +454,9 @@ def _citation_fields(source: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _story_sources(database: Database, story_id: str) -> list[dict[str, Any]]:
+def _story_sources(
+    database: Database, story_id: str, *, allow_discovery: bool = False
+) -> list[dict[str, Any]]:
     sources = database.query(
         """
         SELECT 'registry:' || id AS evidence_key, source_name, source_role, title, url,
@@ -448,7 +508,7 @@ def _story_sources(database: Database, story_id: str) -> list[dict[str, Any]]:
             """,
             (int(str(source["evidence_key"]).partition(":")[2]),),
         )
-        source.update(_citation_fields(source))
+        source.update(_citation_fields(source, allow_discovery=allow_discovery))
     return sources
 
 
@@ -458,7 +518,7 @@ def _draft_source_rows(packet: dict[str, Any]) -> list[dict[str, Any]]:
     qualifying_urls = {
         str(source.get("citation_url") or "")
         for source in packet.get("sources", [])
-        if source.get("citation_allowed")
+        if source.get("citation_allowed") and source.get("source_role") != "Discovery"
     }
     ordered = sorted(
         packet.get("sources", []),
@@ -500,9 +560,14 @@ def build_packet(database: Database, work_item_id: int) -> dict[str, Any]:
     if not story:
         raise AssistanceError("Assistance story no longer exists")
     payload = json.loads(work.get("payload_json") or "{}")
+    manual_override = payload.get("approval_basis") == "manual_override"
     mode = payload.get("mode")
     operation = "draft_lens" if mode == "Open-Source Lens Brief" else "draft_neutral" if work["kind"] == "draft" else "triage"
-    if operation == "draft_lens" and story.get("opportunity_strength") not in {"Strong", "Moderate"}:
+    if (
+        operation == "draft_lens"
+        and not manual_override
+        and story.get("opportunity_strength") not in {"Strong", "Moderate"}
+    ):
         raise AssistanceError("The story is not eligible for an open-source lens")
     if operation.startswith("draft_"):
         _revalidate_approval(database, work, story, payload)
@@ -510,7 +575,21 @@ def build_packet(database: Database, work_item_id: int) -> dict[str, Any]:
         "SELECT id, text, status, volatility FROM claim WHERE story_id = ? ORDER BY id",
         (story["id"],),
     )
-    sources = _story_sources(database, str(story["id"]))
+    sources = _story_sources(
+        database, str(story["id"]), allow_discovery=manual_override
+    )
+    packet_claims = (
+        [
+            {
+                "id": claim["id"],
+                "text": claim["text"],
+                "volatility": claim["volatility"],
+            }
+            for claim in claims
+        ]
+        if manual_override
+        else claims
+    )
     if operation.startswith("draft_") and story["status"] != "approved":
         raise AssistanceError("Draft generation requires an approved story")
     return {
@@ -527,7 +606,7 @@ def build_packet(database: Database, work_item_id: int) -> dict[str, Any]:
             "relevance_bridge": story.get("relevance_bridge", ""),
             "counterargument": story.get("counterargument", ""),
         },
-        "claims": claims,
+        "claims": packet_claims,
         "sources": sources,
         "human_guidance": str(payload.get("reason") or "")[:2000],
         "policy": {
@@ -536,7 +615,8 @@ def build_packet(database: Database, work_item_id: int) -> dict[str, Any]:
             "unsupported_claims_prohibited": True,
             "natural_named_attribution": True,
             "citation_token_format": "[[source:<evidence_key>]]",
-            "discovery_sources_cannot_support_claims": True,
+            "discovery_sources_cannot_support_claims": not manual_override,
+            "stored_discovery_citations_allowed": manual_override,
         },
     }
 
@@ -550,21 +630,34 @@ def _revalidate_approval(
     snapshot = payload.get("story") or {}
     invalid = bool(story.get("material_update")) and not bool(snapshot.get("material_update"))
     current_claims = {
-        int(row["id"]): (str(row["status"]), str(row["volatility"]))
+        int(row["id"]): (
+            str(row["status"]),
+            str(row["volatility"]),
+            str(row["text"]),
+        )
         for row in database.query(
-            "SELECT id, status, volatility FROM claim WHERE story_id = ?", (story["id"],)
+            "SELECT id, status, volatility, text FROM claim WHERE story_id = ?",
+            (story["id"],),
         )
     }
     for claim in payload.get("claims", []):
         current = current_claims.get(int(claim["id"]))
-        if not current or current[0] != str(claim["status"]):
+        if (
+            not current
+            or current[0] != str(claim["status"])
+            or current[1] != str(claim.get("volatility") or "")
+            or ("text" in claim and current[2] != str(claim["text"]))
+        ):
             invalid = True
             break
+    manual_override = payload.get("approval_basis") == "manual_override"
     current_sources = {
         str(row["evidence_key"]): (
             str(row["verification_status"]), str(row.get("evidence_signature") or "")
         )
-        for row in _story_sources(database, str(story["id"]))
+        for row in _story_sources(
+            database, str(story["id"]), allow_discovery=manual_override
+        )
     }
     for source in payload.get("sources", []):
         key = str(source.get("evidence_key") or f"registry:{source.get('id')}")
