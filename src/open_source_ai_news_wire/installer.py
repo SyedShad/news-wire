@@ -163,6 +163,36 @@ class LocalInstaller:
         with path.open("rb") as handle:
             return hashlib.file_digest(handle, "sha256").hexdigest()
 
+    @staticmethod
+    def _materialize_python(environment: Path) -> Path:
+        """Copy uv's interpreter into the immutable release before verification."""
+        python = environment / "bin" / "python"
+        try:
+            resolved = python.resolve(strict=True)
+        except OSError as error:
+            raise InstallationError("Pinned Python runtime is missing or unsafe") from error
+        if not resolved.is_file() or not os.access(resolved, os.X_OK):
+            raise InstallationError("Pinned Python runtime is missing or unsafe")
+        if python.is_symlink():
+            materialized = python.with_name(".python-materialized")
+            try:
+                if materialized.exists() or materialized.is_symlink():
+                    raise InstallationError("Pinned Python staging path is unsafe")
+                shutil.copy2(resolved, materialized, follow_symlinks=True)
+                os.chmod(materialized, 0o700)
+                os.replace(materialized, python)
+            except InstallationError:
+                materialized.unlink(missing_ok=True)
+                raise
+            except OSError as error:
+                materialized.unlink(missing_ok=True)
+                raise InstallationError(
+                    "Pinned Python runtime could not be materialized"
+                ) from error
+        if python.is_symlink() or not python.is_file() or not os.access(python, os.X_OK):
+            raise InstallationError("Pinned Python runtime is missing or unsafe")
+        return python
+
     def _verified_manifest(
         self,
         release_path: Path,
@@ -325,8 +355,9 @@ class LocalInstaller:
                 wheel_sha256 = self._file_digest(wheels[0])
                 environment = staging / "venv"
                 self._checked([uv, "venv", "--python", "3.12.13", str(environment)], self.source_root)
+                pinned_python = self._materialize_python(environment)
                 self._checked(
-                    [uv, "pip", "install", "--python", str(environment / "bin" / "python"), str(wheels[0])],
+                    [uv, "pip", "install", "--python", str(pinned_python), str(wheels[0])],
                     self.source_root,
                 )
                 executable = environment / "bin" / "open-source-ai-news-wire"
