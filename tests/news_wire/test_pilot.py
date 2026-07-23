@@ -123,6 +123,32 @@ def test_extended_validation_preserves_original_start_and_auto_activates_fail_cl
     assert activated.notification_watermark == "2026-07-20T11:00:00Z"
 
 
+def test_extended_validation_can_remain_unarmed_without_activation_prerequisites(
+    tmp_path: Path,
+) -> None:
+    original = datetime(2026, 7, 10, tzinfo=UTC)
+    validation = datetime(2026, 7, 17, 10, tzinfo=UTC)
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    PilotManager(database, now=lambda: original).start_shadow()
+
+    status = PilotManager(database, now=lambda: validation).extend_validation(
+        auto_activate=False
+    )
+
+    assert status.state == "extended_shadow"
+    assert status.started_at == "2026-07-10T00:00:00Z"
+    assert status.validation_started_at == "2026-07-17T10:00:00Z"
+    assert status.auto_activate_armed is False
+    assert status.shadow_mode is True
+    assert status.notifications_enabled is False
+    after_window = PilotManager(
+        database, now=lambda: validation + timedelta(hours=73)
+    ).try_auto_activate()
+    assert after_window.auto_activate_armed is False
+    assert after_window.notifications_enabled is False
+
+
 def test_extended_readiness_reports_source_queue_and_canary_blockers(tmp_path: Path) -> None:
     validation = datetime(2026, 7, 17, 10, tzinfo=UTC)
     database = _armable_database(tmp_path, validation)
