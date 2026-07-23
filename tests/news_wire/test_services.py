@@ -11,6 +11,7 @@ from open_source_ai_news_wire.config import resolve_runtime_paths
 from open_source_ai_news_wire.demo import seed_demo_data
 from open_source_ai_news_wire.evidence import qualification_state, recalculate_story_qualification
 from open_source_ai_news_wire.services import DashboardService, human_bytes
+from open_source_ai_news_wire.source_registry import synchronize_sources
 from open_source_ai_news_wire.storage import Database
 
 
@@ -73,6 +74,56 @@ def test_review_now_excludes_old_and_completed_work_and_supports_newest_sort(
     assert anchors == sorted(anchors, reverse=True)
     older = service.list_story_page(window="older")["stories"]
     assert "old-urgent" in {story["id"] for story in older}
+
+
+def test_legacy_aggregator_only_story_is_newly_surfaced_until_dated(
+    service: DashboardService,
+) -> None:
+    story_id = "story-demo-watch-003"
+    synchronize_sources(service.database)
+    service.database.execute(
+        """
+        UPDATE source_item
+        SET source_registry_id = 'hacker-news-ai',
+            source_name = 'Hacker News AI Discovery', source_role = 'Discovery',
+            timestamp_status = 'legacy_assumed'
+        WHERE story_id = ?
+        """,
+        (story_id,),
+    )
+
+    surfaced = service.get_story(story_id)
+    assert surfaced["original_publication_known"] is False
+    assert surfaced["freshness"] == "Newly surfaced"
+    assert surfaced["evidence_points"] == 0
+    assert story_id not in {
+        row["id"] for row in service.list_story_page(window="review_now")["stories"]
+    }
+
+    service.database.execute(
+        """
+        INSERT INTO evidence_source(
+            story_id, requested_url, canonical_url, publisher_key,
+            acquisition_method, proposed_role, status, published_at,
+            created_at, updated_at
+        ) VALUES(?, 'https://publisher.example/old-report',
+                 'https://publisher.example/old-report', 'publisher.example',
+                 'discovery_enrichment', 'Reporting', 'fetched',
+                 '2021-04-03T12:00:00Z', '2026-07-23T09:00:00Z',
+                 '2026-07-23T09:00:00Z')
+        """,
+        (story_id,),
+    )
+    service.database.execute(
+        "UPDATE story_cluster SET first_public_at = '2021-04-03T12:00:00Z' WHERE id = ?",
+        (story_id,),
+    )
+    dated = service.get_story(story_id)
+    assert dated["original_publication_known"] is True
+    assert dated["freshness"] == "Older"
+    assert story_id in {
+        row["id"] for row in service.list_story_page(window="older")["stories"]
+    }
 
 
 def test_material_update_returns_old_story_to_review_now(service: DashboardService) -> None:
@@ -407,12 +458,238 @@ def test_draft_status_and_history_include_requests_before_a_draft_exists(service
         (status["work_item_id"],),
     )
     waiting = service.draft_status("story-demo-runtime-001")
-    assert waiting["status"] == "waiting"
+    assert waiting["status"] == "waiting_for_isolation"
     assert waiting["retryable"] is True
+    assert waiting["manual_editor_available"] is True
     assert service.database.one(
         "SELECT COUNT(*) AS count FROM review_action WHERE story_id = ? AND action = 'approve_neutral'",
         ("story-demo-runtime-001",),
     )["count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("raw_status", "attempts", "error_code", "expected_status"),
+    (
+        ("waiting", 0, "waiting_for_login", "waiting_for_login"),
+        ("waiting", 0, "codex_authentication_invalid", "waiting_for_login"),
+        ("waiting", 0, "waiting_for_usage_reset", "waiting_for_usage_reset"),
+        ("waiting", 0, "volatile_source_unavailable", "waiting"),
+        ("waiting", 0, "volatile_source_unsafe", "failed_security"),
+        ("needs_reapproval", 0, "volatile_source_drift", "needs_reapproval"),
+        ("generating", 1, "", "generating"),
+        ("deferred", 1, "codex_unavailable", "failed"),
+        ("completed", 1, "", "draft_ready"),
+        ("cancelled", 1, "manual_draft_completed", "draft_ready"),
+        ("waiting", 0, "codex_identity_mismatch", "failed_security"),
+        ("waiting", 0, "attestation_expired", "waiting_for_isolation"),
+        ("waiting", 0, "isolation_not_passed", "waiting_for_isolation"),
+        ("waiting", 0, "story_revision_changed", "needs_reapproval"),
+    ),
+)
+def test_draft_status_exposes_exact_operational_condition(
+    service: DashboardService,
+    raw_status: str,
+    attempts: int,
+    error_code: str,
+    expected_status: str,
+) -> None:
+    service.review("story-demo-runtime-001", "approve_neutral")
+    service.database.execute(
+        "UPDATE work_item SET status = ?, attempt_count = ?, last_error_class = ? WHERE kind = 'draft'",
+        (raw_status, attempts, error_code),
+    )
+
+    status = service.draft_status("story-demo-runtime-001")
+
+    assert status["status"] == expected_status
+    assert status["message"] != "Draft generation is awaiting a safe next step."
+
+
+def test_editable_shell_save_rechecks_transactional_ownership(
+    service: DashboardService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service.review("story-demo-runtime-001", "approve_neutral")
+    shell = service.database.one(
+        "SELECT * FROM draft WHERE story_id = 'story-demo-runtime-001'"
+    )
+    real_get_draft = service.get_draft
+
+    def stale_shell(draft_id: int):
+        draft = real_get_draft(draft_id)
+        service.database.execute(
+            "UPDATE draft SET status = 'Superseded' WHERE id = ?", (draft_id,)
+        )
+        return draft
+
+    monkeypatch.setattr(service, "get_draft", stale_shell)
+
+    with pytest.raises(ValueError, match="changed while it was being edited"):
+        service.save_draft(
+            int(shell["id"]), shell["headline"], shell["metadata"], shell["body"], ""
+        )
+
+
+def test_editable_shell_save_loses_to_completed_generation(
+    service: DashboardService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service.review("story-demo-runtime-001", "approve_neutral")
+    shell = service.database.one(
+        "SELECT * FROM draft WHERE story_id = 'story-demo-runtime-001'"
+    )
+    real_get_draft = service.get_draft
+
+    def completed_work(draft_id: int):
+        draft = real_get_draft(draft_id)
+        service.database.execute(
+            "UPDATE work_item SET status = 'completed' WHERE kind = 'draft'"
+        )
+        return draft
+
+    monkeypatch.setattr(service, "get_draft", completed_work)
+
+    with pytest.raises(ValueError, match="generation completed"):
+        service.save_draft(
+            int(shell["id"]), shell["headline"], shell["metadata"], shell["body"], ""
+        )
+
+
+@pytest.mark.parametrize("provenance", ("{", "{}"))
+def test_editable_shell_requires_work_provenance(
+    service: DashboardService, provenance: str
+) -> None:
+    service.review("story-demo-runtime-001", "approve_neutral")
+    shell = service.database.one(
+        "SELECT * FROM draft WHERE story_id = 'story-demo-runtime-001'"
+    )
+    service.database.execute(
+        "UPDATE draft SET provenance_json = ? WHERE id = ?", (provenance, shell["id"])
+    )
+
+    with pytest.raises(ValueError, match="not linked"):
+        service.save_draft(
+            int(shell["id"]), shell["headline"], shell["metadata"], shell["body"], ""
+        )
+
+
+def test_malformed_legacy_draft_json_remains_visible(service: DashboardService) -> None:
+    service.review("story-demo-runtime-001", "approve_neutral")
+    service.database.execute(
+        "UPDATE draft SET approval_snapshot_json = '{' WHERE story_id = 'story-demo-runtime-001'"
+    )
+    service.database.execute(
+        "UPDATE work_item SET payload_json = '{' WHERE story_id = 'story-demo-runtime-001'"
+    )
+
+    entries = service.list_drafts()
+
+    assert {entry["entry_kind"] for entry in entries} == {"draft", "request"}
+    assert all(entry["approval_basis"] == "verified" for entry in entries)
+
+
+def test_completed_request_without_draft_is_visible_as_failed(
+    service: DashboardService,
+) -> None:
+    service.review("story-demo-runtime-001", "approve_neutral")
+    service.database.execute(
+        "DELETE FROM draft WHERE story_id = 'story-demo-runtime-001'"
+    )
+    service.database.execute(
+        "UPDATE work_item SET status = 'completed', payload_json = '{' WHERE story_id = 'story-demo-runtime-001'"
+    )
+
+    status = service.draft_status("story-demo-runtime-001")
+
+    assert status["status"] == "failed"
+    assert status["retryable"] is True
+
+
+def test_editable_shell_builder_handles_invalid_and_duplicate_snapshot_rows(
+    service: DashboardService,
+) -> None:
+    assert service._create_editable_draft_shell(999_999, {}) is None
+    service.review("story-demo-runtime-001", "approve_neutral")
+    work = service.database.one(
+        "SELECT id, payload_json FROM work_item WHERE story_id = 'story-demo-runtime-001'"
+    )
+    shell = service.database.one(
+        "SELECT id FROM draft WHERE story_id = 'story-demo-runtime-001'"
+    )
+    assert service._create_editable_draft_shell(int(work["id"]), {}) is None
+
+    service.database.execute("DELETE FROM draft WHERE id = ?", (shell["id"],))
+    snapshot = json.loads(work["payload_json"])
+    snapshot["story"]["summary"] = ""
+    snapshot["claims"] = [{"text": "Fallback claim text"}]
+    snapshot["sources"] = [
+        {
+            "citation_label": "Unsafe source",
+            "citation_url": "http://127.0.0.1/private",
+            "source_role": "Discovery",
+        },
+        {
+            "citation_label": "Unsafe source",
+            "citation_url": "http://127.0.0.1/private",
+            "source_role": "Discovery",
+        },
+        "invalid row",
+    ]
+
+    created = service._create_editable_draft_shell(int(work["id"]), snapshot)
+
+    assert created is not None
+    draft = service.get_draft(created)
+    assert draft["body"] == "Fallback claim text"
+    assert draft["sources"] == [
+        {
+            "display_label": "Unsafe source",
+            "title": "Unsafe source",
+            "url": "",
+            "role": "Discovery",
+            "hosting_publisher_name": "",
+            "reporting_origin_name": "",
+            "provenance_type": "unknown",
+        }
+    ]
+    assert service._create_editable_draft_shell(int(work["id"]), snapshot) == created
+
+
+def test_unavailable_assistance_creates_an_editable_shell_that_can_be_completed(
+    service: DashboardService,
+) -> None:
+    service.review(
+        "story-demo-watch-003",
+        "manual_approve_neutral",
+        confirmation_version="manual_override_v1",
+    )
+    shell = service.database.one(
+        "SELECT * FROM draft WHERE story_id = ? ORDER BY version DESC LIMIT 1",
+        ("story-demo-watch-003",),
+    )
+    assert shell is not None
+    assert shell["status"] == "Editable Shell"
+    assert "unverified" not in shell["body"].casefold()
+    assert "provisional" not in shell["body"].casefold()
+
+    completed_id = service.save_draft(
+        int(shell["id"]),
+        shell["headline"],
+        shell["metadata"],
+        f"{shell['body']} Human-reviewed context.",
+        "",
+    )
+
+    assert service.get_draft(completed_id)["status"] == "Current"
+    assert service.database.one(
+        "SELECT status, last_error_class FROM work_item WHERE story_id = ? AND kind = 'draft'",
+        ("story-demo-watch-003",),
+    ) == {"status": "cancelled", "last_error_class": "manual_draft_completed"}
+    assert service.database.one(
+        "SELECT status FROM story_cluster WHERE id = ?",
+        ("story-demo-watch-003",),
+    ) == {"status": "draft_ready"}
+    status = service.draft_status("story-demo-watch-003")
+    assert status["status"] == "draft_ready"
+    assert status["draft_id"] == completed_id
 
 
 def test_watch_cannot_be_approved_for_drafting(service: DashboardService) -> None:
@@ -812,7 +1089,7 @@ def test_settings_alerts_and_evidence_failure_paths(service: DashboardService) -
     assert settings["counts"]["stories"] == 5
     assert settings["counts"]["registered sources"] == 12
     assert settings["counts"]["source items"] == 9
-    assert settings["app_version"] == "0.3.6"
+    assert settings["app_version"] == "0.3.7"
     assert settings["purge_preview"]["operations_count"] == 1
     assert settings["demo_mode"] is True
     assert service.mark_alerts_read() == 6

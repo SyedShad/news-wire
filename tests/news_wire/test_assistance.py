@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import html
 import json
 import subprocess
 import threading
+from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
 
@@ -16,6 +18,7 @@ from open_source_ai_news_wire.assistance import (
     AssistanceError,
     AssistanceService,
     AssistanceTransientError,
+    CodexIdentity,
     CodexInvoker,
     InvocationResult,
     ISOLATION_CANARY_VERSION,
@@ -29,12 +32,60 @@ from open_source_ai_news_wire.assistance import (
 )
 from open_source_ai_news_wire.config import resolve_runtime_paths
 from open_source_ai_news_wire.demo import seed_demo_data
+from open_source_ai_news_wire.network import FetchResult, UnsafeRequest
 from open_source_ai_news_wire.services import DashboardService
 from open_source_ai_news_wire.storage import Database
 
 
+FAKE_IDENTITY = CodexIdentity(
+    path="/Applications/ChatGPT.app/Contents/Resources/codex",
+    version="test-codex",
+    team_id="2DC432GLL2",
+    identifier="codex",
+    sha256="a" * 64,
+    cdhash="b" * 40,
+)
+TEST_AUTH_JSON = json.dumps(
+    {
+        "auth_mode": "chatgpt",
+        "tokens": {"access_token": "obvious-dummy"},
+        "OPENAI_API_KEY": None,
+    }
+)
+
+
+def _identity_for(path: Path) -> CodexIdentity:
+    return CodexIdentity(
+        path=str(path.resolve()),
+        version="test-codex",
+        team_id="2DC432GLL2",
+        identifier="codex",
+        sha256="a" * 64,
+        cdhash="b" * 40,
+    )
+
+
+class _FakeBroker:
+    endpoint = ("127.0.0.1", 43123)
+    proxy_url = "http://127.0.0.1:43123"
+    failure_code = ""
+
+    def start(self):
+        return self
+
+    def stop(self):
+        return None
+
+
+def _codex_invoker(**kwargs) -> CodexInvoker:
+    kwargs.setdefault("identity_verifier", _identity_for)
+    kwargs.setdefault("broker_factory", _FakeBroker)
+    return CodexInvoker(**kwargs)
+
+
 class FakeInvoker:
     private_network_isolation_proven = True
+    identity = FAKE_IDENTITY
 
     def __init__(self, *, fail: bool = False):
         self.fail = fail
@@ -72,6 +123,76 @@ class FakeInvoker:
         return InvocationResult(payload, "test-model", 100, 80)
 
 
+class _FakeVolatileSourceClient:
+    def __init__(
+        self,
+        passages: dict[str, str],
+        *,
+        error: Exception | None = None,
+        fetched_urls: list[str] | None = None,
+    ) -> None:
+        self.passages = passages
+        self.error = error
+        self.fetched_urls = fetched_urls
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def fetch(self, url: str) -> FetchResult:
+        if self.fetched_urls is not None:
+            self.fetched_urls.append(url)
+        if self.error is not None:
+            raise self.error
+        passage = self.passages[url]
+        body = (
+            '<html><head><meta name="description" content="'
+            + html.escape(passage, quote=True)
+            + '"></head><body></body></html>'
+        ).encode()
+        return FetchResult(url, 200, {"content-type": "text/html; charset=utf-8"}, body)
+
+
+def _approved_volatile_source_factory(
+    database: Database,
+    *,
+    passage_override: str | None = None,
+    error: Exception | None = None,
+    fetched_urls: list[str] | None = None,
+):
+    work = database.one(
+        "SELECT payload_json FROM work_item WHERE kind='draft' ORDER BY id DESC LIMIT 1"
+    )
+    snapshot = json.loads(work["payload_json"])
+    volatile_ids = {
+        claim["id"]
+        for claim in snapshot["claims"]
+        if claim.get("volatility") == "volatile"
+    }
+    passages = {
+        str(source.get("canonical_url") or source["url"]): (
+            passage_override
+            if passage_override is not None
+            else str(source.get("passage") or source.get("summary") or "")
+        )
+        for source in snapshot["sources"]
+        if volatile_ids
+        & {
+            relationship.get("claim_id")
+            for relationship in source.get("claim_relationships", [])
+        }
+    }
+
+    def factory(_host: str) -> _FakeVolatileSourceClient:
+        return _FakeVolatileSourceClient(
+            passages, error=error, fetched_urls=fetched_urls
+        )
+
+    return factory
+
+
 def _service(tmp_path: Path) -> tuple[Database, DashboardService]:
     database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
     database.initialize()
@@ -80,9 +201,15 @@ def _service(tmp_path: Path) -> tuple[Database, DashboardService]:
 
 
 def _pass_isolation(database: Database) -> None:
-    now = "2026-07-14T00:00:00Z"
+    current = datetime.now(UTC).replace(microsecond=0)
+    now = current.isoformat().replace("+00:00", "Z")
     database.set_state("assistance_isolation_gate", "passed", now)
     database.set_state("assistance_isolation_version", ISOLATION_CANARY_VERSION, now)
+    database.set_state(
+        assistance_module.ISOLATION_ATTESTATION_STATE,
+        Database.json(assistance_module._attestation_payload(FAKE_IDENTITY, current)),
+        now,
+    )
 
 
 def test_packet_contains_only_bounded_story_evidence(tmp_path: Path) -> None:
@@ -105,17 +232,34 @@ def test_packet_contains_only_bounded_story_evidence(tmp_path: Path) -> None:
 def test_approved_draft_is_generated_versioned_and_accounted(tmp_path: Path) -> None:
     database, service = _service(tmp_path)
     service.review("story-demo-runtime-001", "approve_neutral")
+    shell = database.one(
+        "SELECT id, status, provenance_json FROM draft WHERE story_id='story-demo-runtime-001'"
+    )
+    assert shell["status"] == "Editable Shell"
     _pass_isolation(database)
     database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
 
-    draft_id = AssistanceService(database, FakeInvoker()).process_next()
+    draft_id = AssistanceService(
+        database,
+        FakeInvoker(),
+        volatile_source_client_factory=_approved_volatile_source_factory(database),
+    ).process_next()
 
     assert draft_id is not None
     assert database.one("SELECT mode, status, version FROM draft WHERE id = ?", (draft_id,)) == {
         "mode": "Neutral News Brief",
         "status": "Current",
-        "version": 1,
+        "version": 2,
     }
+    assert database.one(
+        "SELECT status FROM draft WHERE id = ?", (shell["id"],)
+    ) == {"status": "Superseded"}
+    assert database.one(
+        "SELECT supersedes_id FROM draft WHERE id = ?", (draft_id,)
+    ) == {"supersedes_id": shell["id"]}
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM draft WHERE story_id='story-demo-runtime-001' AND status='Current'"
+    ) == {"count": 1}
     assert database.one("SELECT status FROM story_cluster WHERE id = 'story-demo-runtime-001'") == {
         "status": "draft_ready"
     }
@@ -129,13 +273,59 @@ def test_approved_draft_is_generated_versioned_and_accounted(tmp_path: Path) -> 
     assert '"prompt_version":"v3"' in draft["provenance_json"]
 
 
+def test_approval_keeps_editable_shell_even_when_assistance_is_ready(tmp_path: Path) -> None:
+    database, service = _service(tmp_path)
+    _pass_isolation(database)
+    database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
+
+    service.review("story-demo-runtime-001", "approve_neutral")
+
+    assert database.one(
+        "SELECT status FROM draft WHERE story_id = 'story-demo-runtime-001'"
+    ) == {"status": "Editable Shell"}
+
+
+def test_ai_completion_wins_before_stale_shell_save_without_duplicate_current(
+    tmp_path: Path,
+) -> None:
+    database, service = _service(tmp_path)
+    service.review("story-demo-runtime-001", "approve_neutral")
+    shell = database.one(
+        "SELECT * FROM draft WHERE story_id = 'story-demo-runtime-001'"
+    )
+    _pass_isolation(database)
+    database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
+    AssistanceService(
+        database,
+        FakeInvoker(),
+        volatile_source_client_factory=_approved_volatile_source_factory(database),
+    ).process_next()
+
+    with pytest.raises(ValueError, match="current draft version or editable shell"):
+        service.save_draft(
+            int(shell["id"]),
+            str(shell["headline"]),
+            str(shell["metadata"]),
+            str(shell["body"]),
+            "",
+        )
+
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM draft WHERE story_id = 'story-demo-runtime-001' AND status = 'Current'"
+    ) == {"count": 1}
+
+
 def test_lens_draft_requires_and_preserves_separate_approved_mode(tmp_path: Path) -> None:
     database, service = _service(tmp_path)
     service.review("story-demo-policy-002", "approve_lens")
     _pass_isolation(database)
     database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
 
-    draft_id = AssistanceService(database, FakeInvoker()).process_next()
+    draft_id = AssistanceService(
+        database,
+        FakeInvoker(),
+        volatile_source_client_factory=_approved_volatile_source_factory(database),
+    ).process_next()
 
     draft = database.one("SELECT mode, lens FROM draft WHERE id = ?", (draft_id,))
     assert draft["mode"] == "Open-Source Lens Brief"
@@ -176,7 +366,11 @@ def test_manual_override_uses_discovery_sources_without_prompting_with_gate_labe
 
     _pass_isolation(database)
     database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
-    draft_id = AssistanceService(database, FakeInvoker()).process_next()
+    draft_id = AssistanceService(
+        database,
+        FakeInvoker(),
+        volatile_source_client_factory=_approved_volatile_source_factory(database),
+    ).process_next()
     draft = database.one(
         "SELECT mode, body, lens, sources_json, approval_snapshot_json FROM draft WHERE id = ?",
         (draft_id,),
@@ -299,6 +493,7 @@ def test_transient_draft_failure_retries_once_and_accounts_retry(tmp_path: Path)
         FlakyInvoker(),
         retry_delay_seconds=0,
         sleeper=lambda _seconds: None,
+        volatile_source_client_factory=_approved_volatile_source_factory(database),
     ).process_next()
 
     assert draft_id is not None
@@ -308,6 +503,155 @@ def test_transient_draft_failure_retries_once_and_accounts_retry(tmp_path: Path)
     assert database.one(
         "SELECT retry_count FROM usage_ledger WHERE category='draft' ORDER BY id DESC LIMIT 1"
     ) == {"retry_count": 1}
+
+
+def test_usage_exhaustion_waits_without_consuming_retry_or_charge(tmp_path: Path) -> None:
+    database, service = _service(tmp_path)
+    service.review("story-demo-runtime-001", "approve_neutral")
+    _pass_isolation(database)
+    database.set_state("assistance_enabled", "true", assistance_module._now())
+
+    class ExhaustedInvoker(FakeInvoker):
+        def invoke(self, packet):
+            self.packets.append(packet)
+            raise AssistanceDeferred(
+                "waiting_for_usage_reset: Saved ChatGPT allowance is exhausted"
+            )
+
+    work = database.one("SELECT id FROM work_item WHERE kind='draft'")
+    usage_before = database.one("SELECT COUNT(*) AS count FROM usage_ledger")
+    with pytest.raises(AssistanceDeferred, match="waiting_for_usage_reset"):
+        AssistanceService(
+            database,
+            ExhaustedInvoker(),
+            volatile_source_client_factory=_approved_volatile_source_factory(database),
+        ).process(int(work["id"]))
+
+    assert database.one(
+        "SELECT status, attempt_count, last_error_class FROM work_item WHERE id=?",
+        (work["id"],),
+    ) == {
+        "status": "waiting",
+        "attempt_count": 1,
+        "last_error_class": "waiting_for_usage_reset",
+    }
+    assert database.one("SELECT COUNT(*) AS count FROM usage_ledger") == usage_before
+
+
+def test_volatile_source_is_refetched_unchanged_before_model_and_charged_once(
+    tmp_path: Path,
+) -> None:
+    database, service = _service(tmp_path)
+    volatile_claim = database.one(
+        "SELECT id FROM claim WHERE story_id='story-demo-policy-002' AND volatility='volatile'"
+    )
+    second_source = database.one(
+        "SELECT id FROM source_item WHERE story_id='story-demo-policy-002' ORDER BY id DESC LIMIT 1"
+    )
+    database.execute(
+        "INSERT INTO evidence_link(claim_id, source_item_id, relationship) VALUES(?, ?, 'supports')",
+        (volatile_claim["id"], second_source["id"]),
+    )
+    service.review("story-demo-policy-002", "approve_neutral")
+    _pass_isolation(database)
+    database.set_state("assistance_enabled", "true", assistance_module._now())
+    invoker = FakeInvoker()
+    fetched_urls: list[str] = []
+    usage_before = database.one("SELECT COUNT(*) AS count FROM usage_ledger")["count"]
+
+    draft_id = AssistanceService(
+        database,
+        invoker,
+        volatile_source_client_factory=_approved_volatile_source_factory(
+            database, fetched_urls=fetched_urls
+        ),
+    ).process_next()
+
+    assert draft_id is not None
+    assert len(invoker.packets) == 1
+    assert len(fetched_urls) == 2
+    assert database.one("SELECT COUNT(*) AS count FROM usage_ledger") == {
+        "count": usage_before + 1
+    }
+
+
+def test_volatile_source_drift_requires_reapproval_without_model_or_charge(
+    tmp_path: Path,
+) -> None:
+    database, service = _service(tmp_path)
+    service.review("story-demo-policy-002", "approve_neutral")
+    _pass_isolation(database)
+    database.set_state("assistance_enabled", "true", assistance_module._now())
+    invoker = FakeInvoker()
+    usage_before = database.one("SELECT COUNT(*) AS count FROM usage_ledger")
+
+    with pytest.raises(ApprovalInvalidated, match="volatile_source_drift"):
+        AssistanceService(
+            database,
+            invoker,
+            volatile_source_client_factory=_approved_volatile_source_factory(
+                database, passage_override="The live source now states materially different facts."
+            ),
+        ).process_next()
+
+    assert invoker.packets == []
+    assert database.one("SELECT COUNT(*) AS count FROM usage_ledger") == usage_before
+    assert database.one(
+        "SELECT status, last_error_class FROM work_item WHERE kind='draft'"
+    ) == {"status": "needs_reapproval", "last_error_class": "volatile_source_drift"}
+    assert database.one(
+        "SELECT status FROM story_cluster WHERE id='story-demo-policy-002'"
+    ) == {"status": "candidate"}
+
+
+def test_unavailable_volatile_source_waits_without_model_or_charge(
+    tmp_path: Path,
+) -> None:
+    database, service = _service(tmp_path)
+    service.review("story-demo-policy-002", "approve_neutral")
+    _pass_isolation(database)
+    database.set_state("assistance_enabled", "true", assistance_module._now())
+    invoker = FakeInvoker()
+    usage_before = database.one("SELECT COUNT(*) AS count FROM usage_ledger")
+
+    with pytest.raises(AssistanceDeferred, match="volatile_source_unavailable"):
+        AssistanceService(
+            database,
+            invoker,
+            volatile_source_client_factory=_approved_volatile_source_factory(
+                database, error=ConnectionError("temporary source outage")
+            ),
+        ).process_next()
+
+    assert invoker.packets == []
+    assert database.one("SELECT COUNT(*) AS count FROM usage_ledger") == usage_before
+    assert database.one(
+        "SELECT status, last_error_class FROM work_item WHERE kind='draft'"
+    ) == {"status": "waiting", "last_error_class": "volatile_source_unavailable"}
+
+
+def test_unsafe_volatile_source_fails_without_model_or_charge(tmp_path: Path) -> None:
+    database, service = _service(tmp_path)
+    service.review("story-demo-policy-002", "approve_neutral")
+    _pass_isolation(database)
+    database.set_state("assistance_enabled", "true", assistance_module._now())
+    invoker = FakeInvoker()
+    usage_before = database.one("SELECT COUNT(*) AS count FROM usage_ledger")
+
+    with pytest.raises(AssistanceConfigurationError, match="volatile_source_unsafe"):
+        AssistanceService(
+            database,
+            invoker,
+            volatile_source_client_factory=_approved_volatile_source_factory(
+                database, error=UnsafeRequest("private address blocked")
+            ),
+        ).process_next()
+
+    assert invoker.packets == []
+    assert database.one("SELECT COUNT(*) AS count FROM usage_ledger") == usage_before
+    assert database.one(
+        "SELECT status, last_error_class FROM work_item WHERE kind='draft'"
+    ) == {"status": "failed", "last_error_class": "volatile_source_unsafe"}
 
 
 def test_exact_claim_does_not_process_another_draft_or_reclaim_live_lease(tmp_path: Path) -> None:
@@ -320,7 +664,11 @@ def test_exact_claim_does_not_process_another_draft_or_reclaim_live_lease(tmp_pa
         "SELECT id FROM work_item WHERE story_id='story-demo-policy-002' AND kind='draft'"
     )
 
-    draft_id = AssistanceService(database, FakeInvoker()).process(int(work["id"]))
+    draft_id = AssistanceService(
+        database,
+        FakeInvoker(),
+        volatile_source_client_factory=_approved_volatile_source_factory(database),
+    ).process(int(work["id"]))
 
     assert draft_id is not None
     assert database.one(
@@ -355,7 +703,11 @@ def test_immediate_and_scheduled_workers_cannot_claim_the_same_draft(
 
     thread = threading.Thread(
         target=lambda: completed.append(
-            AssistanceService(database, BlockingInvoker()).process(int(work["id"]))
+            AssistanceService(
+                database,
+                BlockingInvoker(),
+                volatile_source_client_factory=_approved_volatile_source_factory(database),
+            ).process(int(work["id"]))
         )
     )
     thread.start()
@@ -369,6 +721,9 @@ def test_immediate_and_scheduled_workers_cannot_claim_the_same_draft(
     assert len(completed) == 1 and completed[0] is not None
     assert database.one(
         "SELECT COUNT(*) AS count FROM draft WHERE story_id = 'story-demo-runtime-001'"
+    ) == {"count": 2}
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM draft WHERE story_id = 'story-demo-runtime-001' AND status = 'Current'"
     ) == {"count": 1}
     assert database.one("SELECT COUNT(*) AS count FROM assistance_result") == {"count": 1}
 
@@ -385,7 +740,7 @@ def test_exact_draft_waits_with_visible_prerequisite_codes(
         run_assistance_work(database, int(work["id"]))
     assert database.one(
         "SELECT status, last_error_class FROM work_item WHERE id = ?", (work["id"],)
-    ) == {"status": "waiting", "last_error_class": "isolation_not_passed"}
+    ) == {"status": "waiting", "last_error_class": "security_revalidation"}
 
     database.execute(
         "UPDATE work_item SET status = 'queued', last_error_class = NULL WHERE id = ?",
@@ -504,7 +859,11 @@ def test_expired_generation_lease_is_reclaimed_without_duplicate_result(tmp_path
         "SELECT id FROM work_item WHERE story_id='story-demo-runtime-001'"
     )
 
-    draft_id = AssistanceService(database, FakeInvoker()).process(int(work["id"]))
+    draft_id = AssistanceService(
+        database,
+        FakeInvoker(),
+        volatile_source_client_factory=_approved_volatile_source_factory(database),
+    ).process(int(work["id"]))
 
     assert draft_id is not None
     assert database.one(
@@ -792,19 +1151,34 @@ def test_isolation_canary_records_pass_and_failure_without_enabling_assistance(t
         def server_close(self) -> None:
             return None
 
-    assert run_isolation_canary(database, FakeInvoker(), server_factory=FakeServer) is True
+    assert run_isolation_canary(
+        database,
+        FakeInvoker(),
+        server_factory=FakeServer,
+        boundary_canary=lambda: (True, ""),
+    ) is True
     assert database.get_state("assistance_isolation_gate") == "passed"
     assert database.get_state("assistance_isolation_version") == ISOLATION_CANARY_VERSION
     assert database.get_state("assistance_enabled", "false") == "false"
 
-    assert run_isolation_canary(database, FakeInvoker(fail=True), server_factory=FakeServer) is False
+    assert run_isolation_canary(
+        database,
+        FakeInvoker(fail=True),
+        server_factory=FakeServer,
+        boundary_canary=lambda: (True, ""),
+    ) is False
     assert database.get_state("assistance_isolation_gate") == "failed"
     assert database.get_state("assistance_isolation_version") == ""
     assert database.get_state("assistance_enabled") == "false"
 
     unproven = FakeInvoker()
     unproven.private_network_isolation_proven = False
-    assert run_isolation_canary(database, unproven, server_factory=FakeServer) is False
+    assert run_isolation_canary(
+        database,
+        unproven,
+        server_factory=FakeServer,
+        boundary_canary=lambda: (True, ""),
+    ) is False
     assert database.get_state("assistance_isolation_gate") == "failed"
     assert database.get_state("assistance_unavailable_reason") == (
         "private_network_isolation_unproven"
@@ -815,14 +1189,14 @@ def test_outer_sandbox_profile_allows_only_task_auth_system_and_codex_paths(tmp_
     task = tmp_path / "task"
     codex = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
     auth = tmp_path / "private-auth" / "auth.json"
-    profile = sandbox_profile(task, codex, auth)
+    profile = sandbox_profile(task, codex, auth, 43123)
 
     assert str(task) in profile
     assert str(auth) in profile
     assert "/Applications/ChatGPT.app" in profile
     assert "(deny default)" in profile
-    assert '(allow network-outbound (remote tcp "*:443"))' in profile
-    assert '(deny network-outbound (remote ip "localhost:*"))' in profile
+    assert '(allow network-outbound (remote tcp "localhost:43123"))' in profile
+    assert '*:443' not in profile
     assert '(literal "/")' in profile
     assert "(allow file-write*" in profile
     assert "(allow process-fork)" not in profile
@@ -831,14 +1205,14 @@ def test_outer_sandbox_profile_allows_only_task_auth_system_and_codex_paths(tmp_
 
 def test_outer_sandbox_profile_handles_shallow_executable_path(tmp_path: Path) -> None:
     profile = sandbox_profile(
-        tmp_path / "task", Path("/codex"), tmp_path / "auth.json"
+        tmp_path / "task", Path("/codex"), tmp_path / "auth.json", 43123
     )
 
     assert '(literal "/codex")' in profile
     assert '(subpath "/")' not in profile
 
 
-def test_codex_discovery_prefers_explicit_then_path_then_chatgpt(
+def test_codex_discovery_uses_explicit_for_tests_and_bundled_chatgpt_in_production(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     explicit = tmp_path / "explicit-codex"
@@ -856,15 +1230,12 @@ def test_codex_discovery_prefers_explicit_then_path_then_chatgpt(
         candidate.write_text("binary", encoding="utf-8")
         candidate.chmod(0o755)
 
-    monkeypatch.setattr(assistance_module.shutil, "which", lambda _name: str(path_binary))
     monkeypatch.setattr(
         assistance_module, "_known_codex_binary_paths", lambda: (app_binary,)
     )
-    assert CodexInvoker(codex_binary=explicit).codex_binary == explicit.resolve()
-    assert CodexInvoker().codex_binary == path_binary.resolve()
-
-    monkeypatch.setattr(assistance_module.shutil, "which", lambda _name: None)
-    assert CodexInvoker().codex_binary == app_binary.resolve()
+    assert _codex_invoker(codex_binary=explicit).codex_binary == explicit.resolve()
+    assert _codex_invoker().codex_binary == app_binary.resolve()
+    assert _codex_invoker().codex_binary != path_binary.resolve()
 
 
 def test_codex_discovery_rejects_non_files_and_non_executables_safely(
@@ -874,7 +1245,6 @@ def test_codex_discovery_rejects_non_files_and_non_executables_safely(
     directory.mkdir()
     non_executable = tmp_path / "not-executable"
     non_executable.write_text("binary", encoding="utf-8")
-    monkeypatch.setattr(assistance_module.shutil, "which", lambda _name: str(directory))
     monkeypatch.setattr(
         assistance_module,
         "_known_codex_binary_paths",
@@ -882,7 +1252,7 @@ def test_codex_discovery_rejects_non_files_and_non_executables_safely(
     )
 
     with pytest.raises(AssistanceError, match="^codex_unavailable:"):
-        CodexInvoker(codex_binary=tmp_path / "missing")
+        _codex_invoker(codex_binary=tmp_path / "missing")
 
 
 def test_codex_invoker_builds_isolated_command_and_validates_result(tmp_path: Path) -> None:
@@ -892,7 +1262,7 @@ def test_codex_invoker_builds_isolated_command_and_validates_result(tmp_path: Pa
     codex.chmod(0o755)
     auth = tmp_path / "auth" / "auth.json"
     auth.parent.mkdir()
-    auth.write_text("{}", encoding="utf-8")
+    auth.write_text(TEST_AUTH_JSON, encoding="utf-8")
     captured: dict[str, object] = {}
 
     def profile_runner(arguments, cwd, environment):
@@ -912,7 +1282,8 @@ def test_codex_invoker_builds_isolated_command_and_validates_result(tmp_path: Pa
             cwd=cwd,
             environment=environment,
             profile=profile_path.read_text(encoding="utf-8"),
-            auth_copied=isolated_auth.read_text(encoding="utf-8") == "{}",
+            auth_copied=json.loads(isolated_auth.read_text(encoding="utf-8"))
+            == json.loads(TEST_AUTH_JSON),
             auth_mode=isolated_auth.stat().st_mode & 0o777,
         )
         output = Path(arguments[arguments.index("--output-last-message") + 1])
@@ -927,7 +1298,7 @@ def test_codex_invoker_builds_isolated_command_and_validates_result(tmp_path: Pa
         }), encoding="utf-8")
         return subprocess.CompletedProcess(arguments, 0, "", "")
 
-    invoker = CodexInvoker(
+    invoker = _codex_invoker(
         codex_binary=codex, sandbox_binary=Path("/usr/bin/sandbox-exec"),
         auth_file=auth, runner=runner, profile_runner=profile_runner,
     )
@@ -965,10 +1336,10 @@ def test_outer_sandbox_profile_compiles_with_real_sandbox_exec(tmp_path: Path) -
     task.mkdir()
     auth = tmp_path / "credential-home" / "auth.json"
     auth.parent.mkdir()
-    auth.write_text("{}", encoding="utf-8")
+    auth.write_text(TEST_AUTH_JSON, encoding="utf-8")
     profile = tmp_path / "sandbox.sb"
     profile.write_text(
-        sandbox_profile(task, Path("/usr/bin/true"), auth), encoding="utf-8"
+        sandbox_profile(task, Path("/usr/bin/true"), auth, 43123), encoding="utf-8"
     )
 
     completed = subprocess.run(
@@ -988,13 +1359,13 @@ def test_codex_invoker_fails_on_process_malformed_and_oversized_results(tmp_path
     codex.write_text("binary", encoding="utf-8")
     codex.chmod(0o755)
     auth = tmp_path / "auth.json"
-    auth.write_text("{}", encoding="utf-8")
+    auth.write_text(TEST_AUTH_JSON, encoding="utf-8")
 
     def failed(arguments, _input, _cwd, _environment):
         return subprocess.CompletedProcess(arguments, 2, "", "SECRET_PACKET denied")
 
     with pytest.raises(AssistanceError, match="codex_process_failed") as failure:
-        CodexInvoker(codex_binary=codex, auth_file=auth, runner=failed).invoke(
+        _codex_invoker(codex_binary=codex, auth_file=auth, runner=failed).invoke(
             {"operation": "triage", "claims": []}
         )
     assert "SECRET_PACKET" not in str(failure.value)
@@ -1004,11 +1375,11 @@ def test_codex_invoker_fails_on_process_malformed_and_oversized_results(tmp_path
         return subprocess.CompletedProcess(arguments, 0, "", "")
 
     with pytest.raises(AssistanceError, match="malformed"):
-        CodexInvoker(codex_binary=codex, auth_file=auth, runner=malformed).invoke(
+        _codex_invoker(codex_binary=codex, auth_file=auth, runner=malformed).invoke(
             {"operation": "triage", "claims": []}
         )
     with pytest.raises(AssistanceError, match="64 KB"):
-        CodexInvoker(codex_binary=codex, auth_file=auth, runner=malformed).invoke(
+        _codex_invoker(codex_binary=codex, auth_file=auth, runner=malformed).invoke(
             {"operation": "triage", "claims": [], "large": "x" * 65_000}
         )
 
@@ -1023,28 +1394,28 @@ def test_codex_invoker_fails_closed_on_auth_preflight_timeout_and_missing_result
     packet = {"operation": "triage", "claims": []}
 
     with pytest.raises(AssistanceConfigurationError, match="authentication_unavailable"):
-        CodexInvoker(codex_binary=codex, auth_file=missing_auth).invoke(packet)
+        _codex_invoker(codex_binary=codex, auth_file=missing_auth).invoke(packet)
 
     invalid_auth = tmp_path / "invalid-auth.json"
     invalid_auth.write_text("not-json", encoding="utf-8")
     with pytest.raises(AssistanceConfigurationError, match="not valid JSON"):
-        CodexInvoker(codex_binary=codex, auth_file=invalid_auth).invoke(
+        _codex_invoker(codex_binary=codex, auth_file=invalid_auth).invoke(
             packet, credential_canary="marker"
         )
     invalid_auth.write_text("[]", encoding="utf-8")
     with pytest.raises(AssistanceConfigurationError, match="invalid shape"):
-        CodexInvoker(codex_binary=codex, auth_file=invalid_auth).invoke(
+        _codex_invoker(codex_binary=codex, auth_file=invalid_auth).invoke(
             packet, credential_canary="marker"
         )
 
     auth = tmp_path / "auth.json"
-    auth.write_text("{}", encoding="utf-8")
+    auth.write_text(TEST_AUTH_JSON, encoding="utf-8")
 
     def preflight_error(_arguments, _cwd, _environment):
         raise OSError("sandbox unavailable")
 
     with pytest.raises(AssistanceConfigurationError, match="preflight could not run"):
-        CodexInvoker(
+        _codex_invoker(
             codex_binary=codex,
             auth_file=auth,
             runner=lambda *_args: pytest.fail("main invocation must not run"),
@@ -1055,7 +1426,7 @@ def test_codex_invoker_fails_closed_on_auth_preflight_timeout_and_missing_result
         return subprocess.CompletedProcess(arguments, 2, "", "rejected")
 
     with pytest.raises(AssistanceConfigurationError, match="flags were rejected"):
-        CodexInvoker(
+        _codex_invoker(
             codex_binary=codex,
             auth_file=auth,
             runner=lambda *_args: pytest.fail("main invocation must not run"),
@@ -1066,13 +1437,13 @@ def test_codex_invoker_fails_closed_on_auth_preflight_timeout_and_missing_result
         raise subprocess.TimeoutExpired("codex", 300)
 
     with pytest.raises(AssistanceTransientError, match="codex_timeout"):
-        CodexInvoker(codex_binary=codex, auth_file=auth, runner=timeout).invoke(packet)
+        _codex_invoker(codex_binary=codex, auth_file=auth, runner=timeout).invoke(packet)
 
     def missing_result(arguments, _input, _cwd, _environment):
         return subprocess.CompletedProcess(arguments, 0, "", "")
 
     with pytest.raises(AssistanceTransientError, match="result_missing"):
-        CodexInvoker(codex_binary=codex, auth_file=auth, runner=missing_result).invoke(packet)
+        _codex_invoker(codex_binary=codex, auth_file=auth, runner=missing_result).invoke(packet)
 
 
 def test_codex_event_stream_rejects_malformed_and_nested_tool_events() -> None:
@@ -1090,7 +1461,7 @@ def test_codex_invoker_rejects_any_reported_tool_execution(tmp_path: Path) -> No
     codex.write_text("binary", encoding="utf-8")
     codex.chmod(0o755)
     auth = tmp_path / "auth.json"
-    auth.write_text("{}", encoding="utf-8")
+    auth.write_text(TEST_AUTH_JSON, encoding="utf-8")
 
     def used_tool(arguments, _input, _cwd, _environment):
         output = Path(arguments[arguments.index("--output-last-message") + 1])
@@ -1114,7 +1485,7 @@ def test_codex_invoker_rejects_any_reported_tool_execution(tmp_path: Path) -> No
         return subprocess.CompletedProcess(arguments, 0, event, "")
 
     with pytest.raises(AssistanceConfigurationError, match="tool_invocation_blocked"):
-        CodexInvoker(codex_binary=codex, auth_file=auth, runner=used_tool).invoke(
+        _codex_invoker(codex_binary=codex, auth_file=auth, runner=used_tool).invoke(
             {"operation": "triage", "claims": []}
         )
 
@@ -1124,7 +1495,7 @@ def test_codex_canary_targets_the_actual_copied_credential(tmp_path: Path) -> No
     codex.write_text("binary", encoding="utf-8")
     codex.chmod(0o755)
     auth = tmp_path / "auth.json"
-    auth.write_text('{"tokens":"obvious-dummy"}', encoding="utf-8")
+    auth.write_text(TEST_AUTH_JSON, encoding="utf-8")
     marker = "WIRE_CREDENTIAL_FILE_CANARY_" + "a" * 48
     observed: dict[str, object] = {}
 
@@ -1153,7 +1524,7 @@ def test_codex_canary_targets_the_actual_copied_credential(tmp_path: Path) -> No
         )
         return subprocess.CompletedProcess(arguments, 0, "", "")
 
-    CodexInvoker(codex_binary=codex, auth_file=auth, runner=runner).invoke(
+    _codex_invoker(codex_binary=codex, auth_file=auth, runner=runner).invoke(
         {
             "operation": "isolation_canary",
             "claims": [],

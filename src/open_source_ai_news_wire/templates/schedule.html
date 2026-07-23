@@ -34,6 +34,7 @@
   </section>
 
   <section class="panel usage-card">
+    {% set assistance = data.assistance|default({'ready': false, 'enabled': false, 'attestation_expires_at': '', 'failure_reason': 'status unavailable', 'pending_work': 0}, true) %}
     <div class="panel-heading"><div><p class="section-index">02</p><h2>ChatGPT allowance</h2></div><span>Rolling 24 hours</span></div>
     {% set usage_percent = [100, (data.background_units / data.background_limit * 100 if data.background_limit else 0)]|min %}
     {% set usage_bucket = ((usage_percent / 10)|round(0, 'ceil')|int) * 10 %}
@@ -42,7 +43,19 @@
     </div>
     <div class="usage-key"><span><i class="dot dot-accent"></i>Routine background</span><span><i class="dot dot-muted"></i>{{ data.reserve_limit }} urgent reserve</span></div>
     <div class="usage-note"><strong>{{ data.draft_units }} draft units</strong><p>Drafting is tracked separately and does not consume the background proxy.</p></div>
-    <div class="privacy-row"><span class="status-chip {{ 'status-healthy' if data.assistance_enabled else 'status-paused' }}">Assistance {{ 'enabled' if data.assistance_enabled else 'disabled' }}</span><small>Packet-isolation gate required before scheduled use</small></div>
+    <div class="privacy-row">
+      <span class="status-chip {{ 'status-healthy' if assistance.ready and assistance.enabled else 'status-paused' }}">
+        {% if assistance.ready and assistance.enabled %}Assistance ready{% elif assistance.ready %}Assistance ready but off{% else %}Assistance blocked{% endif %}
+      </span>
+      <small>
+        {% if assistance.ready %}
+          Release-bound isolation is current{% if assistance.attestation_expires_at %} through {{ assistance.attestation_expires_at|wire_time('full') }}{% endif %}.
+        {% else %}
+          Condition: {{ assistance.failure_reason or 'security check has not passed' }}.
+        {% endif %}
+        {{ assistance.pending_work }} pending assistance task{{ '' if assistance.pending_work == 1 else 's' }}.
+      </small>
+    </div>
   </section>
 </div>
 

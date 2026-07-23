@@ -9,7 +9,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .collector import Collector, ScanSummary, utc_now
-from .assistance import AssistanceDeferred, run_assistance_work
+from .assistance import (
+    AssistanceDeferred,
+    CodexInvoker,
+    assistance_isolation_current,
+    run_assistance_work,
+    run_isolation_canary,
+)
 from .evidence import EvidenceEnricher
 from .notifications import NativeNotifier
 from .pilot import PilotManager
@@ -84,6 +90,7 @@ class Worker:
             return WorkerResult("coalesced", None, True)
         try:
             deadline = datetime.now(UTC) + timedelta(minutes=25)
+            self._renew_assistance_isolation()
             self._process_assistance(drafts_only=True)
             actual_trigger, start, end = self._recovery_interval(
                 trigger, interval_start, interval_end
@@ -121,21 +128,30 @@ class Worker:
             self.lock.release()
 
     def _process_evidence(self, deadline: datetime) -> None:
-        enricher = EvidenceEnricher(self.database)
-        processed = 0
-        while processed < 4 and datetime.now(UTC) < deadline - timedelta(minutes=2):
-            if enricher.process_next() is None:
-                return
-            processed += 1
+        EvidenceEnricher(self.database).process_batch(limit=20, deadline=deadline)
 
     def _process_assistance(self, *, drafts_only: bool = False) -> None:
         if self.database.get_state("assistance_enabled", "false") != "true":
+            return
+        if not assistance_isolation_current(self.database):
             return
         try:
             run_assistance_work(self.database, drafts_only=drafts_only)
         except AssistanceDeferred:
             return
         except Exception:
+            return
+
+    def _renew_assistance_isolation(self) -> None:
+        if self.database.get_state("assistance_enabled", "false") != "true":
+            return
+        if assistance_isolation_current(self.database):
+            return
+        try:
+            run_isolation_canary(self.database, CodexInvoker(), automatic=True)
+        except Exception:
+            # Canary failures are recorded by the assistance layer and remain
+            # fail-closed. Collection must continue without assisted drafting.
             return
 
     def _maintain_watches(self) -> None:
@@ -242,8 +258,9 @@ class Worker:
         now = utc_now()
         identifiers = [int(row["id"]) for row in rows]
         placeholders = ",".join("?" for _ in identifiers)
-        self.database.execute(
-            f"UPDATE work_item SET status = 'running', updated_at = ?, attempt_count = attempt_count + 1 WHERE id IN ({placeholders})",
+        claim_query = f"UPDATE work_item SET status = 'running', updated_at = ?, attempt_count = attempt_count + 1 WHERE id IN ({placeholders})"  # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- placeholders are generated only from integer IDs
+        self.database.execute(  # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- query contains only generated placeholders; values remain bound parameters
+            claim_query,
             (now, *identifiers),
         )
         return identifiers
@@ -252,7 +269,8 @@ class Worker:
         if not identifiers:
             return
         placeholders = ",".join("?" for _ in identifiers)
-        self.database.execute(
-            f"UPDATE work_item SET status = ?, updated_at = ? WHERE id IN ({placeholders})",
+        finish_query = f"UPDATE work_item SET status = ?, updated_at = ? WHERE id IN ({placeholders})"  # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- placeholders are generated only from integer IDs
+        self.database.execute(  # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- query contains only generated placeholders; values remain bound parameters
+            finish_query,
             (status, utc_now(), *identifiers),
         )

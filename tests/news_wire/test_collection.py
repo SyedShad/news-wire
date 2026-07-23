@@ -791,8 +791,11 @@ def test_huggingnews_documented_json_preserves_event_time_tags_and_public_leads(
         observed_at="2026-07-23T09:00:00Z",
     )
     assert rows[0].external_id == "open-model-release-abc123"
-    assert rows[0].published_at == "2026-07-23T07:15:00Z"
-    assert rows[0].metadata["aggregator_published_at"] != rows[0].published_at
+    assert rows[0].published_at == "2026-07-23T08:00:00Z"
+    assert rows[0].metadata["aggregator_published_at"] == rows[0].published_at
+    assert rows[0].metadata["event_time_approx"] == "2026-07-23T07:15:00Z"
+    assert rows[0].source_reported_at is None
+    assert rows[0].timestamp_status == "unknown_original_discovery_time"
     assert rows[0].metadata["topic_tags"][0]["slug"] == "ai-open-models"
 
     enriched = enrich_huggingnews_detail(
@@ -817,9 +820,9 @@ def test_huggingnews_search_shape_and_missing_fields_degrade_per_item() -> None:
         "invalid-time-story-abc123",
     ]
     assert rows[0].published_at == rows[0].metadata["aggregator_published_at"]
-    assert rows[0].timestamp_status == "malformed_source_fallback_aggregator"
+    assert rows[0].timestamp_status == "unknown_original_discovery_time"
     assert rows[1].published_at == "2026-07-23T09:00:00Z"
-    assert rows[1].timestamp_status == "malformed_aggregator_fallback_detection"
+    assert rows[1].timestamp_status == "unknown_original_discovery_time"
 
     with pytest.raises(AdapterError, match="dayGroups or stories"):
         parse_huggingnews_json(
@@ -1027,6 +1030,7 @@ def test_huggingnews_public_links_queue_proposals_without_verifying_them(
     database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
     database.initialize()
     seed_demo_data(database)
+    collector = Collector(database)
     observation = Observation(
         "story-slug",
         "A high-attention AI development",
@@ -1043,20 +1047,21 @@ def test_huggingnews_public_links_queue_proposals_without_verifying_them(
         },
     )
     with database.transaction() as connection:
-        Collector._record_discovery_leads(
+        collector._record_discovery_leads(
             connection,
             "story-demo-watch-003",
             {"id": "huggingnews", "name": "HuggingNews"},
             observation,
             "2026-07-23T09:00:00Z",
         )
-        Collector._record_discovery_leads(
+        collector._record_discovery_leads(
             connection,
             "story-demo-watch-003",
             {"id": "huggingnews", "name": "HuggingNews"},
             observation,
             "2026-07-23T09:01:00Z",
         )
+    collector._queue_discovery_enrichment(limit=20)
 
     assert database.one(
         "SELECT COUNT(*) AS count FROM discovery_lead WHERE lead_type = 'public_link'"
@@ -1075,6 +1080,232 @@ def test_huggingnews_public_links_queue_proposals_without_verifying_them(
     assert database.one(
         "SELECT evidence_gate FROM candidate WHERE story_id = 'story-demo-watch-003'"
     ) == {"evidence_gate": 0}
+
+
+def test_discovery_enrichment_is_bounded_ranked_and_idempotent(tmp_path: Path) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    seed_demo_data(database)
+    collector = Collector(database)
+    story_id = "story-demo-watch-003"
+    for index in range(25):
+        collector._propose_discovery_enrichment(
+            story_id,
+            f"https://publisher-{index}.example/report",
+            priority=index,
+            observed_at="2026-07-23T09:00:00Z",
+        )
+    collector._propose_discovery_enrichment(
+        story_id,
+        "https://127.0.0.1/private",
+        priority=100,
+        observed_at="2026-07-23T09:00:00Z",
+    )
+
+    assert collector._queue_discovery_enrichment(limit=20) == 20
+    queued = database.query(
+        """
+        SELECT priority, payload_json FROM work_item
+        WHERE kind = 'evidence_enrichment' ORDER BY priority DESC
+        """
+    )
+    assert [row["priority"] for row in queued] == list(range(24, 4, -1))
+    evidence_count = database.one(
+        "SELECT COUNT(*) AS count FROM evidence_source WHERE acquisition_method = 'discovery_enrichment'"
+    )["count"]
+
+    # Replaying the same scan candidates must bind to the original proposals,
+    # not create evidence rows that have no corresponding work item.
+    assert collector._queue_discovery_enrichment(limit=20) == 0
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM evidence_source WHERE acquisition_method = 'discovery_enrichment'"
+    )["count"] == evidence_count
+    assert database.one(
+        """
+        SELECT COUNT(*) AS count FROM evidence_source e
+        LEFT JOIN work_item w
+          ON json_extract(w.payload_json, '$.evidence_source_id') = e.id
+         AND w.kind = 'evidence_enrichment'
+        WHERE e.acquisition_method = 'discovery_enrichment' AND w.id IS NULL
+        """
+    ) == {"count": 0}
+
+
+def test_aggregation_timestamp_is_discovery_only() -> None:
+    observation = Observation(
+        "hn-1",
+        "AI lab releases a model",
+        "https://publisher.example/report",
+        "2026-07-23T08:00:00Z",
+        metadata={"source_reported_at": "2026-07-23T08:00:00Z"},
+    )
+    contextualized = Collector._contextualize_discovery_timestamps(
+        {"family": "Aggregation", "monitoring_role": "Discovery"},
+        [observation],
+    )[0]
+    assert contextualized.source_reported_at is None
+    assert contextualized.aggregator_published_at == "2026-07-23T08:00:00Z"
+    assert contextualized.timestamp_status == "unknown_original_discovery_time"
+
+
+def test_unknown_original_discovery_creates_no_fresh_watch(tmp_path: Path) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    synchronize_sources(database)
+    source = database.one(
+        "SELECT * FROM source_registry WHERE id = 'hacker-news-ai'"
+    )
+    observation = Collector._contextualize_discovery_timestamps(
+        source,
+        [
+            Observation(
+                "hn-resurface",
+                "Major AI model release is discussed again",
+                "https://publisher.example/old-report",
+                "2026-07-23T08:00:00Z",
+            )
+        ],
+    )[0]
+    qualification = qualify(
+        observation, source, observed_at="2026-07-23T09:00:00Z"
+    )
+    collector = Collector(database)
+    with database.transaction() as connection:
+        story_id = collector._persist_story(
+            connection,
+            source,
+            observation,
+            qualification,
+            "2026-07-23T09:00:00Z",
+            1,
+            "scheduled",
+        )
+
+    assert database.one(
+        "SELECT status, first_public_at FROM story_cluster WHERE id = ?", (story_id,)
+    ) == {"status": "signal", "first_public_at": "2026-07-23T09:00:00Z"}
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM watch_notice WHERE story_id = ?", (story_id,)
+    ) == {"count": 0}
+
+
+def test_social_or_aggregator_hashtags_alone_do_not_establish_ai_relevance() -> None:
+    tagged_noise = Observation(
+        "noise",
+        "A replacement battery guide",
+        "https://social.example/noise",
+        "2026-07-23T08:00:00Z",
+        "A guide for a handheld console. #AI #ArtificialIntelligence",
+    )
+    actual_ai = Observation(
+        "signal",
+        "A research lab released an open-weight model",
+        "https://social.example/signal",
+        "2026-07-23T08:00:00Z",
+        "The AI model includes public weights and benchmark results. #AI",
+    )
+    assert Collector._definition_filtered_observations(
+        {"family": "Accessible social signals", "definition_json": "{}"},
+        [tagged_noise, actual_ai],
+    ) == [actual_ai]
+
+
+def test_mastodon_rejects_generic_car_model_news_but_keeps_ai_model_news() -> None:
+    payload = b"""<rss><channel>
+    <item><guid>car</guid><link>https://mastodon.social/@cars/1</link>
+    <pubDate>Thu, 23 Jul 2026 10:00:00 GMT</pubDate>
+    <description>Automaker announces a new vehicle model release with better safety and security for drivers this year. #AI</description></item>
+    <item><guid>ai</guid><link>https://mastodon.social/@lab/2</link>
+    <pubDate>Thu, 23 Jul 2026 10:01:00 GMT</pubDate>
+    <description>Research lab releases an open-weight AI model with public safety benchmark results and downloadable weights.</description></item>
+    </channel></rss>"""
+
+    observations = parse_mastodon_signal(
+        payload,
+        source_url="https://mastodon.social/tags/artificialintelligence.rss",
+        observed_at="2026-07-23T10:02:00Z",
+    )
+
+    assert [item.external_id for item in observations] == ["ai"]
+
+
+def test_discovery_wording_changes_are_source_only_not_material_updates(
+    tmp_path: Path,
+) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    synchronize_sources(database)
+    source = database.one(
+        "SELECT * FROM source_registry WHERE id = 'hacker-news-ai'"
+    )
+    collector = Collector(database)
+    first = Collector._contextualize_discovery_timestamps(
+        source,
+        [
+            Observation(
+                "hn-resurface",
+                "AI lab is reportedly preparing a model release",
+                "https://publisher.example/old-report",
+                "2026-07-23T08:00:00Z",
+                "A newly resurfaced Discovery headline.",
+            )
+        ],
+    )[0]
+    with database.transaction() as connection:
+        story_id = collector._persist_story(
+            connection,
+            source,
+            first,
+            qualify(first, source, observed_at="2026-07-23T09:00:00Z"),
+            "2026-07-23T09:00:00Z",
+            1,
+            "scheduled",
+        )
+
+    revised = Collector._contextualize_discovery_timestamps(
+        source,
+        [
+            Observation(
+                "hn-resurface",
+                "AI lab may be preparing a different model release",
+                "https://publisher.example/old-report",
+                "2026-07-23T08:00:00Z",
+                "The aggregator changed both its headline and summary.",
+            )
+        ],
+    )[0]
+    with database.transaction() as connection:
+        collector._persist_story(
+            connection,
+            source,
+            revised,
+            qualify(revised, source, observed_at="2026-07-23T10:00:00Z"),
+            "2026-07-23T10:00:00Z",
+            2,
+            "scheduled",
+        )
+
+    assert database.one(
+        """
+        SELECT story_revision, material_revision, material_update,
+               material_updated_at
+        FROM story_cluster WHERE id = ?
+        """,
+        (story_id,),
+    ) == {
+        "story_revision": 2,
+        "material_revision": 1,
+        "material_update": 0,
+        "material_updated_at": None,
+    }
+    assert database.one(
+        "SELECT title, passage, source_revision FROM source_item WHERE story_id = ?",
+        (story_id,),
+    ) == {
+        "title": revised.title,
+        "passage": "The aggregator changed both its headline and summary.",
+        "source_revision": 2,
+    }
 
 
 def test_completion_registry_enables_validated_non_sec_sources_and_excludes_sec() -> None:

@@ -43,6 +43,7 @@ Local enablement changes do not rewrite the tracked canonical registry.
 
 ```bash
 open-source-ai-news-wire assistance check-isolation
+open-source-ai-news-wire assistance status
 open-source-ai-news-wire assistance enable
 open-source-ai-news-wire assistance disable
 open-source-ai-news-wire assistance run-pending

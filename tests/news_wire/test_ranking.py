@@ -54,6 +54,28 @@ def test_material_update_reenters_without_rewriting_first_public_time() -> None:
     assert story["is_review_current"] is True
 
 
+def test_unknown_original_date_is_newly_surfaced_not_fresh() -> None:
+    story = rank_story(
+        _story(
+            timedelta(minutes=5),
+            detected_at=(NOW - timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+            original_publication_known=False,
+            importance_score=60,
+            confirmed_event_count=1,
+            source_identity_count=12,
+            momentum_velocity_points=5,
+        ),
+        now=NOW,
+    )
+    assert story["freshness"] == "Newly surfaced"
+    assert story["priority"] == "Newly surfaced"
+    assert story["age_label"] == "original date unknown"
+    assert story["review_score"] == 85
+    assert story["is_review_current"] is False
+    assert story["is_newly_surfaced"] is True
+    assert story["ranking_age_label"] == "5m ago"
+
+
 def test_momentum_raises_attention_but_not_evidence() -> None:
     story = rank_story(
         _story(

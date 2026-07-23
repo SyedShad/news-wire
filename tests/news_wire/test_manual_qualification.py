@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from open_source_ai_news_wire.config import resolve_runtime_paths
+from open_source_ai_news_wire.collector import Collector
 from open_source_ai_news_wire.demo import seed_demo_data
 from open_source_ai_news_wire.evidence import (
     EvidenceEnricher,
@@ -17,8 +18,13 @@ from open_source_ai_news_wire.evidence import (
     qualification_state,
     recalculate_claim_statuses,
     recalculate_story_qualification,
+    supersede_duplicate_evidence,
 )
-from open_source_ai_news_wire.network import SafeHttpClient, UnsafeRequest
+from open_source_ai_news_wire.network import (
+    NetworkDeadlineExceeded,
+    SafeHttpClient,
+    UnsafeRequest,
+)
 from open_source_ai_news_wire.services import DashboardService
 from open_source_ai_news_wire.storage import Database
 from open_source_ai_news_wire.web import create_app
@@ -359,13 +365,12 @@ def test_completed_draft_is_preserved_and_can_be_reapproved_only_after_requalifi
     now = "2026-07-14T12:00:00Z"
     database.execute(
         """
-        INSERT INTO draft(
-            story_id, mode, status, version, headline, metadata, body,
-            lens, sources_json, created_at, updated_at
-        ) VALUES(?, 'Neutral News Brief', 'Current', 1, 'Preserved draft',
-                 'Fresh', 'Evidence-backed brief.', '', '[]', ?, ?)
+        UPDATE draft
+        SET status = 'Current', headline = 'Preserved draft', metadata = 'Fresh',
+            body = 'Evidence-backed brief.', updated_at = ?
+        WHERE story_id = ? AND version = 1
         """,
-        (story_id, now, now),
+        (now, story_id),
     )
     database.execute(
         "UPDATE work_item SET status = 'completed', updated_at = ? WHERE id = ?",
@@ -485,6 +490,183 @@ def test_url_normalization_publisher_grouping_and_page_extraction() -> None:
     assert jsonld.proposed_origin_name == "Axios"
     assert jsonld.proposed_origin_url == "https://axios.example/original"
     assert jsonld.proposed_provenance_type == "syndicated"
+
+    dated_jsonld = extract_page(
+        b"<html><head><title>Dated report</title>"
+        b"<script type='application/ld+json'>"
+        b'{"@type":"NewsArticle","datePublished":"2021-04-03T12:00:00Z"}'
+        b"</script></head><body>Details</body></html>",
+        "text/html",
+    )
+    assert dated_jsonld.published_at == "2021-04-03T12:00:00Z"
+
+
+@pytest.mark.parametrize("year", [2015, 2021, 2024, 2025])
+def test_discovery_page_date_correction_is_source_only(
+    tmp_path, year: int
+) -> None:
+    database, _service_instance = _service(tmp_path)
+    story_id = "story-demo-watch-003"
+    before = database.one(
+        """
+        SELECT story_revision, material_revision, material_updated_at
+        FROM story_cluster WHERE id = ?
+        """,
+        (story_id,),
+    )
+    collector = Collector(database)
+    collector._propose_discovery_enrichment(
+        story_id,
+        "https://publisher.example/resurfaced-report",
+        priority=90,
+        observed_at="2026-07-23T09:00:00Z",
+    )
+    assert collector._queue_discovery_enrichment(limit=20) == 1
+    body = (
+        "<html><head><title>Resurfaced AI report</title>"
+        f"<meta property='article:published_time' content='{year}-04-03T12:00:00Z'>"
+        "</head><body>Original report text</body></html>"
+    ).encode("utf-8")
+    evidence_id = EvidenceEnricher(
+        database,
+        client_factory=_client_factory(body),
+        now=lambda: "2026-07-23T09:01:00Z",
+    ).process_next()
+
+    assert evidence_id is not None
+    assert database.one(
+        "SELECT first_public_at FROM story_cluster WHERE id = ?", (story_id,)
+    ) == {"first_public_at": f"{year}-04-03T12:00:00Z"}
+    after = database.one(
+        """
+        SELECT story_revision, material_revision, material_updated_at
+        FROM story_cluster WHERE id = ?
+        """,
+        (story_id,),
+    )
+    assert after == before
+    assert database.one(
+        """
+        SELECT COUNT(*) AS count FROM diagnostic_event
+        WHERE event_type = 'publication_time_correction'
+        """
+    ) == {"count": 1}
+
+
+def test_orphaned_duplicate_evidence_is_preserved_as_superseded(tmp_path) -> None:
+    database, _service_instance = _service(tmp_path)
+    story_id = "story-demo-watch-003"
+    now = "2026-07-23T09:00:00Z"
+    with database.transaction() as connection:
+        canonical = connection.execute(
+            """
+            INSERT INTO evidence_source(
+                story_id, requested_url, canonical_url, publisher_key,
+                acquisition_method, proposed_role, status, created_at, updated_at
+            ) VALUES(?, 'https://publisher.example/a', 'https://publisher.example/a',
+                     'publisher.example', 'discovery_enrichment', 'Reporting',
+                     'fetched', ?, ?)
+            """,
+            (story_id, now, now),
+        ).lastrowid
+        duplicate = connection.execute(
+            """
+            INSERT INTO evidence_source(
+                story_id, requested_url, canonical_url, publisher_key,
+                acquisition_method, proposed_role, status, created_at, updated_at
+            ) VALUES(?, 'https://publisher.example/b', 'https://publisher.example/b',
+                     'publisher.example', 'discovery_enrichment', 'Reporting',
+                     'queued', ?, ?)
+            """,
+            (story_id, now, now),
+        ).lastrowid
+
+    assert supersede_duplicate_evidence(
+        database, int(duplicate), int(canonical), now="2026-07-23T09:01:00Z"
+    ) is True
+    assert database.one(
+        "SELECT status, error_class FROM evidence_source WHERE id = ?", (duplicate,)
+    ) == {"status": "excluded", "error_class": "superseded_duplicate"}
+    assert database.one(
+        "SELECT status FROM evidence_source WHERE id = ?", (canonical,)
+    ) == {"status": "fetched"}
+
+
+def test_evidence_batch_preserves_deadline_work_for_recovery(tmp_path) -> None:
+    database, _service_instance = _service(tmp_path)
+    collector = Collector(database)
+    collector._propose_discovery_enrichment(
+        "story-demo-watch-003",
+        "https://publisher.example/deferred",
+        priority=90,
+        observed_at="2026-07-23T09:00:00Z",
+    )
+    collector._queue_discovery_enrichment(limit=20)
+
+    class DeadlineClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def fetch(self, _url, *, deadline=None):
+            raise NetworkDeadlineExceeded("bounded worker deadline")
+
+    processed = EvidenceEnricher(
+        database,
+        client_factory=lambda _host: DeadlineClient(),  # type: ignore[arg-type]
+        now=lambda: "2026-07-23T09:01:00Z",
+    ).process_batch(limit=20)
+    assert processed == []
+    assert database.one(
+        """
+        SELECT status, last_error_class FROM work_item
+        WHERE kind = 'evidence_enrichment'
+        """
+    ) == {"status": "queued", "last_error_class": "worker_deadline"}
+    assert database.one(
+        "SELECT status, error_class FROM evidence_source"
+    ) == {"status": "queued", "error_class": None}
+
+
+def test_future_page_date_cannot_make_discovery_fresh(tmp_path) -> None:
+    database, _service_instance = _service(tmp_path)
+    story_id = "story-demo-watch-003"
+    original = database.one(
+        "SELECT first_public_at FROM story_cluster WHERE id = ?", (story_id,)
+    )
+    collector = Collector(database)
+    collector._propose_discovery_enrichment(
+        story_id,
+        "https://publisher.example/future-report",
+        priority=90,
+        observed_at="2026-07-23T09:00:00Z",
+    )
+    collector._queue_discovery_enrichment(limit=20)
+    EvidenceEnricher(
+        database,
+        client_factory=_client_factory(
+            b"<html><head><title>Future dated report</title>"
+            b"<meta property='article:published_time' content='2026-07-24T09:00:00Z'>"
+            b"</head><body>Report body</body></html>"
+        ),
+        now=lambda: "2026-07-23T09:01:00Z",
+    ).process_next()
+
+    assert database.one(
+        "SELECT first_public_at FROM story_cluster WHERE id = ?", (story_id,)
+    ) == original
+    assert database.one(
+        "SELECT published_at FROM evidence_source WHERE acquisition_method = 'discovery_enrichment'"
+    ) == {"published_at": None}
+    assert database.one(
+        """
+        SELECT COUNT(*) AS count FROM diagnostic_event
+        WHERE event_type = 'publication_timestamp_fallback'
+          AND message LIKE 'Ignored future publication time%'
+        """
+    ) == {"count": 1}
 
 
 def test_enricher_fails_stale_redirected_and_empty_evidence_safely(tmp_path) -> None:

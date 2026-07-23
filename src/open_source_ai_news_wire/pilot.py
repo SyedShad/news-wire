@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Callable
 
 from .notifications import NativeNotifier
+from .scheduler import SchedulerStatus, live_scheduler_status
 from .settings import load_settings
 from .storage import Database, SCHEMA_VERSION
 
@@ -42,15 +44,37 @@ class PilotStatus:
 
 
 class PilotManager:
-    def __init__(self, database: Database, *, now: Callable[[], datetime] | None = None):
+    def __init__(
+        self,
+        database: Database,
+        *,
+        now: Callable[[], datetime] | None = None,
+        scheduler_status: Callable[[], SchedulerStatus] | None = None,
+        assistance_isolation_current: Callable[[Database], bool] | None = None,
+    ):
         self.database = database
         self.now = now or (lambda: datetime.now(UTC))
+        self.scheduler_status = scheduler_status or (lambda: live_scheduler_status(database))
+        self._assistance_isolation_authority = assistance_isolation_current
 
     def _now(self) -> datetime:
         return self.now().astimezone(UTC).replace(microsecond=0)
 
     def _now_value(self) -> str:
         return self._now().isoformat().replace("+00:00", "Z")
+
+    def _assistance_isolation_is_current(self) -> bool:
+        authority = self._assistance_isolation_authority
+        if authority is None:
+            try:
+                from .assistance import assistance_isolation_current
+            except ImportError:
+                return False
+            authority = assistance_isolation_current
+        try:
+            return bool(authority(self.database))
+        except Exception:  # Security authority failures must fail closed.
+            return False
 
     def start_shadow(self) -> PilotStatus:
         value = self._now_value()
@@ -132,11 +156,21 @@ class PilotManager:
             self.database.schema_version() == SCHEMA_VERSION,
             f"The runtime schema is not version {SCHEMA_VERSION}",
         )
+        try:
+            scheduler = self.scheduler_status()
+        except Exception:  # Live scheduler inspection failures must fail closed.
+            scheduler = SchedulerStatus(
+                False,
+                False,
+                "unavailable",
+                Path("~/Library/LaunchAgents").expanduser(),
+                "launchctl_status_unavailable",
+            )
+        scheduler_ready = scheduler.installed and scheduler.loaded and scheduler.state == "active"
         gate(
             "scheduler",
-            self.database.get_state("schedule_installed", "false") == "true"
-            and self.database.get_state("schedule_status", "not_installed") == "active",
-            "The local scheduler is not installed and active",
+            scheduler_ready,
+            f"The local scheduler is not installed and active (live state: {scheduler.state})",
         )
 
         enabled_count = int(
@@ -177,7 +211,8 @@ class PilotManager:
 
         queue_count = int(
             self.database.one(
-                "SELECT COUNT(*) AS count FROM work_item WHERE status IN ('pending', 'queued', 'running', 'generating')"
+                "SELECT COUNT(*) AS count FROM work_item "
+                "WHERE status IN ('pending', 'queued', 'running', 'generating', 'waiting')"
             )["count"]
         )
         gate("work_queue", queue_count == 0, "The durable work queue is not empty")
@@ -189,11 +224,13 @@ class PilotManager:
         )
         gate("disk", pressure.level != "critical", "Critical disk pressure blocks activation")
 
-        assistance_ok = (
-            self.database.get_state("assistance_enabled", "false") != "true"
-            or self.database.get_state("assistance_isolation_gate", "not_run") == "passed"
+        assistance_enabled = self.database.get_state("assistance_enabled", "false") == "true"
+        assistance_ok = not assistance_enabled or self._assistance_isolation_is_current()
+        gate(
+            "assistance_isolation",
+            assistance_ok,
+            "Enabled assistance does not have a current isolation attestation",
         )
-        gate("assistance_isolation", assistance_ok, "Enabled assistance has not passed isolation")
         gate(
             "notification_canary",
             self.database.get_state("notification_canary_status", "not_run") == "passed",
@@ -207,6 +244,12 @@ class PilotManager:
         offline_times = [datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00")) for row in offline_rows]
         storm = any(right - left < timedelta(minutes=10) for left, right in zip(offline_times, offline_times[1:]))
         gate("offline_alert_suppression", not storm, "Repeated offline diagnostics indicate an alert storm")
+        gate(
+            "shadow_containment",
+            self.database.get_state("shadow_mode", "true") == "true"
+            and self.database.get_state("notifications_enabled", "false") != "true",
+            "Notification activation requires an active shadow validation state",
+        )
 
         armed = self.database.get_state("pilot_auto_activate_armed", "false") == "true"
         result = PilotReadiness(
@@ -228,30 +271,22 @@ class PilotManager:
             return self.status()
         readiness = self.readiness()
         if readiness.ready:
-            return self._enable_notifications()
+            return self._enable_notifications(readiness)
         return self.status(readiness=readiness)
 
     def activate_notifications(self, *, human_review_confirmed: bool) -> PilotStatus:
-        status = self.status()
         if not human_review_confirmed:
             raise PilotGateError("Human confirmation of the shadow review is required")
-        if not status.started_at or status.hours_elapsed < 72:
-            raise PilotGateError("The 72-hour shadow window has not completed")
-        if self.database.integrity_check() != "ok":
-            raise PilotGateError("Database integrity must pass before notifications")
-        critical = self.database.one(
-            "SELECT COUNT(*) AS count FROM diagnostic_event WHERE level = 'critical'"
-        )["count"]
-        if int(critical):
-            raise PilotGateError("Critical diagnostic findings block notifications")
-        if (
-            self.database.get_state("assistance_enabled", "false") == "true"
-            and self.database.get_state("assistance_isolation_gate", "not_run") != "passed"
-        ):
-            raise PilotGateError("Enabled assistance has not passed packet isolation")
-        return self._enable_notifications()
+        readiness = self.readiness()
+        if not readiness.ready:
+            raise PilotGateError(
+                "Notification activation is blocked: " + "; ".join(readiness.blockers)
+            )
+        return self._enable_notifications(readiness)
 
-    def _enable_notifications(self) -> PilotStatus:
+    def _enable_notifications(self, readiness: PilotReadiness) -> PilotStatus:
+        if not readiness.ready:
+            raise PilotGateError("Notification activation requires complete current readiness")
         now = self._now_value()
         self.database.set_state("pilot_status", "notifications", now)
         self.database.set_state("shadow_mode", "false", now)

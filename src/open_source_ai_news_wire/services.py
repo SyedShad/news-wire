@@ -167,7 +167,27 @@ class DashboardService:
                 WHERE e.story_id = s.id AND e.status = 'confirmed'
                   AND e.confirmed_role = 'Reporting' AND e.origin_status = 'confirmed'
                   AND e.reporting_origin_key IS NOT NULL
-              ) AS reporting_origin_count
+              ) AS reporting_origin_count,
+              CASE WHEN NOT EXISTS (
+                SELECT 1 FROM source_item i WHERE i.story_id = s.id
+              ) OR EXISTS (
+                SELECT 1 FROM source_item i
+                LEFT JOIN source_registry r
+                  ON r.id = i.source_registry_id
+                  OR (i.source_registry_id IS NULL AND r.name = i.source_name)
+                WHERE i.story_id = s.id
+                  AND i.timestamp_status NOT LIKE 'unknown_original%'
+                  AND NOT (
+                    i.source_role = 'Discovery'
+                    AND COALESCE(r.family, '') = 'Aggregation'
+                  )
+              ) OR EXISTS (
+                SELECT 1 FROM evidence_source e
+                WHERE e.story_id = s.id
+                  AND e.status IN ('fetched', 'confirmed')
+                  AND e.acquisition_method = 'discovery_enrichment'
+                  AND e.published_at IS NOT NULL
+              ) THEN 1 ELSE 0 END AS original_publication_known
             FROM story_cluster s
             """
         )
@@ -562,7 +582,8 @@ class DashboardService:
                 "confirmed_event_count", "is_review_current",
                 "is_material_update_current", "momentum_account_count",
                 "momentum_post_count", "momentum_daily_rank",
-                "momentum_velocity_points",
+                "momentum_velocity_points", "original_publication_known",
+                "is_newly_surfaced",
             ):
                 story[key] = ranked.get(key)
         story["discovery_leads"] = self.database.query(
@@ -984,7 +1005,56 @@ class DashboardService:
         elif raw_status == "deferred":
             status = "failed"
         elif raw_status == "completed":
-            status = "ready"
+            status = "draft_ready"
+        elif raw_status == "cancelled" and error_code == "manual_draft_completed":
+            status = "draft_ready"
+
+        if error_code in {
+            "codex_authentication_unavailable",
+            "codex_authentication_invalid",
+            "waiting_for_login",
+        }:
+            status = "waiting_for_login"
+        elif error_code in {
+            "assistance_disabled",
+            "AssistanceDisabled",
+            "isolation_not_passed",
+            "IsolationUnavailable",
+            "isolation_attestation_stale",
+        }:
+            status = "waiting_for_isolation"
+        elif error_code in {
+            "usage_limit_reached",
+            "background_budget_exhausted",
+            "waiting_for_usage_reset",
+        }:
+            status = "waiting_for_usage_reset"
+        elif error_code in {
+            "codex_identity_invalid",
+            "codex_identity_drift",
+            "codex_identity_mismatch",
+            "codex_path_unreviewed",
+            "codex_signature_invalid",
+            "codex_signature_unavailable",
+            "broker_policy_failed",
+            "broker_policy_invalid",
+            "broker_dns_unsafe",
+            "broker_peer_mismatch",
+            "sandbox_policy_failed",
+            "codex_sandbox_profile_invalid",
+            "credential_isolation_failed",
+            "child_credential_isolation_failed",
+            "private_network_isolation_failed",
+            "private_network_isolation_unproven",
+            "unix_socket_isolation_failed",
+            "codex_tool_invocation_blocked",
+        }:
+            status = "failed_security"
+        elif raw_status == "waiting" and (
+            error_code.startswith("attestation_")
+            or error_code.startswith("isolation_")
+        ):
+            status = "waiting_for_isolation"
 
         labels = {
             "starting": "Starting",
@@ -993,7 +1063,11 @@ class DashboardService:
             "retrying": "Retrying",
             "failed": "Failed",
             "needs_reapproval": "Needs reapproval",
-            "ready": "Draft ready",
+            "waiting_for_login": "Waiting for ChatGPT login",
+            "waiting_for_isolation": "Waiting for security check",
+            "waiting_for_usage_reset": "Waiting for usage reset",
+            "failed_security": "Security check failed",
+            "draft_ready": "Draft ready",
         }
         messages = {
             "starting": "Your approval is saved and immediate draft generation is starting.",
@@ -1002,24 +1076,48 @@ class DashboardService:
             "retrying": "A temporary failure is being retried once.",
             "failed": "Draft generation could not complete safely. You can retry the same approval.",
             "needs_reapproval": "The evidence changed after approval. Review and approve the story again.",
-            "ready": "The approved draft is ready for human review.",
+            "waiting_for_login": "Sign in to ChatGPT locally, then retry the preserved approval.",
+            "waiting_for_isolation": "Run the local assistance security check, then retry the preserved approval.",
+            "waiting_for_usage_reset": "ChatGPT usage is temporarily unavailable. The preserved approval can resume after reset.",
+            "failed_security": "Drafting stopped because the current security policy did not pass. Review diagnostics before retrying.",
+            "draft_ready": "The approved draft is ready for human review.",
         }
         if error_code in {"codex_unavailable", "CodexUnavailable"}:
             messages[status] = "The local ChatGPT drafting command is unavailable. Check the installation, then retry."
-        elif error_code == "codex_authentication_unavailable":
-            messages[status] = "ChatGPT authentication is unavailable. Sign in to Codex, then retry this approval."
+        elif error_code in {
+            "codex_authentication_unavailable",
+            "codex_authentication_invalid",
+            "waiting_for_login",
+        }:
+            messages[status] = "ChatGPT authentication is unavailable. Sign in to ChatGPT, then retry this approval."
         elif error_code in {"codex_timeout", "codex_process_failed", "codex_result_invalid"}:
             messages[status] = "The temporary ChatGPT generation attempt did not complete safely. Retry the preserved approval."
         elif error_code in {"assistance_disabled", "AssistanceDisabled"}:
-            messages[status] = "ChatGPT assistance is disabled. Enable it before retrying this approval."
+            messages[status] = "ChatGPT assistance is disabled. The editable draft shell remains available."
         elif error_code in {"isolation_not_passed", "IsolationUnavailable"}:
-            messages[status] = "The local isolation check must pass before this draft can be generated."
+            messages[status] = "The local isolation check must pass before ChatGPT can generate this draft."
         elif error_code in {"approval_invalidated", "evidence_invalidated", "ApprovalInvalidated"}:
             status = "needs_reapproval"
         elif error_code in {"story_revision_changed", "approval_revision_mismatch"}:
             status = "needs_reapproval"
             messages[status] = (
                 "The approved claims or sources changed. Review the latest revision and approve again."
+            )
+        elif error_code == "volatile_source_unavailable":
+            messages[status] = (
+                "An approved source is temporarily unavailable, so its volatile passage could not be rechecked. "
+                "The editable shell is preserved; retry after the source recovers."
+            )
+        elif error_code == "volatile_source_unsafe":
+            status = "failed_security"
+            messages[status] = (
+                "An approved source failed the safe-network policy during revalidation. "
+                "Review the source before retrying."
+            )
+        elif error_code == "volatile_source_drift":
+            status = "needs_reapproval"
+            messages[status] = (
+                "An approved volatile source changed. Review the latest passage and approve again."
             )
         return {
             "status": status,
@@ -1029,7 +1127,15 @@ class DashboardService:
             "attempt_count": attempts,
             "error_code": error_code,
             "active": status in {"starting", "generating", "retrying"},
-            "retryable": status in {"failed", "waiting"},
+            "retryable": status
+            in {
+                "failed",
+                "waiting",
+                "waiting_for_login",
+                "waiting_for_isolation",
+                "waiting_for_usage_reset",
+                "failed_security",
+            },
         }
 
     def draft_status(self, story_id: str) -> dict[str, Any] | None:
@@ -1044,16 +1150,30 @@ class DashboardService:
         if not work:
             return None
         status = self._draft_status_view(work)
-        draft = (
-            self.database.one(
+        draft = self.database.one(
+            "SELECT id, status FROM draft WHERE story_id = ? ORDER BY version DESC LIMIT 1",
+            (story_id,),
+        )
+        if not draft and status["status"] not in {
+            "needs_reapproval",
+            "generating",
+            "draft_ready",
+        }:
+            try:
+                approval_snapshot = json.loads(str(work.get("payload_json") or "{}"))
+            except json.JSONDecodeError:
+                approval_snapshot = {}
+            self._create_editable_draft_shell(int(work["id"]), approval_snapshot)
+            draft = self.database.one(
                 "SELECT id, status FROM draft WHERE story_id = ? ORDER BY version DESC LIMIT 1",
                 (story_id,),
             )
-            if status["raw_status"] == "completed"
-            else None
-        )
         draft_id = int(draft["id"]) if draft else None
-        if status["status"] == "ready" and draft and draft["status"] == "Needs Review":
+        if (
+            status["status"] == "draft_ready"
+            and draft
+            and draft["status"] == "Needs Review"
+        ):
             status.update(
                 {
                     "status": "needs_reapproval",
@@ -1069,6 +1189,9 @@ class DashboardService:
                 "draft_id": draft_id,
                 "updated_at": work["updated_at"],
                 "approval_basis": "verified",
+                "manual_editor_available": bool(
+                    draft and draft["status"] == "Editable Shell"
+                ),
             }
         )
         try:
@@ -1077,7 +1200,7 @@ class DashboardService:
             payload = {}
         status["approval_basis"] = str(payload.get("approval_basis") or "verified")
         status["manual_override_active"] = status["approval_basis"] == "manual_override"
-        if status["status"] == "ready" and not draft:
+        if status["status"] == "draft_ready" and not draft:
             status.update(
                 {
                     "status": "failed",
@@ -1106,6 +1229,132 @@ class DashboardService:
                     Database.json({"work_item_id": work_item_id, "error_class": type(error).__name__}),
                 ),
             )
+
+    def _create_editable_draft_shell(
+        self, work_item_id: int, approval_snapshot: dict[str, Any]
+    ) -> int | None:
+        """Create a source-bound manual fallback without claiming AI completion."""
+        work_state = self.database.one(
+            "SELECT status FROM work_item WHERE id = ? AND kind = 'draft'",
+            (work_item_id,),
+        )
+        if not work_state or work_state["status"] not in {
+            "pending",
+            "queued",
+            "waiting",
+            "failed",
+        }:
+            return None
+        story = approval_snapshot.get("story")
+        claims = approval_snapshot.get("claims")
+        sources = approval_snapshot.get("sources")
+        if not isinstance(story, dict) or not isinstance(claims, list) or not isinstance(sources, list):
+            return None
+        headline = " ".join(str(story.get("headline") or "").split())[:240]
+        summary = " ".join(str(story.get("summary") or "").split())
+        if not summary:
+            first_claim = next(
+                (
+                    claim.get("text")
+                    for claim in claims
+                    if isinstance(claim, dict) and claim.get("text")
+                ),
+                "",
+            )
+            summary = " ".join(str(first_claim).split())
+        if not headline or not summary:
+            return None
+
+        source_rows: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            raw_url = str(source.get("citation_url") or source.get("url") or "")
+            try:
+                safe_url = normalize_optional_public_https_url(raw_url) or ""
+            except ValueError:
+                safe_url = ""
+            label = " ".join(
+                str(
+                    source.get("citation_label")
+                    or source.get("title")
+                    or source.get("source_name")
+                    or "Source"
+                ).split()
+            )[:160]
+            key = f"{label.casefold()}|{safe_url}"
+            if key in seen:
+                continue
+            seen.add(key)
+            source_rows.append(
+                {
+                    "display_label": label,
+                    "title": " ".join(str(source.get("title") or label).split())[:500],
+                    "url": safe_url,
+                    "role": str(source.get("source_role") or "")[:80],
+                    "hosting_publisher_name": str(
+                        source.get("hosting_publisher_name") or ""
+                    )[:120],
+                    "reporting_origin_name": str(
+                        source.get("reporting_origin_name") or ""
+                    )[:120],
+                    "provenance_type": str(source.get("provenance_type") or "unknown")[:20],
+                }
+            )
+
+        now = utc_now()
+        with self.database.transaction() as connection:
+            work = connection.execute(
+                "SELECT status FROM work_item WHERE id = ? AND kind = 'draft'",
+                (work_item_id,),
+            ).fetchone()
+            if not work or work["status"] not in {"pending", "queued", "waiting", "failed"}:
+                return None
+            existing = connection.execute(
+                """
+                SELECT id FROM draft
+                WHERE story_id = ? AND status IN ('Current', 'Editable Shell')
+                ORDER BY version DESC LIMIT 1
+                """,
+                (story.get("id"),),
+            ).fetchone()
+            if existing:
+                return int(existing["id"])
+            version = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(version), 0) AS version FROM draft WHERE story_id = ?",
+                    (story.get("id"),),
+                ).fetchone()["version"]
+            ) + 1
+            cursor = connection.execute(
+                """
+                INSERT INTO draft(
+                    story_id, mode, status, version, headline, metadata, body, lens,
+                    sources_json, created_at, updated_at, provenance_json,
+                    approval_snapshot_json
+                ) VALUES(?, ?, 'Editable Shell', ?, ?, ?, ?, '', ?, ?, ?, ?, ?)
+                """,
+                (
+                    story.get("id"),
+                    approval_snapshot.get("mode") or "Neutral News Brief",
+                    version,
+                    headline,
+                    f"{story.get('freshness') or ''} · {story.get('lane') or ''}".strip(" ·"),
+                    summary,
+                    Database.json(source_rows),
+                    now,
+                    now,
+                    Database.json(
+                        {
+                            "kind": "deterministic_editable_shell",
+                            "work_item_id": work_item_id,
+                        }
+                    ),
+                    Database.json(approval_snapshot),
+                ),
+            )
+            return int(cursor.lastrowid)
 
     def get_draft(self, draft_id: int) -> dict[str, Any] | None:
         draft = self.database.one(
@@ -1312,11 +1561,18 @@ class DashboardService:
                     """,
                     (story_id,),
                 ).fetchone()
-                if latest_existing_draft and latest_existing_draft["status"] != "Needs Review":
+                if latest_existing_draft and latest_existing_draft["status"] not in {
+                    "Needs Review",
+                    "Editable Shell",
+                }:
                     raise ValueError(
                         "A completed draft already exists; revise it from Drafts & history"
                     )
-                if latest_existing_draft and story["status"] != "candidate":
+                if (
+                    latest_existing_draft
+                    and latest_existing_draft["status"] == "Needs Review"
+                    and story["status"] != "candidate"
+                ):
                     raise ValueError(
                         "A replacement draft requires a candidate whose current draft needs review"
                     )
@@ -1435,6 +1691,7 @@ class DashboardService:
                 )
                 work_item_id = int(work_cursor.lastrowid)
         if work_item_id is not None:
+            self._create_editable_draft_shell(work_item_id, work_payload)
             self._dispatch_draft(work_item_id)
         return new_status
 
@@ -1506,8 +1763,8 @@ class DashboardService:
         original = self.get_draft(draft_id)
         if not original:
             raise LookupError("Draft not found")
-        if original["status"] != "Current":
-            raise ValueError("Only the current draft version can be revised")
+        if original["status"] not in {"Current", "Editable Shell"}:
+            raise ValueError("Only the current draft version or editable shell can be revised")
         headline_value = headline.strip()
         metadata_value = metadata.strip()
         body_value = body.replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -1537,11 +1794,55 @@ class DashboardService:
                 raise ValueError("Open-source lens text requires a Strong or Moderate opportunity")
         now = utc_now()
         with self.database.transaction() as connection:
+            locked_original = connection.execute(
+                "SELECT status, provenance_json FROM draft WHERE id = ?",
+                (draft_id,),
+            ).fetchone()
+            if (
+                not locked_original
+                or locked_original["status"] not in {"Current", "Editable Shell"}
+            ):
+                raise ValueError(
+                    "This draft changed while it was being edited. Reload the latest version."
+                )
+            locked_shell_work_item_id: int | None = None
+            if locked_original["status"] == "Editable Shell":
+                try:
+                    locked_provenance = json.loads(
+                        str(locked_original["provenance_json"] or "{}")
+                    )
+                except json.JSONDecodeError:
+                    locked_provenance = {}
+                if isinstance(locked_provenance.get("work_item_id"), int):
+                    locked_shell_work_item_id = int(
+                        locked_provenance["work_item_id"]
+                    )
+                if locked_shell_work_item_id is None:
+                    raise ValueError(
+                        "This editable shell is not linked to its approved draft request."
+                    )
+                cancelled = connection.execute(
+                    """
+                    UPDATE work_item
+                    SET status = 'cancelled', last_error_class = 'manual_draft_completed',
+                        updated_at = ?, available_at = NULL
+                    WHERE id = ? AND story_id = ? AND kind = 'draft'
+                      AND status IN ('pending', 'queued', 'waiting', 'running', 'generating', 'failed')
+                    """,
+                    (now, locked_shell_work_item_id, original["story_id"]),
+                ).rowcount
+                if cancelled != 1:
+                    raise ValueError(
+                        "Draft generation completed while this shell was being edited. Reload the latest version."
+                    )
             current_version = connection.execute(
                 "SELECT MAX(version) AS version FROM draft WHERE story_id = ?",
                 (original["story_id"],),
             ).fetchone()["version"]
-            connection.execute("UPDATE draft SET status = 'Superseded' WHERE id = ?", (draft_id,))
+            connection.execute(
+                "UPDATE draft SET status = 'Superseded', updated_at = ? WHERE story_id = ? AND status IN ('Current', 'Editable Shell')",
+                (now, original["story_id"]),
+            )
             cursor = connection.execute(
                 """
                 INSERT INTO draft(
@@ -1562,6 +1863,11 @@ class DashboardService:
                 "INSERT INTO review_action(story_id, action, reason, draft_mode, created_at) VALUES(?, 'manual_revision', ?, ?, ?)",
                 (original["story_id"], f"Saved version {int(current_version) + 1}", original["mode"], now),
             )
+            if locked_shell_work_item_id is not None:
+                connection.execute(
+                    "UPDATE story_cluster SET status = 'draft_ready', updated_at = ? WHERE id = ?",
+                    (now, original["story_id"]),
+                )
             return int(cursor.lastrowid)
 
     def sources(self) -> dict[str, Any]:
@@ -1606,6 +1912,8 @@ class DashboardService:
         return enabled
 
     def schedule_status(self) -> dict[str, Any]:
+        from .assistance import assistance_status
+
         recent = self.database.query("SELECT * FROM scan_run ORDER BY started_at DESC LIMIT 8")
         queued = self.database.query(
             "SELECT * FROM work_item WHERE status IN ('pending', 'queued') ORDER BY priority DESC, created_at"
@@ -1620,18 +1928,35 @@ class DashboardService:
             """
         ) or {"background": 0, "draft": 0}
         today = datetime.now(UTC).date()
-        schedule_active = self.database.get_state("schedule_status", "not_installed") == "active"
+        if self.scheduler is not None:
+            try:
+                live_schedule = self.scheduler.status()
+                installed = bool(live_schedule.installed)
+                schedule_state = str(live_schedule.state)
+                schedule_error = live_schedule.error
+            except Exception:
+                installed = False
+                schedule_state = "unavailable"
+                schedule_error = "launchctl_status_unavailable"
+        else:
+            installed = self.database.get_state("schedule_installed", "false") == "true"
+            schedule_state = self.database.get_state("schedule_status", "not_installed")
+            schedule_error = None
+        schedule_active = schedule_state == "active"
         next_scan = (
             next_scheduled_run().isoformat().replace("+00:00", "Z")
             if schedule_active
             else "Not scheduled"
         )
+        assistance = assistance_status(self.database)
         return {
-            "installed": self.database.get_state("schedule_installed", "false") == "true",
-            "status": self.database.get_state("schedule_status", "not_installed"),
+            "installed": installed,
+            "status": schedule_state,
+            "error": schedule_error,
             "last_scan_at": self.database.get_state("last_scan_at", "Never"),
             "next_scan_at": next_scan,
             "assistance_enabled": self.database.get_state("assistance_enabled", "false") == "true",
+            "assistance": assistance,
             "shadow_mode": self.database.get_state("shadow_mode", "true") == "true",
             "background_units": int(usage["background"] or 0),
             "draft_units": int(usage["draft"] or 0),
@@ -1708,13 +2033,13 @@ class DashboardService:
             self.database.set_state("schedule_status", "paused", now)
             return "paused"
         if action == "resume":
-            if self.database.get_state("schedule_installed", "false") != "true":
-                raise ValueError("The local schedule is not installed yet")
             if self.scheduler is not None:
                 try:
                     return str(self.scheduler.resume().state)
                 except Exception as error:
                     raise ValueError(str(error)) from error
+            if self.database.get_state("schedule_installed", "false") != "true":
+                raise ValueError("The local schedule is not installed yet")
             self.database.set_state("schedule_status", "active", now)
             return "active"
         existing = self.database.one(

@@ -7,9 +7,10 @@ import hashlib
 import ipaddress
 import logging
 import os
+import platform
 import re
 import secrets
-import shutil
+import socket
 import socketserver
 import subprocess
 import tempfile
@@ -19,18 +20,37 @@ import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from importlib.resources import files
+from importlib.resources import files  # nosemgrep: python.lang.compatibility.python37.python37-compatibility-importlib2 -- project requires Python 3.12
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from .evidence import publisher_display_name
-from .revisions import approval_signature_sets
-from .storage import Database
+from . import __version__
+from .assistance_broker import (
+    BROKER_POLICY_VERSION,
+    REVIEWED_CODEX_HOSTS,
+    BrokerError,
+    ConnectBroker,
+)
+from .evidence import extract_page, publisher_display_name
+from .network import SafeHttpClient, UnsafeRequest
+from .revisions import (
+    approval_signature_sets,
+    normalize_atomic_claim,
+    source_signature_record,
+)
+from .storage import SCHEMA_VERSION, Database
 
 
 PROMPT_VERSION = "v3"
-ISOLATION_CANARY_VERSION = "0.3.6-v1"
+ISOLATION_CANARY_VERSION = "0.3.7-v1"
+ISOLATION_ATTESTATION_HOURS = 24
+ISOLATION_ATTESTATION_STATE = "assistance_isolation_attestation"
+EXPECTED_CODEX_TEAM_ID = "2DC432GLL2"
+EXPECTED_CODEX_IDENTIFIER = "codex"
+EXPECTED_CODEX_VERSION = "codex-cli 0.145.0-alpha.30"
+EXPECTED_CODEX_SHA256 = "ccf63c3a58cef44281da4a54a3ec65c6a612e579991d6c9e754613f2fbc3299d"
+EXPECTED_CODEX_CDHASH = "0967a78e0991180f97cdde9e0692a8b2940ee14b"
 CITATION_TOKEN_RE = re.compile(r"\[\[source:([A-Za-z0-9:_-]{1,120})\]\]")
 RAW_MARKDOWN_LINK_RE = re.compile(r"\[[^\]\n]+\]\([^\)\n]+\)")
 RAW_HTML_RE = re.compile(r"</?[A-Za-z][^>]*>")
@@ -90,12 +110,38 @@ class InvocationResult:
     output_size: int
 
 
+@dataclass(frozen=True, slots=True)
+class CodexIdentity:
+    path: str
+    version: str
+    team_id: str
+    identifier: str
+    sha256: str
+    cdhash: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "path": self.path,
+            "version": self.version,
+            "team_id": self.team_id,
+            "identifier": self.identifier,
+            "sha256": self.sha256,
+            "cdhash": self.cdhash,
+        }
+
+
 CommandRunner = Callable[
     [list[str], str, Path, dict[str, str]], subprocess.CompletedProcess[str]
 ]
 ProfileRunner = Callable[
     [list[str], Path, dict[str, str]], subprocess.CompletedProcess[str]
 ]
+IdentityVerifier = Callable[[Path], CodexIdentity]
+VolatileSourceClientFactory = Callable[[str], SafeHttpClient]
+
+
+def _default_volatile_source_client(host: str) -> SafeHttpClient:
+    return SafeHttpClient(allowed_hosts={host}, maximum_bytes=2_000_000)
 
 
 def _run_command(
@@ -124,6 +170,17 @@ def _run_profile_check(
         capture_output=True,
         text=True,
         timeout=30,
+    )
+
+
+def _run_identity_command(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        arguments,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
     )
 
 
@@ -162,10 +219,8 @@ def _resolve_codex_binary(explicit: Path | None) -> Path:
     candidates: list[Path] = []
     if explicit is not None:
         candidates.append(explicit.expanduser())
-    path_binary = shutil.which("codex")
-    if path_binary:
-        candidates.append(Path(path_binary))
-    candidates.extend(_known_codex_binary_paths())
+    else:
+        candidates.extend(_known_codex_binary_paths())
 
     for candidate in candidates:
         try:
@@ -175,8 +230,102 @@ def _resolve_codex_binary(explicit: Path | None) -> Path:
         if resolved.is_file() and os.access(resolved, os.X_OK):
             return resolved
     raise AssistanceConfigurationError(
-        "codex_unavailable: Codex CLI executable was not found"
+        "codex_unavailable: Bundled ChatGPT Codex executable was not found"
     )
+
+
+def _digest_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as error:
+        raise AssistanceConfigurationError(
+            "codex_identity_unreadable: Bundled Codex could not be hashed"
+        ) from error
+    return digest.hexdigest()
+
+
+def _identity_field(text: str, name: str) -> str:
+    match = re.search(rf"(?m)^{re.escape(name)}=(\S+)$", text)
+    if not match:
+        raise AssistanceConfigurationError(
+            "codex_signature_invalid: Bundled Codex signature metadata is incomplete"
+        )
+    return match.group(1)
+
+
+def verify_codex_identity(
+    codex_binary: Path | None = None,
+    *,
+    command_runner: Callable[[list[str]], subprocess.CompletedProcess[str]] = _run_identity_command,
+) -> CodexIdentity:
+    """Verify the exact release-reviewed ChatGPT-bundled Codex executable."""
+    path = _resolve_codex_binary(codex_binary)
+    reviewed_paths: set[Path] = set()
+    for candidate in _known_codex_binary_paths():
+        try:
+            reviewed_paths.add(candidate.expanduser().resolve(strict=True))
+        except (OSError, RuntimeError):
+            continue
+    if path not in reviewed_paths:
+        raise AssistanceConfigurationError(
+            "codex_path_unreviewed: Codex is not the ChatGPT-bundled executable"
+        )
+    try:
+        verified = command_runner(
+            ["/usr/bin/codesign", "--verify", "--strict", "--verbose=2", str(path)]
+        )
+        details = command_runner(["/usr/bin/codesign", "-dvvv", str(path)])
+        requirements = command_runner(
+            ["/usr/bin/codesign", "-d", "--requirements", "-", str(path)]
+        )
+        version_result = command_runner([str(path), "--version"])
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise AssistanceConfigurationError(
+            "codex_signature_unavailable: Codex identity verification could not run"
+        ) from error
+    if verified.returncode != 0 or details.returncode != 0 or requirements.returncode != 0:
+        raise AssistanceConfigurationError(
+            "codex_signature_invalid: Bundled Codex Apple signature is invalid"
+        )
+    signature_text = f"{details.stdout}\n{details.stderr}"
+    requirement_text = f"{requirements.stdout}\n{requirements.stderr}"
+    team_id = _identity_field(signature_text, "TeamIdentifier")
+    identifier = _identity_field(signature_text, "Identifier")
+    cdhash = _identity_field(signature_text, "CDHash").casefold()
+    if (
+        "anchor apple generic" not in requirement_text.casefold()
+        or f'leaf[subject.OU] = "{EXPECTED_CODEX_TEAM_ID}"'.casefold()
+        not in requirement_text.casefold()
+    ):
+        raise AssistanceConfigurationError(
+            "codex_signature_invalid: Bundled Codex designated requirement is invalid"
+        )
+    version = version_result.stdout.strip()
+    sha256 = _digest_file(path)
+    identity = CodexIdentity(
+        path=str(path),
+        version=version,
+        team_id=team_id,
+        identifier=identifier,
+        sha256=sha256,
+        cdhash=cdhash,
+    )
+    expected = {
+        "version": EXPECTED_CODEX_VERSION,
+        "team_id": EXPECTED_CODEX_TEAM_ID,
+        "identifier": EXPECTED_CODEX_IDENTIFIER,
+        "sha256": EXPECTED_CODEX_SHA256,
+        "cdhash": EXPECTED_CODEX_CDHASH,
+    }
+    actual = identity.as_dict()
+    if version_result.returncode != 0 or any(actual[key] != value for key, value in expected.items()):
+        raise AssistanceConfigurationError(
+            "codex_identity_drift: Bundled Codex identity differs from this release"
+        )
+    return identity
 
 
 def _codex_sandbox_rule(codex_binary: Path) -> tuple[str, Path]:
@@ -189,7 +338,16 @@ def _codex_sandbox_rule(codex_binary: Path) -> tuple[str, Path]:
     return "subpath", executable_directory
 
 
-def sandbox_profile(task_directory: Path, codex_binary: Path, auth_file: Path) -> str:
+def sandbox_profile(
+    task_directory: Path,
+    codex_binary: Path,
+    auth_file: Path,
+    broker_port: int,
+) -> str:
+    if isinstance(broker_port, bool) or not 1 <= int(broker_port) <= 65535:
+        raise AssistanceConfigurationError(
+            "broker_endpoint_invalid: Loopback broker endpoint is invalid"
+        )
     task = _escaped_profile_path(task_directory)
     codex_rule, codex_access_path = _codex_sandbox_rule(codex_binary)
     codex_access = _escaped_profile_path(codex_access_path)
@@ -199,11 +357,11 @@ def sandbox_profile(task_directory: Path, codex_binary: Path, auth_file: Path) -
     return f"""(version 1)
 (deny default)
 (allow process-exec (literal \"{executable}\"))
+(deny process-fork)
 (allow signal)
 (allow sysctl-read)
 (allow mach-lookup)
-(allow network-outbound (remote tcp \"*:443\"))
-(deny network-outbound (remote ip \"localhost:*\"))
+(allow network-outbound (remote tcp \"localhost:{int(broker_port)}\"))
 (allow file-read-metadata)
 (allow file-read*
   (literal \"/\")
@@ -218,6 +376,251 @@ def sandbox_profile(task_directory: Path, codex_binary: Path, auth_file: Path) -
 (allow file-write* (subpath \"{task}\"))
 (allow file-write* (subpath \"{credential_home}\"))
 """
+
+
+def _policy_digest() -> str:
+    policy = {
+        "attestation_version": ISOLATION_CANARY_VERSION,
+        "broker_policy": BROKER_POLICY_VERSION,
+        "hosts": sorted(REVIEWED_CODEX_HOSTS),
+        "outer_network": "exact-loopback-ip-and-port-only",
+        "child_processes": "process-fork-denied",
+        "sandbox_profile": sandbox_profile(
+            Path("/WIRE_TASK"),
+            Path("/Applications/ChatGPT.app/Contents/Resources/codex"),
+            Path("/WIRE_CREDENTIALS/auth.json"),
+            43123,
+        ),
+        "tls": "unchanged-end-to-end",
+        "disabled_features": list(_DISABLED_CODEX_FEATURES),
+        "forbidden_events": sorted(_FORBIDDEN_CODEX_EVENT_TYPES),
+        "schema_version": SCHEMA_VERSION,
+        "expected_codex": {
+            "version": EXPECTED_CODEX_VERSION,
+            "team_id": EXPECTED_CODEX_TEAM_ID,
+            "identifier": EXPECTED_CODEX_IDENTIFIER,
+            "sha256": EXPECTED_CODEX_SHA256,
+            "cdhash": EXPECTED_CODEX_CDHASH,
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(policy, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _os_identity() -> dict[str, str]:
+    return {
+        "system": platform.system(),
+        "release": platform.release(),
+        "machine": platform.machine(),
+        "macos": platform.mac_ver()[0],
+    }
+
+
+def _parse_time(value: object) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise ValueError("timestamp missing")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp must include timezone")
+    return parsed.astimezone(UTC)
+
+
+def _at_time(value: datetime | str | None) -> datetime:
+    if value is None:
+        return datetime.now(UTC)
+    if isinstance(value, str):
+        return _parse_time(value)
+    if value.tzinfo is None:
+        raise ValueError("now must include timezone")
+    return value.astimezone(UTC)
+
+
+def _attestation_payload(identity: CodexIdentity, issued_at: datetime) -> dict[str, Any]:
+    issued = issued_at.replace(microsecond=0)
+    payload: dict[str, Any] = {
+        "attestation_version": ISOLATION_CANARY_VERSION,
+        "release_version": __version__,
+        "schema_version": SCHEMA_VERSION,
+        "issued_at": issued.isoformat().replace("+00:00", "Z"),
+        "expires_at": (issued + timedelta(hours=ISOLATION_ATTESTATION_HOURS))
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "policy_digest": _policy_digest(),
+        "os": _os_identity(),
+        "codex": identity.as_dict(),
+        "canary_passed": True,
+    }
+    payload["fingerprint"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return payload
+
+
+def _decode_attestation(database: Database) -> dict[str, Any] | None:
+    raw = database.get_state(ISOLATION_ATTESTATION_STATE, "")
+    if not raw:
+        return None
+    try:
+        attestation = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return attestation if isinstance(attestation, dict) else None
+
+
+def _isolation_evaluation(
+    database: Database,
+    *,
+    now: datetime | str | None = None,
+    identity: CodexIdentity | None = None,
+) -> tuple[bool, str, dict[str, Any] | None, CodexIdentity | None]:
+    try:
+        if database.schema_version() != SCHEMA_VERSION:
+            return False, "schema_drift", None, identity
+    except Exception:
+        return False, "schema_drift", None, identity
+    if database.get_state("assistance_isolation_gate", "not_run") != "passed":
+        return False, database.get_state("assistance_unavailable_reason", "isolation_not_passed") or "isolation_not_passed", None, identity
+    if database.get_state("assistance_isolation_version", "") != ISOLATION_CANARY_VERSION:
+        return False, "attestation_version_drift", None, identity
+    attestation = _decode_attestation(database)
+    expected_fields = {
+        "attestation_version",
+        "release_version",
+        "schema_version",
+        "issued_at",
+        "expires_at",
+        "policy_digest",
+        "os",
+        "codex",
+        "canary_passed",
+        "fingerprint",
+    }
+    if not attestation or set(attestation) != expected_fields:
+        return False, "attestation_missing_or_invalid", attestation, identity
+    fingerprint_payload = dict(attestation)
+    fingerprint = fingerprint_payload.pop("fingerprint", None)
+    expected_fingerprint = hashlib.sha256(
+        json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if not isinstance(fingerprint, str) or not secrets.compare_digest(fingerprint, expected_fingerprint):
+        return False, "attestation_integrity_failed", attestation, identity
+    if (
+        attestation.get("attestation_version") != ISOLATION_CANARY_VERSION
+        or attestation.get("release_version") != __version__
+        or attestation.get("schema_version") != SCHEMA_VERSION
+        or attestation.get("policy_digest") != _policy_digest()
+        or attestation.get("os") != _os_identity()
+        or attestation.get("canary_passed") is not True
+    ):
+        return False, "attestation_policy_drift", attestation, identity
+    try:
+        current = _at_time(now)
+        issued = _parse_time(attestation.get("issued_at"))
+        expires = _parse_time(attestation.get("expires_at"))
+    except (TypeError, ValueError, OverflowError):
+        return False, "attestation_time_invalid", attestation, identity
+    if issued > current + timedelta(minutes=5):
+        return False, "attestation_from_future", attestation, identity
+    if expires - issued != timedelta(hours=ISOLATION_ATTESTATION_HOURS):
+        return False, "attestation_lifetime_invalid", attestation, identity
+    if current >= expires:
+        return False, "attestation_expired", attestation, identity
+    try:
+        current_identity = identity or verify_codex_identity()
+    except AssistanceError as error:
+        return False, _error_code(error), attestation, None
+    if attestation.get("codex") != current_identity.as_dict():
+        return False, "codex_identity_drift", attestation, current_identity
+    return True, "", attestation, current_identity
+
+
+def assistance_isolation_current(
+    database: Database,
+    *,
+    now: datetime | str | None = None,
+    identity: CodexIdentity | None = None,
+) -> bool:
+    """Single release-bound authority for every assistance activation and use."""
+    current, _reason, _attestation, _identity = _isolation_evaluation(
+        database, now=now, identity=identity
+    )
+    return current
+
+
+def _load_saved_chatgpt_auth(auth_file: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(auth_file.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise AssistanceConfigurationError(
+            "codex_authentication_unavailable: Saved ChatGPT authentication is unavailable"
+        ) from error
+    except json.JSONDecodeError as error:
+        raise AssistanceConfigurationError(
+            "codex_authentication_invalid: Saved ChatGPT authentication is not valid JSON"
+        ) from error
+    if not isinstance(payload, dict):
+        raise AssistanceConfigurationError(
+            "codex_authentication_invalid: Saved ChatGPT authentication has an invalid shape"
+        )
+    api_key = payload.get("OPENAI_API_KEY")
+    if (
+        payload.get("auth_mode") != "chatgpt"
+        or not isinstance(payload.get("tokens"), dict)
+        or not payload["tokens"]
+        or api_key is not None and api_key != ""
+    ):
+        raise AssistanceConfigurationError(
+            "codex_authentication_invalid: Saved authentication is not ChatGPT-only"
+        )
+    return payload
+
+
+def assistance_status(
+    database: Database,
+    *,
+    now: datetime | str | None = None,
+) -> dict[str, Any]:
+    """Return a credential-free, read-only assistance readiness report."""
+    identity: CodexIdentity | None = None
+    identity_failure = ""
+    try:
+        identity = verify_codex_identity()
+    except AssistanceError as error:
+        identity_failure = _error_code(error)
+    current, reason, attestation, _ = _isolation_evaluation(
+        database, now=now, identity=identity
+    )
+    auth_file = Path.home() / ".codex" / "auth.json"
+    try:
+        _load_saved_chatgpt_auth(auth_file)
+        login_available = True
+    except AssistanceError:
+        login_available = False
+    pending = database.one(
+        """
+        SELECT COUNT(*) AS count FROM work_item
+        WHERE kind IN ('draft', 'research', 'semantic')
+          AND status IN ('pending', 'queued', 'waiting', 'generating')
+        """
+    )
+    enabled = database.get_state("assistance_enabled", "false") == "true"
+    failure_reason = identity_failure or reason
+    if current and not login_available:
+        failure_reason = "codex_authentication_unavailable"
+    return {
+        "enabled": enabled,
+        "ready": current and login_available,
+        "current": current,
+        "gate": database.get_state("assistance_isolation_gate", "not_run"),
+        "version": database.get_state("assistance_isolation_version", ""),
+        "attestation_expires_at": str(attestation.get("expires_at") or "") if attestation else "",
+        "codex_available": identity is not None,
+        "codex_identity": identity.as_dict() if identity is not None else None,
+        "login_available": login_available,
+        "failure_reason": failure_reason,
+        "pending_work": int((pending or {}).get("count") or 0),
+    }
 
 
 def _reject_tool_events(raw_events: str) -> None:
@@ -248,6 +651,32 @@ def _reject_tool_events(raw_events: str) -> None:
                 pending.extend(value)
 
 
+def _codex_deferred_condition(result: subprocess.CompletedProcess[str]) -> str:
+    """Classify only stable Codex account messages without persisting output."""
+    rendered = f"{result.stdout}\n{result.stderr}".casefold()
+    if any(
+        marker in rendered
+        for marker in (
+            "you've hit your usage limit",
+            "usage limit reached",
+            "quota exceeded",
+            "rate limit reset",
+        )
+    ):
+        return "waiting_for_usage_reset"
+    if any(
+        marker in rendered
+        for marker in (
+            "please log in again",
+            "chatgpt login is required",
+            "authentication required",
+            "not logged in",
+        )
+    ):
+        return "waiting_for_login"
+    return ""
+
+
 class CodexInvoker:
     def __init__(
         self,
@@ -257,28 +686,36 @@ class CodexInvoker:
         auth_file: Path | None = None,
         runner: CommandRunner = _run_command,
         profile_runner: ProfileRunner | None = None,
+        identity_verifier: IdentityVerifier = verify_codex_identity,
+        broker_factory: Callable[[], ConnectBroker] = ConnectBroker,
     ):
         self.codex_binary = _resolve_codex_binary(codex_binary)
+        self.identity_verifier = identity_verifier
+        self.identity = identity_verifier(self.codex_binary)
+        if self.identity.path != str(self.codex_binary):
+            raise AssistanceConfigurationError(
+                "codex_identity_mismatch: Verified Codex path does not match invocation path"
+            )
         self.sandbox_binary = sandbox_binary
         self.auth_file = (auth_file or Path.home() / ".codex" / "auth.json").resolve()
         self.runner = runner
+        self.broker_factory = broker_factory
         self.profile_runner = (
             profile_runner
             if profile_runner is not None
             else _run_profile_check if runner is _run_command else None
         )
-        # macOS sandbox profiles cannot express CIDR address ranges.  Toolless
-        # execution and localhost denial are defense-in-depth, but not proof of
-        # the complete private/special-address property required by the gate.
-        self.private_network_isolation_proven = False
+        self.private_network_isolation_proven = True
 
     def invoke(
         self, packet: dict[str, Any], *, credential_canary: str | None = None
     ) -> InvocationResult:
-        if not self.auth_file.is_file():
+        current_identity = self.identity_verifier(self.codex_binary)
+        if current_identity != self.identity:
             raise AssistanceConfigurationError(
-                "codex_authentication_unavailable: Codex authentication is unavailable"
+                "codex_identity_drift: Bundled Codex changed after verification"
             )
+        auth_payload = _load_saved_chatgpt_auth(self.auth_file)
         with tempfile.TemporaryDirectory(prefix="news-wire-codex-") as temporary:
             isolation_root = Path(temporary).resolve()
             task = isolation_root / "task"
@@ -288,22 +725,15 @@ class CodexInvoker:
             isolated_codex_home = isolation_root / "credential-home"
             isolated_codex_home.mkdir(mode=0o700)
             isolated_auth = isolated_codex_home / "auth.json"
-            shutil.copyfile(self.auth_file, isolated_auth)
+            isolated_auth.write_text(
+                json.dumps(auth_payload, separators=(",", ":")), encoding="utf-8"
+            )
             isolated_auth.chmod(0o600)
             if credential_canary is not None:
-                try:
-                    auth_payload = json.loads(isolated_auth.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError) as error:
-                    raise AssistanceConfigurationError(
-                        "codex_authentication_invalid: Codex authentication is not valid JSON"
-                    ) from error
-                if not isinstance(auth_payload, dict):
-                    raise AssistanceConfigurationError(
-                        "codex_authentication_invalid: Codex authentication has an invalid shape"
-                    )
-                auth_payload["wire_canary"] = credential_canary
+                copied_auth = dict(auth_payload)
+                copied_auth["wire_canary"] = credential_canary
                 isolated_auth.write_text(
-                    json.dumps(auth_payload, separators=(",", ":")), encoding="utf-8"
+                    json.dumps(copied_auth, separators=(",", ":")), encoding="utf-8"
                 )
                 isolated_auth.chmod(0o600)
             invocation_packet = dict(packet)
@@ -324,16 +754,58 @@ class CodexInvoker:
                 encoding="utf-8",
             )
             result_path = task / "result.json"
+            return self._invoke_through_broker(
+                invocation_packet=invocation_packet,
+                packet_text=packet_text,
+                task=task,
+                isolation_root=isolation_root,
+                isolated_home=isolated_home,
+                isolated_codex_home=isolated_codex_home,
+                isolated_auth=isolated_auth,
+                schema=schema,
+                result_path=result_path,
+            )
+
+    def _invoke_through_broker(
+        self,
+        *,
+        invocation_packet: dict[str, Any],
+        packet_text: str,
+        task: Path,
+        isolation_root: Path,
+        isolated_home: Path,
+        isolated_codex_home: Path,
+        isolated_auth: Path,
+        schema: Path,
+        result_path: Path,
+    ) -> InvocationResult:
+        try:
+            broker_context = self.broker_factory()
+            broker_context.start()
+        except BrokerError as error:
+            raise AssistanceConfigurationError(str(error)) from error
+        try:
+            _host, broker_port = broker_context.endpoint
             profile = isolation_root / "sandbox.sb"
             profile.write_text(
-                sandbox_profile(task, self.codex_binary, isolated_auth), encoding="utf-8"
+                sandbox_profile(task, self.codex_binary, isolated_auth, broker_port),
+                encoding="utf-8",
             )
+            proxy_url = broker_context.proxy_url
             environment = {
                 "HOME": str(isolated_home),
                 "CODEX_HOME": str(isolated_codex_home),
                 "CFFIXED_USER_HOME": str(isolated_home),
                 "PATH": "/usr/bin:/bin",
                 "TMPDIR": str(task),
+                "HTTPS_PROXY": proxy_url,
+                "https_proxy": proxy_url,
+                "HTTP_PROXY": proxy_url,
+                "http_proxy": proxy_url,
+                "ALL_PROXY": proxy_url,
+                "all_proxy": proxy_url,
+                "NO_PROXY": "",
+                "no_proxy": "",
             }
             security_arguments = _codex_security_arguments()
             if self.profile_runner is not None:
@@ -389,7 +861,25 @@ class CodexInvoker:
                 raise AssistanceTransientError(
                     "codex_timeout: Codex draft generation timed out"
                 ) from error
+            broker_failure = broker_context.failure_code
+            if broker_failure:
+                error_type = (
+                    AssistanceTransientError
+                    if broker_failure in {
+                        "broker_dns_failed",
+                        "broker_upstream_unavailable",
+                        "broker_transport_failed",
+                        "broker_idle_timeout",
+                    }
+                    else AssistanceConfigurationError
+                )
+                raise error_type(f"{broker_failure}: Secure CONNECT broker rejected the request")
             if result.returncode != 0:
+                deferred = _codex_deferred_condition(result)
+                if deferred:
+                    raise AssistanceDeferred(
+                        f"{deferred}: Saved ChatGPT account action is required"
+                    )
                 raise AssistanceTransientError(
                     f"codex_process_failed: Codex exited with status {result.returncode}"
                 )
@@ -405,9 +895,11 @@ class CodexInvoker:
                 raise AssistanceTransientError(
                     "codex_result_invalid: Codex returned malformed JSON"
                 ) from error
-            validate_result(packet, payload)
+            validate_result(invocation_packet, payload)
             model = "account-default"
             return InvocationResult(payload, model, len(packet_text.encode("utf-8")), len(raw.encode("utf-8")))
+        finally:
+            broker_context.stop()
 
 
 def validate_result(packet: dict[str, Any], result: dict[str, Any]) -> None:
@@ -964,6 +1456,123 @@ def _canonical_signature_records(
     return records
 
 
+def _volatile_source_rows(packet: dict[str, Any]) -> list[dict[str, Any]]:
+    volatile_claim_ids = {
+        int(claim["id"])
+        for claim in packet.get("claims", [])
+        if isinstance(claim, dict)
+        and str(claim.get("volatility") or "").casefold() == "volatile"
+        and isinstance(claim.get("id"), int)
+        and not isinstance(claim.get("id"), bool)
+    }
+    if not volatile_claim_ids:
+        return []
+    rows: list[dict[str, Any]] = []
+    for source in packet.get("sources", []):
+        if not isinstance(source, dict) or not normalize_atomic_claim(
+            str(source.get("passage") or source.get("summary") or "")
+        ):
+            continue
+        relationships = source.get("claim_relationships")
+        if not isinstance(relationships, list):
+            continue
+        related_ids = {
+            int(item["claim_id"])
+            for item in relationships
+            if isinstance(item, dict)
+            and isinstance(item.get("claim_id"), int)
+            and not isinstance(item.get("claim_id"), bool)
+        }
+        if volatile_claim_ids & related_ids:
+            rows.append(source)
+    return rows
+
+
+def _invalidate_approval_after_source_drift(
+    database: Database, work: dict[str, Any]
+) -> None:
+    now = _now()
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE work_item SET status = 'needs_reapproval', available_at = NULL, "
+            "last_error_class = 'volatile_source_drift', updated_at = ? WHERE id = ?",
+            (now, work["id"]),
+        )
+        connection.execute(
+            """
+            UPDATE story_cluster
+            SET status = CASE WHEN status = 'approved' THEN 'candidate' ELSE status END,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (now, work["story_id"]),
+        )
+    raise ApprovalInvalidated(
+        "volatile_source_drift: Approved volatile evidence changed at its source"
+    )
+
+
+def _revalidate_volatile_source_passages(
+    database: Database,
+    work: dict[str, Any],
+    packet: dict[str, Any],
+    *,
+    client_factory: VolatileSourceClientFactory,
+) -> None:
+    """Re-fetch signed volatile passages before any model invocation."""
+    expected_signatures = {
+        str(record["id"]): str(record["signature"])
+        for record in json.loads(str(work.get("payload_json") or "{}"))[
+            "source_signatures"
+        ]
+    }
+    for source in _volatile_source_rows(packet):
+        source_id = str(source.get("evidence_key") or source.get("id") or "")
+        expected_signature = expected_signatures.get(source_id)
+        if not expected_signature or source_signature_record(source)["signature"] != expected_signature:
+            _invalidate_approval_after_source_drift(database, work)
+        url = _safe_https_url(
+            str(source.get("canonical_url") or source.get("url") or "")
+        )
+        host = (urlsplit(url).hostname or "").lower().rstrip(".") if url else ""
+        if not url or not host:
+            raise AssistanceConfigurationError(
+                "volatile_source_unsafe: Approved volatile evidence has an unsafe URL"
+            )
+        try:
+            with client_factory(host) as client:
+                fetched = client.fetch(url)
+            content_type = next(
+                (
+                    str(value).split(";", 1)[0].lower()
+                    for key, value in fetched.headers.items()
+                    if str(key).casefold() == "content-type"
+                ),
+                "text/html",
+            )
+            extracted = extract_page(fetched.body, content_type)
+            live_passage = normalize_atomic_claim(extracted.passage)
+        except UnsafeRequest as error:
+            raise AssistanceConfigurationError(
+                "volatile_source_unsafe: Approved volatile evidence could not be fetched safely"
+            ) from error
+        except AssistanceError:
+            raise
+        except Exception as error:
+            raise AssistanceDeferred(
+                "volatile_source_unavailable: Approved volatile evidence could not be revalidated"
+            ) from error
+        if not live_passage:
+            raise AssistanceDeferred(
+                "volatile_source_unavailable: Approved volatile evidence returned no usable passage"
+            )
+        live_source = dict(source)
+        live_source["passage"] = live_passage
+        live_source.pop("summary", None)
+        if source_signature_record(live_source)["signature"] != expected_signature:
+            _invalidate_approval_after_source_drift(database, work)
+
+
 class AssistanceService:
     def __init__(
         self,
@@ -972,11 +1581,13 @@ class AssistanceService:
         *,
         retry_delay_seconds: int = 15,
         sleeper: Callable[[float], None] = time.sleep,
+        volatile_source_client_factory: VolatileSourceClientFactory = _default_volatile_source_client,
     ):
         self.database = database
         self.invoker = invoker
         self.retry_delay_seconds = max(0, retry_delay_seconds)
         self.sleeper = sleeper
+        self.volatile_source_client_factory = volatile_source_client_factory
 
     def process_next(self, *, drafts_only: bool = False) -> int | None:
         self._ensure_available()
@@ -993,15 +1604,15 @@ class AssistanceService:
         return self._process_claimed(work)
 
     def _ensure_available(self, work_item_id: int | None = None) -> None:
-        isolation_current = (
-            self.database.get_state("assistance_isolation_gate", "not_run") == "passed"
-            and self.database.get_state("assistance_isolation_version", "")
-            == ISOLATION_CANARY_VERSION
+        isolation_current, isolation_reason, _attestation, _identity = _isolation_evaluation(
+            self.database, identity=getattr(self.invoker, "identity", None)
         )
         if not isolation_current:
             if work_item_id is not None:
-                self._mark_waiting(work_item_id, "isolation_not_passed")
-            raise AssistanceDeferred("Packet-only isolation has not passed")
+                self._mark_waiting(work_item_id, isolation_reason or "waiting_for_isolation")
+            raise AssistanceDeferred(
+                f"waiting_for_isolation: {isolation_reason or 'isolation is not current'}"
+            )
         if self.database.get_state("assistance_enabled", "false") != "true":
             if work_item_id is not None:
                 self._mark_waiting(work_item_id, "assistance_disabled")
@@ -1018,8 +1629,7 @@ class AssistanceService:
         kind_filter = "AND kind = 'draft'" if drafts_only else ""
         identifier_filter = "AND id = ?" if work_item_id is not None else ""
         with self.database.transaction() as connection:
-            row = connection.execute(
-                f"""
+            claim_query = f"""
                 SELECT * FROM work_item
                 WHERE kind IN ('draft', 'research', 'semantic')
                   {kind_filter}
@@ -1032,7 +1642,9 @@ class AssistanceService:
                 ORDER BY CASE WHEN kind = 'draft' THEN 0 ELSE 1 END,
                          priority DESC, created_at
                 LIMIT 1
-                """,
+                """  # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- fragments are fixed internal clauses
+            row = connection.execute(
+                claim_query,
                 (
                     (work_item_id, now, now)
                     if work_item_id is not None
@@ -1072,6 +1684,13 @@ class AssistanceService:
                 raise AssistanceDeferred("Background ChatGPT allowance is exhausted")
         try:
             packet = build_packet(self.database, int(work["id"]))
+            if work["kind"] == "draft":
+                _revalidate_volatile_source_passages(
+                    self.database,
+                    work,
+                    packet,
+                    client_factory=self.volatile_source_client_factory,
+                )
             result = self.invoker.invoke(packet)
             validate_result(packet, result.payload)
             return self._store_result(work, packet, result, category, effort)
@@ -1210,6 +1829,43 @@ class AssistanceService:
             )
             if work["kind"] == "draft":
                 story_id = str(work["story_id"])
+                shell_id: int | None = None
+                shell_rows = connection.execute(
+                    """
+                    SELECT id, provenance_json FROM draft
+                    WHERE story_id = ? AND status = 'Editable Shell'
+                    ORDER BY version DESC, id DESC
+                    """,
+                    (story_id,),
+                ).fetchall()
+                for shell in shell_rows:
+                    try:
+                        shell_provenance = json.loads(str(shell["provenance_json"] or "{}"))
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        isinstance(shell_provenance, dict)
+                        and shell_provenance.get("work_item_id") == int(work["id"])
+                    ):
+                        shell_id = int(shell["id"])
+                        break
+                prior_current = connection.execute(
+                    """
+                    SELECT id FROM draft
+                    WHERE story_id = ? AND status = 'Current'
+                    ORDER BY version DESC, id DESC LIMIT 1
+                    """,
+                    (story_id,),
+                ).fetchone()
+                connection.execute(
+                    "UPDATE draft SET status = 'Superseded', updated_at = ? WHERE story_id = ? AND status = 'Current'",
+                    (now, story_id),
+                )
+                if shell_id is not None:
+                    connection.execute(
+                        "UPDATE draft SET status = 'Superseded', updated_at = ? WHERE id = ? AND status = 'Editable Shell'",
+                        (now, shell_id),
+                    )
                 version_row = connection.execute(
                     "SELECT COALESCE(MAX(version), 0) AS version FROM draft WHERE story_id = ?",
                     (story_id,),
@@ -1224,8 +1880,9 @@ class AssistanceService:
                     """
                     INSERT INTO draft(
                         story_id, mode, status, version, headline, metadata, body, lens,
-                        sources_json, created_at, updated_at, provenance_json, approval_snapshot_json
-                    ) VALUES(?, ?, 'Current', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        sources_json, created_at, updated_at, supersedes_id,
+                        provenance_json, approval_snapshot_json
+                    ) VALUES(?, ?, 'Current', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         story_id,
@@ -1234,7 +1891,12 @@ class AssistanceService:
                         f"{packet['story']['freshness']} · {packet['story']['lane']}",
                         rendered_body, rendered_lens, sources_json,
                         now, now,
-                        Database.json({"assistance_result_id": int(result_cursor.lastrowid), "model": result.model, "prompt_version": PROMPT_VERSION}),
+                        shell_id
+                        if shell_id is not None
+                        else int(prior_current["id"])
+                        if prior_current is not None
+                        else None,
+                        Database.json({"assistance_result_id": int(result_cursor.lastrowid), "work_item_id": int(work["id"]), "model": result.model, "prompt_version": PROMPT_VERSION}),
                         work["payload_json"],
                     ),
                 )
@@ -1265,16 +1927,52 @@ def _after(*, seconds: int) -> str:
 
 def _error_code(error: Exception) -> str:
     prefix = str(error).partition(":")[0].strip()
-    if prefix in {
+    safe_codes = {
         "codex_unavailable",
         "codex_authentication_unavailable",
+        "codex_authentication_invalid",
+        "codex_identity_unreadable",
+        "codex_identity_unverified",
+        "codex_identity_drift",
+        "codex_identity_mismatch",
+        "codex_path_unreviewed",
+        "codex_signature_invalid",
+        "codex_signature_unavailable",
+        "codex_sandbox_profile_invalid",
         "codex_timeout",
         "codex_process_failed",
         "codex_result_invalid",
         "codex_result_missing",
         "codex_event_stream_invalid",
         "codex_tool_invocation_blocked",
-    }:
+        "broker_connect_malformed",
+        "broker_connect_port_blocked",
+        "broker_credentials_blocked",
+        "broker_dns_failed",
+        "broker_dns_unsafe",
+        "broker_endpoint_invalid",
+        "broker_host_blocked",
+        "broker_idle_timeout",
+        "broker_ip_literal_blocked",
+        "broker_peer_mismatch",
+        "broker_policy_invalid",
+        "broker_start_failed",
+        "broker_transport_failed",
+        "broker_upstream_unavailable",
+        "child_credential_isolation_failed",
+        "sandbox_boundary_canary_failed",
+        "sandbox_boundary_canary_unavailable",
+        "schema_drift",
+        "unix_socket_canary_unavailable",
+        "unix_socket_isolation_failed",
+        "volatile_source_drift",
+        "volatile_source_unavailable",
+        "volatile_source_unsafe",
+        "waiting_for_isolation",
+        "waiting_for_login",
+        "waiting_for_usage_reset",
+    }
+    if prefix in safe_codes:
         return prefix
     if isinstance(error, ApprovalInvalidated):
         return "approval_invalidated"
@@ -1402,12 +2100,164 @@ class _CanaryHandler(socketserver.BaseRequestHandler):
         self.request.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\n\r\nPRIVATE_CANARY")
 
 
+def _run_sandbox_boundary_canaries(
+    *,
+    sandbox_binary: Path = Path("/usr/bin/sandbox-exec"),
+) -> tuple[bool, str]:
+    """Prove child credential access and Unix sockets are denied by Seatbelt."""
+    if platform.system() != "Darwin" or not sandbox_binary.is_file():
+        return False, "sandbox_boundary_canary_unavailable"
+    marker = "WIRE_CHILD_CREDENTIAL_CANARY_" + secrets.token_hex(24)
+    try:
+        with tempfile.TemporaryDirectory(prefix="news-wire-boundary-") as temporary:
+            root = Path(temporary).resolve()
+            task = root / "task"
+            task.mkdir(mode=0o700)
+            credentials = root / "credentials"
+            credentials.mkdir(mode=0o700)
+            auth = credentials / "auth.json"
+            auth.write_text(marker, encoding="utf-8")
+            auth.chmod(0o600)
+            child_profile = root / "child.sb"
+            child_profile.write_text(
+                sandbox_profile(task, Path("/bin/sh"), auth, 9), encoding="utf-8"
+            )
+            child_script = (
+                "/bin/sh -c 'IFS= read -r value < \"$1\"; "
+                "printf \"%s\" \"$value\"' child \"$1\" & "
+                "child_pid=$!; wait \"$child_pid\""
+            )
+            child = subprocess.run(
+                [
+                    str(sandbox_binary),
+                    "-f",
+                    str(child_profile),
+                    "/bin/sh",
+                    "-c",
+                    child_script,
+                    "boundary",
+                    str(auth),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env={"PATH": "/usr/bin:/bin", "HOME": str(task), "TMPDIR": str(task)},
+            )
+            rendered_child = child.stdout + child.stderr
+            if child.returncode == 71 and "sandbox_apply: Operation not permitted" in rendered_child:
+                return False, "sandbox_boundary_canary_unavailable"
+            if marker in rendered_child or child.returncode == 0:
+                return False, "child_credential_isolation_failed"
+
+            netcat = Path("/usr/bin/nc")
+            if not netcat.is_file():
+                return False, "unix_socket_canary_unavailable"
+            unix_path = task / "private.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                listener.bind(str(unix_path))
+                listener.listen(1)
+                listener.settimeout(0.1)
+                unix_profile = root / "unix.sb"
+                unix_profile.write_text(
+                    sandbox_profile(task, netcat, auth, 9), encoding="utf-8"
+                )
+                try:
+                    unix_result = subprocess.run(
+                        [
+                            str(sandbox_binary),
+                            "-f",
+                            str(unix_profile),
+                            str(netcat),
+                            "-U",
+                            str(unix_path),
+                        ],
+                        input="canary\n",
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=3,
+                        env={
+                            "PATH": "/usr/bin:/bin",
+                            "HOME": str(task),
+                            "TMPDIR": str(task),
+                        },
+                    )
+                except subprocess.TimeoutExpired:
+                    return False, "unix_socket_isolation_failed"
+                rendered_unix = unix_result.stdout + unix_result.stderr
+                if (
+                    unix_result.returncode == 71
+                    and "sandbox_apply: Operation not permitted" in rendered_unix
+                ):
+                    return False, "sandbox_boundary_canary_unavailable"
+                try:
+                    accepted, _address = listener.accept()
+                except TimeoutError:
+                    accepted = None
+                if accepted is not None:
+                    accepted.close()
+                    return False, "unix_socket_isolation_failed"
+                if unix_result.returncode == 0:
+                    return False, "unix_socket_isolation_failed"
+            finally:
+                listener.close()
+    except (OSError, subprocess.TimeoutExpired, AssistanceError):
+        return False, "sandbox_boundary_canary_failed"
+    return True, ""
+
+
 def run_isolation_canary(
     database: Database,
     invoker: CodexInvoker,
     *,
     server_factory: Callable[..., Any] = socketserver.TCPServer,
+    automatic: bool = False,
+    now: datetime | str | None = None,
+    boundary_canary: Callable[[], tuple[bool, str]] = _run_sandbox_boundary_canaries,
 ) -> bool:
+    current_time = _at_time(now).replace(microsecond=0)
+    identity = getattr(invoker, "identity", None)
+    if not isinstance(identity, CodexIdentity):
+        database.set_state("assistance_isolation_gate", "failed", _now())
+        database.set_state("assistance_isolation_version", "", _now())
+        database.set_state(
+            "assistance_unavailable_reason", "codex_identity_unverified", _now()
+        )
+        database.set_state("assistance_enabled", "false", _now())
+        return False
+    if automatic:
+        last_attempt = database.get_state(
+            "assistance_isolation_automatic_attempt_at", ""
+        )
+        if last_attempt:
+            try:
+                if current_time - _parse_time(last_attempt) < timedelta(hours=24):
+                    return assistance_isolation_current(
+                        database, now=current_time, identity=identity
+                    )
+            except (TypeError, ValueError, OverflowError):
+                # Corrupt renewal state cannot authorize a new automatic attempt.
+                return False
+        used = database.one(
+            """
+            SELECT COALESCE(SUM(effort_units), 0) AS units FROM usage_ledger
+            WHERE category = 'background' AND created_at >= datetime(?, '-24 hours')
+            """,
+            (current_time.isoformat().replace("+00:00", "Z"),),
+        )
+        if int((used or {}).get("units") or 0) + 1 > int(
+            database.get_state("background_unit_limit", "8")
+        ):
+            return assistance_isolation_current(
+                database, now=current_time, identity=identity
+            )
+        database.set_state(
+            "assistance_isolation_automatic_attempt_at",
+            current_time.isoformat().replace("+00:00", "Z"),
+            current_time.isoformat().replace("+00:00", "Z"),
+        )
     secret = "WIRE_CREDENTIAL_FILE_CANARY_" + secrets.token_hex(24)
     environment_secret = "WIRE_CREDENTIAL_ENV_CANARY_" + secrets.token_hex(24)
     descriptor, sentinel_name = tempfile.mkstemp(prefix="wire-canary-outside-task-")
@@ -1423,6 +2273,11 @@ def run_isolation_canary(
     passed = False
     failure_class = ""
     try:
+        boundary_passed, boundary_failure = boundary_canary()
+        if not boundary_passed:
+            raise AssistanceConfigurationError(
+                f"{boundary_failure or 'sandbox_boundary_canary_failed'}: Local sandbox boundary failed"
+            )
         packet = {
             "schema_version": 1,
             "operation": "isolation_canary",
@@ -1455,25 +2310,31 @@ def run_isolation_canary(
         if not private_network_proven:
             failure_class = "private_network_isolation_unproven"
     except Exception as error:
-        failure_class = type(error).__name__
+        failure_class = _error_code(error)
         passed = False
     finally:
         server.shutdown()
         server.server_close()
+        thread.join(timeout=5)
         sentinel.unlink(missing_ok=True)
         if previous_environment_secret is None:
             os.environ.pop("WIRE_CANARY_CREDENTIAL", None)
         else:
             os.environ["WIRE_CANARY_CREDENTIAL"] = previous_environment_secret
-    now = _now()
-    database.set_state("assistance_isolation_gate", "passed" if passed else "failed", now)
+    recorded_at = current_time.isoformat().replace("+00:00", "Z")
+    database.set_state("assistance_isolation_gate", "passed" if passed else "failed", recorded_at)
     database.set_state(
-        "assistance_isolation_version", ISOLATION_CANARY_VERSION if passed else "", now
+        "assistance_isolation_version", ISOLATION_CANARY_VERSION if passed else "", recorded_at
+    )
+    database.set_state(
+        ISOLATION_ATTESTATION_STATE,
+        Database.json(_attestation_payload(identity, current_time)) if passed else "",
+        recorded_at,
     )
     database.set_state(
         "assistance_unavailable_reason",
         "" if passed else failure_class or "security_revalidation",
-        now,
+        recorded_at,
     )
     database.execute(
         """
@@ -1482,7 +2343,7 @@ def run_isolation_canary(
             prompt_version, input_size, output_size, retry_count
         ) VALUES('background', 'isolation_canary', 1, 'account-default', ?, ?, 'v1', 0, 0, 0)
         """,
-        ("passed" if passed else "failed", now),
+        ("passed" if passed else "failed", recorded_at),
     )
     database.execute(
         """
@@ -1494,10 +2355,10 @@ def run_isolation_canary(
             "Packet-only isolation canary passed"
             if passed
             else "Packet-only isolation canary failed; assistance remains disabled",
-            now,
+            recorded_at,
             Database.json({"failure_class": failure_class}),
         ),
     )
     if not passed:
-        database.set_state("assistance_enabled", "false", now)
+        database.set_state("assistance_enabled", "false", recorded_at)
     return passed

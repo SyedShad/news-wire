@@ -88,7 +88,7 @@ jobs:
       # rules and blocks the change on a finding. An explicit registry config is
       # required when anonymous metrics are disabled; `--config=auto` exits
       # before scanning in that mode.
-      - name: Run Semgrep SAST scan
+      - name: Run blocking high-confidence News Wire SAST scan
         env:
           SEMGREP_SEND_METRICS: off
-        run: semgrep scan --config=p/default
+        run: semgrep scan --error --severity ERROR --config=p/default src/open_source_ai_news_wire

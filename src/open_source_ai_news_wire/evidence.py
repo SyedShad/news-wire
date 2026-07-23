@@ -9,14 +9,14 @@ import re
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urlsplit
 
 from .adapters import canonical_url, parse_public_time
 from .content_store import ContentStore
-from .network import SafeHttpClient, UnsafeRequest
+from .network import NetworkDeadlineExceeded, SafeHttpClient, UnsafeRequest
 from .storage import Database
 
 
@@ -122,13 +122,19 @@ class _PageParser(HTMLParser):
             self._ignored_depth += 1
         if lowered == "meta":
             key = (attributes.get("property") or attributes.get("name") or "").lower()
+            itemprop = attributes.get("itemprop", "").lower()
             content = attributes.get("content", "").strip()
             if key in {"description", "og:description", "twitter:description"} and not self.description:
                 self.description = content
-            if key in {"article:published_time", "date", "datepublished", "publishdate"} and not self.published:
+            if (
+                key in {"article:published_time", "date", "datepublished", "publishdate"}
+                or itemprop == "datepublished"
+            ) and not self.published:
                 self.published = content
             if key in {"og:site_name", "application-name"} and not self.site_name:
                 self.site_name = content
+        if lowered == "time" and attributes.get("datetime") and not self.published:
+            self.published = attributes["datetime"].strip()
 
     def handle_endtag(self, tag: str) -> None:
         lowered = tag.lower()
@@ -215,6 +221,24 @@ def _text_origin_suggestion(value: str) -> str:
     return ""
 
 
+def _jsonld_publication_time(blobs: list[str]) -> str:
+    for blob in blobs[:12]:
+        try:
+            decoded = json.loads(blob)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        roots = decoded if isinstance(decoded, list) else [decoded]
+        if isinstance(decoded, dict) and isinstance(decoded.get("@graph"), list):
+            roots.extend(decoded["@graph"])
+        for root in roots:
+            if not isinstance(root, dict):
+                continue
+            value = root.get("datePublished") or root.get("dateCreated")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
 def extract_page(payload: bytes, content_type: str) -> ExtractedPage:
     try:
         text = payload.decode("utf-8")
@@ -229,9 +253,12 @@ def extract_page(payload: bytes, content_type: str) -> ExtractedPage:
     passage = html.unescape(parser.description or " ".join(parser.text_parts))
     passage = " ".join(passage.split())[:4000]
     published: str | None = None
-    if parser.published:
+    published_value = parser.published or _jsonld_publication_time(
+        parser._json_ld_parts
+    )
+    if published_value:
         try:
-            published = parse_public_time(parser.published, utc_now())
+            published = parse_public_time(published_value, utc_now())
         except ValueError:
             published = None
     hosting, origin, origin_url, provenance = _jsonld_publisher_metadata(parser._json_ld_parts)
@@ -270,7 +297,7 @@ class EvidenceEnricher:
         self.client_factory = client_factory
         self.now = now
 
-    def process_next(self) -> int | None:
+    def process_next(self, *, deadline: datetime | None = None) -> int | None:
         work = self.database.one(
             """
             SELECT * FROM work_item
@@ -297,7 +324,11 @@ class EvidenceEnricher:
             url = normalize_public_https_url(str(evidence["requested_url"]))
             host = (urlsplit(url).hostname or "").lower().rstrip(".")
             with self.client_factory(host) as client:
-                fetched = client.fetch(url)
+                fetched = (
+                    client.fetch(url, deadline=deadline)
+                    if deadline is not None
+                    else client.fetch(url)
+                )
             final = normalize_public_https_url(fetched.url)
             if publisher_key(final) != publisher_key(url):
                 raise UnsafeRequest("Evidence redirects cannot change publisher identity")
@@ -324,6 +355,18 @@ class EvidenceEnricher:
                 fetched.body, category="primary-snapshots"
             )
             now = self.now()
+            published_at = extracted.published_at
+            future_publication_at: str | None = None
+            if published_at:
+                published_moment = datetime.fromisoformat(
+                    published_at.replace("Z", "+00:00")
+                )
+                observed_moment = datetime.fromisoformat(
+                    now.replace("Z", "+00:00")
+                )
+                if published_moment > observed_moment + timedelta(minutes=15):
+                    future_publication_at = published_at
+                    published_at = None
             with self.database.transaction() as connection:
                 connection.execute(
                     """
@@ -349,7 +392,7 @@ class EvidenceEnricher:
                     """,
                     (
                         final, final, publisher_key(final), extracted.title or final,
-                        extracted.passage, extracted.published_at, extracted.language,
+                        extracted.passage, published_at, extracted.language,
                         "Event" if evidence["acquisition_method"] == "linked" else "Reporting",
                         hosting_name,
                         proposed_origin_name,
@@ -359,14 +402,136 @@ class EvidenceEnricher:
                         stored.digest, content_type, now, now, evidence_id,
                     ),
                 )
+                if future_publication_at:
+                    connection.execute(
+                        """
+                        INSERT INTO diagnostic_event(
+                            level, event_type, message, created_at, detail_json
+                        ) VALUES('warning', 'publication_timestamp_fallback', ?, ?, ?)
+                        """,
+                        (
+                            f"Ignored future publication time from inspected evidence: {evidence_id}",
+                            now,
+                            Database.json(
+                                {
+                                    "evidence_source_id": evidence_id,
+                                    "story_id": evidence["story_id"],
+                                    "reported_publication_at": future_publication_at,
+                                    "status": "future_evidence_time_ignored",
+                                }
+                            ),
+                        ),
+                    )
                 connection.execute(
                     "UPDATE work_item SET status = 'completed', updated_at = ?, last_error_class = NULL WHERE id = ?",
                     (now, work["id"]),
                 )
+                if (
+                    evidence["acquisition_method"] == "discovery_enrichment"
+                    and published_at
+                ):
+                    self._apply_discovered_publication_time(
+                        connection,
+                        str(evidence["story_id"]),
+                        published_at,
+                        now,
+                    )
             return evidence_id
+        except NetworkDeadlineExceeded:
+            now = self.now()
+            with self.database.transaction() as connection:
+                connection.execute(
+                    """
+                    UPDATE evidence_source
+                    SET status = 'queued', error_class = NULL, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, evidence_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE work_item
+                    SET status = 'queued', last_error_class = 'worker_deadline',
+                        updated_at = ?, available_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, now, work["id"]),
+                )
+            return None
         except Exception as error:
             self._fail(work, evidence_id, error)
             return evidence_id
+
+    def process_batch(
+        self,
+        *,
+        limit: int = 20,
+        deadline: datetime | None = None,
+    ) -> list[int]:
+        processed: list[int] = []
+        for _ in range(max(0, min(20, int(limit)))):
+            if deadline and datetime.now(UTC) >= deadline:
+                break
+            evidence_id = self.process_next(deadline=deadline)
+            if evidence_id is None:
+                break
+            processed.append(evidence_id)
+        return processed
+
+    @staticmethod
+    def _apply_discovered_publication_time(
+        connection: Any,
+        story_id: str,
+        published_at: str,
+        now: str,
+    ) -> None:
+        """Correct First-Public Time without declaring a material update."""
+        earliest = connection.execute(
+            """
+            SELECT MIN(value) AS value FROM (
+                SELECT effective_published_at AS value
+                FROM source_item
+                WHERE story_id = ?
+                  AND timestamp_status NOT LIKE 'unknown_original%'
+                UNION ALL
+                SELECT published_at AS value
+                FROM evidence_source
+                WHERE story_id = ? AND published_at IS NOT NULL
+                  AND acquisition_method = 'discovery_enrichment'
+                  AND status IN ('fetched', 'confirmed')
+            )
+            """,
+            (story_id, story_id),
+        ).fetchone()["value"]
+        if not earliest:
+            earliest = published_at
+        current = connection.execute(
+            "SELECT first_public_at FROM story_cluster WHERE id = ?", (story_id,)
+        ).fetchone()
+        if not current or str(current["first_public_at"]) == str(earliest):
+            return
+        connection.execute(
+            "UPDATE story_cluster SET first_public_at = ?, updated_at = ? WHERE id = ?",
+            (earliest, now, story_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO diagnostic_event(
+                level, event_type, message, created_at, detail_json
+            ) VALUES('info', 'publication_time_correction', ?, ?, ?)
+            """,
+            (
+                f"Corrected original publication time from inspected discovery evidence: {story_id}",
+                now,
+                Database.json(
+                    {
+                        "story_id": story_id,
+                        "first_public_at": earliest,
+                        "material_update": False,
+                    }
+                ),
+            ),
+        )
 
     def _fail(self, work: dict[str, Any], evidence_id: int, error: Exception) -> None:
         now = self.now()
@@ -388,6 +553,71 @@ class EvidenceEnricher:
                 """,
                 (now, Database.json({"error_class": error_class, "story_id": work.get("story_id")})),
             )
+
+
+def supersede_duplicate_evidence(
+    database: Database,
+    duplicate_id: int,
+    canonical_id: int,
+    *,
+    now: str | None = None,
+) -> bool:
+    """Preserve an orphaned duplicate while removing it from active work."""
+    if duplicate_id == canonical_id:
+        return False
+    duplicate = database.one(
+        "SELECT * FROM evidence_source WHERE id = ?", (duplicate_id,)
+    )
+    canonical = database.one(
+        "SELECT * FROM evidence_source WHERE id = ?", (canonical_id,)
+    )
+    if not duplicate or not canonical:
+        return False
+    if duplicate["story_id"] != canonical["story_id"]:
+        raise ValueError("Superseded evidence must belong to the same story")
+    if duplicate["status"] == "confirmed":
+        raise ValueError("Confirmed evidence cannot be superseded automatically")
+    timestamp = now or utc_now()
+    with database.transaction() as connection:
+        connection.execute(
+            """
+            UPDATE evidence_source
+            SET status = 'excluded', excluded_at = ?,
+                error_class = 'superseded_duplicate', updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp, timestamp, duplicate_id),
+        )
+        connection.execute(
+            """
+            UPDATE work_item
+            SET status = 'cancelled', last_error_class = 'superseded_duplicate',
+                updated_at = ?
+            WHERE kind = 'evidence_enrichment'
+              AND json_extract(payload_json, '$.evidence_source_id') = ?
+              AND status IN ('pending', 'queued', 'running', 'failed')
+            """,
+            (timestamp, duplicate_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO diagnostic_event(
+                level, event_type, message, created_at, detail_json
+            ) VALUES('info', 'evidence_duplicate_superseded', ?, ?, ?)
+            """,
+            (
+                f"Superseded duplicate evidence {duplicate_id} with {canonical_id}",
+                timestamp,
+                Database.json(
+                    {
+                        "duplicate_evidence_id": duplicate_id,
+                        "canonical_evidence_id": canonical_id,
+                        "story_id": duplicate["story_id"],
+                    }
+                ),
+            ),
+        )
+    return True
 
 
 def _legacy_evidence(database: Database, story_id: str) -> bool:

@@ -196,6 +196,7 @@ def test_cli_assistance_and_pilot(monkeypatch, tmp_path: Path, capsys) -> None:
         return True
 
     monkeypatch.setattr(cli, "run_isolation_canary", pass_canary)
+    monkeypatch.setattr(cli, "assistance_isolation_current", lambda _database: True)
     assert cli.main(["--data-root", str(root), "assistance", "check-isolation"]) == 0
     capsys.readouterr()
     assert cli.main(["--data-root", str(root), "assistance", "enable"]) == 0

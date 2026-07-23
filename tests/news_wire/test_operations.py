@@ -13,6 +13,7 @@ from open_source_ai_news_wire.operations import (
     execute_purge_plan,
     export_diagnostics,
 )
+from open_source_ai_news_wire.scheduler import SchedulerStatus
 from open_source_ai_news_wire.source_registry import synchronize_sources
 from open_source_ai_news_wire.storage import Database
 
@@ -90,7 +91,24 @@ def test_diagnostic_payload_reports_queue_without_exposing_payloads(tmp_path: Pa
         """
     )
 
-    payload = diagnostic_payload(database)
+    database.set_state("schedule_installed", "false", "2026-07-14T00:00:00Z")
+    database.set_state("schedule_status", "not_installed", "2026-07-14T00:00:00Z")
+    payload = diagnostic_payload(
+        database,
+        scheduler_status=lambda: SchedulerStatus(
+            True,
+            True,
+            "active",
+            Path("/tmp/com.opensourceainewswire.scanner.plist"),
+        ),
+    )
 
     assert payload["queue"]["count"] == 1
+    assert payload["schedule"] == {
+        "installed": True,
+        "loaded": True,
+        "status": "active",
+        "error": None,
+        "last_scan_at": "Never",
+    }
     assert "not-exported" not in json.dumps(payload)
