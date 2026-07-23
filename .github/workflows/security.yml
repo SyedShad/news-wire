@@ -22,7 +22,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
 
       # Block known vulnerabilities in the locked Python dependency graph.
       - name: Run uv audit against locked dependencies
@@ -48,7 +48,7 @@ jobs:
 
       - name: Review dependency changes
         if: ${{ !github.event.repository.private }}
-        uses: actions/dependency-review-action@3b139cfc5fae8b618d3eae3675e383bb1769c019 # v4.5.0
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
 
   secret-scan:
     name: Secret scan
@@ -66,7 +66,7 @@ jobs:
       # verified secrets. Keep output limited to verified findings to avoid noisy
       # unverified annotations.
       - name: Run TruffleHog OSS secret scan
-        uses: trufflesecurity/trufflehog@30d5bb91af1a771378349dbbb0c82129392acf70 # v3.95.6
+        uses: trufflesecurity/trufflehog@27b0417c16317ca9a472a9a8092acce143b49c55 # v3.95.9
         with:
           version: 3.95.5
           extra_args: --results=verified
