@@ -14,7 +14,13 @@ from open_source_ai_news_wire.assistance import AssistanceDeferred
 from open_source_ai_news_wire.config import resolve_runtime_paths
 from open_source_ai_news_wire.demo import seed_demo_data
 from open_source_ai_news_wire.runner import ScanLock, Worker
-from open_source_ai_news_wire.scheduler import LABEL, LaunchAgentManager, SchedulerError, next_scheduled_run
+from open_source_ai_news_wire.scheduler import (
+    LABEL,
+    LaunchAgentManager,
+    SchedulerError,
+    live_scheduler_status,
+    next_scheduled_run,
+)
 from open_source_ai_news_wire.storage import Database
 
 
@@ -164,6 +170,9 @@ def test_worker_prioritizes_recovery_draft_before_collection(tmp_path: Path, mon
     monkeypatch.setattr(
         "open_source_ai_news_wire.runner.run_assistance_work", record_assistance
     )
+    monkeypatch.setattr(
+        "open_source_ai_news_wire.runner.assistance_isolation_current", lambda _database: True
+    )
 
     Worker(database, collector=OrderedCollector()).run(trigger="scheduled")
 
@@ -201,10 +210,48 @@ def test_worker_skips_end_of_run_assistance_when_full_retry_would_overrun(
     monkeypatch.setattr(
         "open_source_ai_news_wire.runner.run_assistance_work", record_assistance
     )
+    monkeypatch.setattr(
+        "open_source_ai_news_wire.runner.assistance_isolation_current", lambda _database: True
+    )
 
     Worker(database, collector=OrderedCollector()).run(trigger="manual")
 
     assert order == ["draft", "collection"]
+
+
+def test_worker_renews_stale_assistance_attestation_before_processing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
+    current = {"value": False}
+    renewed: list[tuple[object, bool]] = []
+    processed: list[bool] = []
+
+    monkeypatch.setattr(
+        "open_source_ai_news_wire.runner.assistance_isolation_current",
+        lambda _database: current["value"],
+    )
+    monkeypatch.setattr(
+        "open_source_ai_news_wire.runner.CodexInvoker", lambda: object()
+    )
+
+    def renew(_database, invoker, *, automatic=False):
+        renewed.append((invoker, automatic))
+        current["value"] = True
+        return True
+
+    monkeypatch.setattr("open_source_ai_news_wire.runner.run_isolation_canary", renew)
+    monkeypatch.setattr(
+        "open_source_ai_news_wire.runner.run_assistance_work",
+        lambda _database, *, drafts_only=False: processed.append(drafts_only),
+    )
+
+    Worker(database, collector=RecordingCollector()).run(trigger="manual")
+
+    assert renewed and renewed[0][1] is True
+    assert processed == [True, False]
 
 
 def test_launchagent_install_pause_resume_and_uninstall_are_atomic(tmp_path: Path) -> None:
@@ -269,6 +316,62 @@ def test_launchagent_rejects_missing_launcher_and_reports_launchctl_errors(tmp_p
     with pytest.raises(SchedulerError, match="launchd denied"):
         manager._run("bootstrap", "gui/1", "/tmp/test.plist")
     assert manager._run("print", "gui/1/test", check=False).returncode == 1
+
+
+def test_live_launchagent_status_ignores_cached_app_state_without_mutating_it(
+    tmp_path: Path,
+) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    database.set_state("schedule_installed", "true", "2026-07-14T00:00:00Z")
+    database.set_state("schedule_status", "active", "2026-07-14T00:00:00Z")
+    manager = LaunchAgentManager(database, launcher=tmp_path / "wire")
+    manager.plist_path = tmp_path / "LaunchAgents" / f"{LABEL}.plist"
+    manager.plist_path.parent.mkdir(parents=True)
+    manager.plist_path.write_text("plist", encoding="utf-8")
+    manager._run = lambda *_args, **_kwargs: subprocess.CompletedProcess(  # type: ignore[method-assign]
+        [], 113, "", ""
+    )
+
+    paused = manager.status()
+
+    assert paused.installed is True
+    assert paused.loaded is False
+    assert paused.state == "paused"
+    assert database.get_state("schedule_status") == "active"
+
+    manager.plist_path.unlink()
+    manager._run = lambda *_args, **_kwargs: subprocess.CompletedProcess(  # type: ignore[method-assign]
+        [], 0, "", ""
+    )
+    orphaned = manager.status()
+    assert orphaned.installed is False
+    assert orphaned.loaded is True
+    assert orphaned.state == "orphaned"
+
+
+def test_live_scheduler_authority_fails_closed_when_launchctl_is_unavailable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    plist = tmp_path / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+    plist.parent.mkdir(parents=True)
+    plist.write_text("plist", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError("launchctl")),
+    )
+
+    status = live_scheduler_status(database)
+
+    assert status.installed is True
+    assert status.loaded is False
+    assert status.state == "unavailable"
+    assert status.error == "launchctl_status_unavailable"
 
 
 def test_launchagent_preserves_stable_launcher_symlink(tmp_path: Path) -> None:

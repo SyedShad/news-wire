@@ -69,7 +69,8 @@ class Observation:
 
     @property
     def effective_published_at(self) -> str:
-        return self.published_at
+        value = self.metadata.get("effective_published_at")
+        return str(value) if value else self.published_at
 
     @property
     def timestamp_status(self) -> str:
@@ -610,12 +611,23 @@ def parse_huggingnews_json(
                 aggregator_value = _huggingnews_millis(row.get("publishedAt"), observed_at)
             except AdapterError:
                 aggregator_value = str(row.get("publishedAt") or "") or None
-            event_value = str(row.get("eventTimeApprox") or "").strip()
+            # HuggingNews timestamps describe when the aggregator surfaced or
+            # approximately placed a development.  Neither value proves when
+            # the linked original page was first published.  Keep them for
+            # cursoring and discovery history, but make the missing original
+            # publication explicit so ranking cannot award freshness points.
             effective_at, timestamp_metadata = publication_timestamps(
-                event_value or None,
-                observed_at,
-                aggregator_value=aggregator_value,
+                None, observed_at, aggregator_value=aggregator_value
             )
+            event_value = str(row.get("eventTimeApprox") or "").strip()
+            event_time_approx: str | None = None
+            if event_value:
+                try:
+                    event_time_approx = parse_public_time(event_value, observed_at)
+                except AdapterError:
+                    event_time_approx = None
+            timestamp_metadata["timestamp_status"] = "unknown_original_discovery_time"
+            timestamp_metadata["effective_published_at"] = effective_at
             topic_tags = [
                 {"slug": str(tag.get("slug") or "")[:100], "name": str(tag.get("name") or "")[:100]}
                 for tag in row.get("topicTags", [])
@@ -632,7 +644,7 @@ def parse_huggingnews_json(
                     metadata={
                         "slug": slug,
                         **timestamp_metadata,
-                        "event_time_approx": timestamp_metadata.get("source_reported_at"),
+                        "event_time_approx": event_time_approx,
                         "topic_tags": topic_tags,
                     },
                 )
@@ -729,9 +741,16 @@ def parse_mastodon_signal(payload: bytes, *, source_url: str, observed_at: str, 
         r"artificial general intelligence)\b",
         re.IGNORECASE,
     )
+    # The hashtag feed is only a retrieval mechanism.  Require explicit AI
+    # context in the prose so generic uses such as a car or fashion "model"
+    # cannot enter the news queue merely because they use release/security
+    # language or carry an AI hashtag.
     ai_context = re.compile(
-        r"\b(ai|artificial intelligence|machine learning|model(?:s|ing)?|llm|agi|"
-        r"artificial general intelligence|agentic|open[ -](?:source|weight))\b",
+        r"\b(?:ai|artificial intelligence|machine learning|llms?|agi|"
+        r"artificial general intelligence|large language models?|language models?|"
+        r"foundation models?|neural networks?|generative ai|ai agents?|"
+        r"openai|anthropic|deepmind|chatgpt|claude|gemini|llama|mistral|"
+        r"hugging face)\b|\bopen[ -]weight(?:ed)?\s+(?:ai\s+)?models?\b",
         re.IGNORECASE,
     )
     noise_terms = re.compile(r"\b(commissions?|for sale|subscribe|prompt pack|daily horoscope|nft)\b", re.IGNORECASE)

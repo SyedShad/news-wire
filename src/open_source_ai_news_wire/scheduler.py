@@ -40,6 +40,7 @@ class SchedulerStatus:
     loaded: bool
     state: str
     plist_path: Path
+    error: str | None = None
 
 
 class LaunchAgentManager:
@@ -83,9 +84,26 @@ class LaunchAgentManager:
 
     def status(self) -> SchedulerStatus:
         installed = self.plist_path.exists()
-        result = self._run("print", f"{self.domain}/{LABEL}", check=False)
+        try:
+            result = self._run("print", f"{self.domain}/{LABEL}", check=False)
+        except (OSError, subprocess.SubprocessError):
+            state = "unavailable" if installed else "not_installed"
+            return SchedulerStatus(
+                installed,
+                False,
+                state,
+                self.plist_path,
+                "launchctl_status_unavailable",
+            )
         loaded = result.returncode == 0
-        state = "active" if loaded else "paused" if installed else "not_installed"
+        if installed and loaded:
+            state = "active"
+        elif installed:
+            state = "paused"
+        elif loaded:
+            state = "orphaned"
+        else:
+            state = "not_installed"
         return SchedulerStatus(installed, loaded, state, self.plist_path)
 
     def install(self) -> SchedulerStatus:
@@ -108,42 +126,50 @@ class LaunchAgentManager:
         if current.loaded:
             self._run("bootout", self.domain, str(self.plist_path), check=False)
         self._run("bootstrap", self.domain, str(self.plist_path))
-        return self._record_status("active")
+        return self._record_status()
 
     def pause(self) -> SchedulerStatus:
         if not self.plist_path.exists():
             raise SchedulerError("Local scheduler is not installed")
         self._run("bootout", self.domain, str(self.plist_path), check=False)
-        return self._record_status("paused")
+        return self._record_status()
 
     def resume(self) -> SchedulerStatus:
         if not self.plist_path.exists():
             raise SchedulerError("Local scheduler is not installed")
         if not self.status().loaded:
             self._run("bootstrap", self.domain, str(self.plist_path))
-        return self._record_status("active")
+        return self._record_status()
 
     def uninstall(self) -> SchedulerStatus:
         if self.plist_path.exists():
             self._run("bootout", self.domain, str(self.plist_path), check=False)
             self.plist_path.unlink()
-        return self._record_status("not_installed")
+        return self._record_status()
 
     def kickstart(self) -> None:
         if not self.status().loaded:
             raise SchedulerError("Local scheduler is not active")
         self._run("kickstart", "-k", f"{self.domain}/{LABEL}")
 
-    def _record_status(self, state: str) -> SchedulerStatus:
+    def _record_status(self) -> SchedulerStatus:
         now = datetime.now(UTC).replace(microsecond=0)
-        installed = self.plist_path.exists()
-        self.database.set_state("schedule_installed", "true" if installed else "false", now.isoformat().replace("+00:00", "Z"))
-        self.database.set_state("schedule_status", state, now.isoformat().replace("+00:00", "Z"))
+        current = self.status()
+        self.database.set_state("schedule_installed", "true" if current.installed else "false", now.isoformat().replace("+00:00", "Z"))
+        self.database.set_state("schedule_status", current.state, now.isoformat().replace("+00:00", "Z"))
         next_run = next_scheduled_run(now)
         self.database.set_state(
             "next_scan_at",
-            next_run.isoformat().replace("+00:00", "Z") if state == "active" else "Not scheduled",
+            next_run.isoformat().replace("+00:00", "Z") if current.state == "active" else "Not scheduled",
             now.isoformat().replace("+00:00", "Z"),
         )
-        current = self.status()
-        return SchedulerStatus(installed, current.loaded, state, self.plist_path)
+        return current
+
+
+def live_scheduler_status(
+    database: Database,
+    *,
+    launcher: Path | None = None,
+) -> SchedulerStatus:
+    """Read the current LaunchAgent state without consulting or updating app state."""
+    return LaunchAgentManager(database, launcher=launcher).status()

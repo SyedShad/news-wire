@@ -48,8 +48,8 @@ def test_security_workflow_runs_sast_without_unused_code_scanning_permission() -
 
     assert "semgrep/semgrep@sha256:" in sast_job
     assert "SEMGREP_SEND_METRICS: off" in sast_job
-    assert "semgrep scan --config=p/default" in sast_job
-    # SAST is a release gate for News Wire 0.3.6. Findings must fail the
+    assert "semgrep scan --error --severity ERROR --config=p/default src/open_source_ai_news_wire" in sast_job
+    # SAST is a release gate for News Wire. High-confidence findings must fail the
     # workflow instead of being recorded as advisory-only output.
     assert "continue-on-error: true" not in sast_job
     assert "contents: read" in sast_job

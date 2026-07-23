@@ -59,10 +59,11 @@
       </div>
       {% endif %}
 
-      {% if assistance_temporarily_unavailable %}
+      {% if assistance_notice %}
       <div class="demo-banner" role="status">
-        <span class="demo-pill">Assisted drafting temporarily unavailable</span>
-        Collection, ranking, evidence review, manual editing, and publishing remain available while isolation is revalidated.
+        <span class="demo-pill">{{ assistance_notice.title }}</span>
+        {{ assistance_notice.message }}
+        {% if assistance_notice.reason %}<small>Condition: {{ assistance_notice.reason }}</small>{% endif %}
       </div>
       {% endif %}
 

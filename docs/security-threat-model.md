@@ -13,7 +13,9 @@ Public sources are untrusted input. Adapters normalize bounded responses and nev
 
 The dashboard is loopback-only, random-port, and one-time-link protected. It shares the local database with the independent worker; keeping a browser open is not required.
 
-Codex assistance is optional and receives only a minimal packet of public URLs, short passages, claims, evidence IDs, and task metadata. The invocation uses ignored user configuration, read-only tool policy, strict JSON output, and an outer macOS sandbox. Output is rejected for unknown evidence references, unsupported facts or URLs, unsafe markup, or tool instructions.
+Codex assistance is optional and receives only a minimal packet of public URLs, short passages, claims, evidence IDs, and task metadata. Release 0.3.7 verifies the ChatGPT-bundled Codex binary's Apple signature, OpenAI team ID, path, version, SHA-256, and CDHash. The invocation uses ignored user configuration, no-tools policy, strict JSON output, and an outer macOS sandbox that denies child processes and all network endpoints except one ephemeral loopback broker port.
+
+The broker accepts strict CONNECT requests only for reviewed ChatGPT/OpenAI hostnames on port 443. It rejects credentials, IP literals, unsafe or special DNS answers, peer mismatches, malformed requests, and unreviewed hosts. It connects by validated numeric address while tunnelling TLS unchanged, so Codex still verifies the destination hostname and certificate. The broker and copied ChatGPT login are destroyed after each invocation.
 
 ## Fail-closed controls
 
@@ -23,6 +25,8 @@ Codex assistance is optional and receives only a minimal packet of public URLs, 
 - Material updates flag corrections and invalidate current drafts or approvals.
 - Critical disk pressure blocks collection before partial writes.
 - Failed isolation keeps assistance disabled while deterministic monitoring continues.
+- A 24-hour release-, schema-, OS-, binary-, and policy-bound attestation is required by the worker, CLI, dashboard, pilot readiness, and notification activation.
+- A failed child-credential, Unix-socket, private-network, broker, or tool-event canary invalidates assistance and cannot be bypassed by manual enablement.
 - Runtime data cannot be placed inside a Git worktree; repository scans exclude and detect runtime artifacts and secrets.
 - Scheduler and application uninstall preserve data unless a separate purge plan is executed.
 

@@ -97,7 +97,7 @@
           review.href = status.draft_url;
           review.hidden = false;
         }
-        if (draftAutoOpen && status.status === 'ready' && status.draft_url && !draftTabWasHidden && !document.hidden) {
+        if (draftAutoOpen && status.status === 'draft_ready' && status.draft_url && !draftTabWasHidden && !document.hidden) {
           window.location.assign(status.draft_url);
           return;
         }

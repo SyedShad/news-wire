@@ -295,7 +295,8 @@ def test_approval_exposes_live_status_and_retry_of_same_request(tmp_path: Path) 
     assert status.status_code == 200
     assert status.json["status"] == "starting"
     assert status.json["active"] is True
-    assert status.json["draft_url"] is None
+    assert status.json["draft_url"] == "/drafts/2"
+    assert status.json["manual_editor_available"] is True
 
     application.config["DATABASE"].execute(
         "UPDATE work_item SET status = 'failed', attempt_count = 2, last_error_class = 'codex_timeout' WHERE id = ?",
@@ -333,7 +334,7 @@ def test_draft_polling_opens_only_a_continuously_visible_story_tab(client) -> No
     assert javascript.status_code == 200
     assert b"draftTabWasHidden" in javascript.data
     assert b"draftAutoOpen" in javascript.data
-    assert b"draftAutoOpen && status.status === 'ready'" in javascript.data
+    assert b"draftAutoOpen && status.status === 'draft_ready'" in javascript.data
     assert b"!draftTabWasHidden && !document.hidden" in javascript.data
 
 
@@ -343,17 +344,21 @@ def test_fast_completed_approval_still_marks_original_tab_for_auto_open(tmp_path
     def complete_immediately(work_item_id: int) -> None:
         database = holder["database"]
         now = "2026-07-14T12:00:00Z"
+        shell = database.one(
+            "SELECT id, version FROM draft WHERE story_id = 'story-demo-runtime-001' AND status = 'Editable Shell'"
+        )
+        database.execute("UPDATE draft SET status = 'Superseded' WHERE id = ?", (shell["id"],))
         database.execute(
             """
             INSERT INTO draft(
                 story_id, mode, status, version, headline, metadata, body,
                 lens, sources_json, created_at, updated_at
             ) VALUES(
-                'story-demo-runtime-001', 'Neutral News Brief', 'Current', 1,
+                'story-demo-runtime-001', 'Neutral News Brief', 'Current', ?,
                 'Immediate draft', 'Fresh', 'Ready before redirect.', '', '[]', ?, ?
             )
             """,
-            (now, now),
+            (int(shell["version"]) + 1, now, now),
         )
         database.execute(
             "UPDATE work_item SET status = 'completed', updated_at = ? WHERE id = ?",
@@ -384,7 +389,7 @@ def test_fast_completed_approval_still_marks_original_tab_for_auto_open(tmp_path
     assert b'data-draft-active="false"' in rendered.data
     assert b'data-draft-auto-open="true"' in rendered.data
     assert b"Draft ready" in rendered.data
-    assert b'href="/drafts/2"' in rendered.data
+    assert b'href="/drafts/3"' in rendered.data
 
 
 def test_drafts_history_shows_failed_request_without_draft(app: Flask, client) -> None:

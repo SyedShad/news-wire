@@ -1,0 +1,21 @@
+{
+  "generated_at": "2026-07-24T00:01:00+07:00",
+  "release": "0.3.7",
+  "schema_before": 7,
+  "schema_after": 7,
+  "database_integrity_before": "ok",
+  "live_counts_before": {
+    "stories": 2543,
+    "evidence_sources": 13,
+    "active_or_waiting_work_items": 0
+  },
+  "data_actions": [
+    "Preserve every story, source, claim, evidence record, approval, draft, alert, and diagnostic.",
+    "Conditionally mark orphaned queued evidence 9 as superseded by fetched evidence 8 only if the audited duplicate relationship is unchanged.",
+    "Retain aggregator discovery timestamps while treating unknown linked-article publication dates as newly surfaced with zero freshness.",
+    "Invalidate stale assistance attestations through release-bound policy evaluation; do not enable assistance automatically.",
+    "Create no backup, synchronization, deletion, notification activation, or publication side effect."
+  ],
+  "rollback_boundary": "Schema remains 7. Application rollback still requires an installed release whose manifest supports schema 7; runtime data is never rolled back or deleted.",
+  "installation_gate": "Install only from clean merged private main with a commit-bound validation report and all release checks passed."
+}

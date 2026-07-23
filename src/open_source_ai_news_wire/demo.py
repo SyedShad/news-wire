@@ -158,7 +158,7 @@ def seed_demo_data(database: Database, *, force: bool = False) -> bool:
                 "discovery_lead", "momentum_snapshot", "work_item", "alert", "story_cluster", "source_registry", "scan_run",
                 "usage_ledger", "diagnostic_event", "app_state",
             ):
-                connection.execute(f"DELETE FROM {table}")
+                connection.execute(f"DELETE FROM {table}")  # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- table comes from the fixed tuple above
 
         connection.executemany(
             """

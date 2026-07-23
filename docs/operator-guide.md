@@ -17,7 +17,7 @@ The review inbox opens to `Review Now`: unresolved signals, watches, and candida
 
 Cards separate durable impact, current attention, and verification. A high-engagement item may read `High attention · verification pending`; source or account breadth never qualifies the evidence gate.
 
-Release 0.3.6 stores schema 7 story, material, observation, and source revisions. A source/passage change may require draft reapproval without making old news current. Only a changed normalized claim set creates a material update. Feed timestamps more than 15 minutes ahead are quarantined to a safe alternate or detection time and appear in diagnostics with their source, aggregator, effective, and status values.
+Release 0.3.7 retains schema 7 story, material, observation, and source revisions. A source/passage change may require draft reapproval without making old news current. Only a changed normalized claim set creates a material update. Aggregator timestamps record discovery, not original publication. An undated linked article is shown as `Newly surfaced · original date unknown`, receives zero freshness points, and cannot be Breaking or Fresh. Feed or page timestamps more than 15 minutes ahead are quarantined to a safe alternate or detection time and appear in diagnostics.
 
 ## Scheduling
 
@@ -73,14 +73,17 @@ Official pages prove that an announcement was made. Use **Reports or attributes 
 
 Drafts name the confirmed publication naturally and link it on first mention. When the original URL is unavailable, the accessible copy is labelled in the form `Original Publisher, via Host`. Markdown exports use portable CommonMark links and HTML exports render only links already present in the confirmed evidence snapshot.
 
-Deterministic monitoring works without ChatGPT assistance. Assisted drafting remains deliberately unavailable during the 0.3.6 containment validation. Before it is enabled again, run:
+Deterministic monitoring works without ChatGPT assistance. Release 0.3.7 permits ChatGPT drafting only after the signed bundled Codex identity and the release-bound filesystem, child-credential, private-network, Unix-socket, broker, and no-tools canaries pass:
 
 ```bash
 open-source-ai-news-wire assistance check-isolation
+open-source-ai-news-wire assistance status
 open-source-ai-news-wire assistance enable
 ```
 
-If the canary fails, leave assistance disabled and use the dashboard's human-classification states. Drafts are generated only from an approved work item; a material claim or source-passage change invalidates the approval snapshot, including a manual override. The durable queue remains the recovery path if the immediate dispatcher is interrupted. A transient generation failure receives one automatic retry, then the story and Drafts pages expose a manual retry without creating another approval.
+The canary uses the saved ChatGPT login and a short-lived loopback CONNECT broker; no API key is supported. Its attestation expires after 24 hours and the worker may renew it at most once per rolling day within the background allowance. If it fails, assistance stays disabled and the exact condition appears in the dashboard and `assistance status`.
+
+Every approval creates a deterministic editable draft shell when AI generation is unavailable, so editorial work does not wait for the next scan. The shell is built only from the immutable approval snapshot and contains no internal warning labels. Saving it completes the manual draft and cancels the pending AI work; if a valid AI result arrives first, it atomically supersedes the shell. A material claim or approved source-passage change still requires reapproval. A transient generation failure receives one automatic retry, then the same approval can be retried manually.
 
 ## Pilot activation
 

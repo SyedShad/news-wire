@@ -524,3 +524,75 @@ def test_storage_pressure_levels_can_be_forced(tmp_path: Path) -> None:
     assert database.storage_pressure(warning_bytes=free + 2, critical_bytes=free + 1).level == "critical"
     assert database.storage_pressure(warning_bytes=free + 1, critical_bytes=0).level == "warning"
     assert database.storage_pressure(warning_bytes=0, critical_bytes=0).level == "normal"
+
+
+def test_initialize_repairs_orphaned_evidence_without_deleting_history(tmp_path: Path) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    now = "2026-07-23T16:00:00Z"
+    with database.transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO story_cluster(
+                id, slug, headline, summary, lane, openness_class, status,
+                priority, priority_score, freshness, first_public_at, detected_at,
+                material_update, created_at, updated_at
+            ) VALUES('story-repair', 'story-repair', 'AI report', 'Summary',
+                     'Broader AI News', 'not stated', 'signal', 'Standard', 40,
+                     'Fresh', ?, ?, 0, ?, ?)
+            """,
+            (now, now, now, now),
+        )
+        fetched_id = int(
+            connection.execute(
+                """
+                INSERT INTO evidence_source(
+                    story_id, requested_url, final_url, canonical_url, publisher_key,
+                    acquisition_method, status, created_at, updated_at
+                ) VALUES('story-repair', 'https://example.com/report?utm_source=x',
+                         'https://example.com/report', 'https://example.com/report',
+                         'example.com', 'discovery_enrichment', 'fetched', ?, ?)
+                """,
+                (now, now),
+            ).lastrowid
+        )
+        orphan_id = int(
+            connection.execute(
+                """
+                INSERT INTO evidence_source(
+                    story_id, requested_url, canonical_url, publisher_key,
+                    acquisition_method, status, created_at, updated_at
+                ) VALUES('story-repair', 'https://example.com/report?utm_source=x',
+                         'https://example.com/report?utm_source=x', 'example.com',
+                         'discovery_enrichment', 'queued', ?, ?)
+                """,
+                (now, now),
+            ).lastrowid
+        )
+        connection.execute(
+            "DELETE FROM app_state WHERE key = 'repair_0_3_7_orphaned_evidence'"
+        )
+
+    database.initialize()
+
+    repaired = database.one(
+        "SELECT status, error_class, confirmation_reason FROM evidence_source WHERE id = ?",
+        (orphan_id,),
+    )
+    assert repaired == {
+        "status": "excluded",
+        "error_class": "superseded_duplicate",
+        "confirmation_reason": f"Superseded by preserved evidence proposal {fetched_id}.",
+    }
+    assert database.one(
+        "SELECT status FROM evidence_source WHERE id = ?", (fetched_id,)
+    ) == {"status": "fetched"}
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM work_item WHERE kind = 'evidence_enrichment'"
+    ) == {"count": 0}
+    diagnostic = database.one(
+        "SELECT detail_json FROM diagnostic_event WHERE event_type = 'orphaned_evidence_repair'"
+    )
+    assert json.loads(diagnostic["detail_json"])["superseded"] == [
+        {"evidence_source_id": orphan_id, "superseded_by": fetched_id}
+    ]

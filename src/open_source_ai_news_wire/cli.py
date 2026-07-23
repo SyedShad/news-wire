@@ -9,7 +9,13 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 from .config import resolve_runtime_paths
-from .assistance import CodexInvoker, run_assistance_work, run_isolation_canary
+from .assistance import (
+    CodexInvoker,
+    assistance_isolation_current,
+    assistance_status,
+    run_assistance_work,
+    run_isolation_canary,
+)
 from .demo import seed_demo_data
 from .installer import LocalInstaller
 from .operations import create_purge_plan, execute_purge_plan, export_diagnostics
@@ -156,7 +162,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if arguments.command == "status":
-        service = DashboardService(_database(data_root))
+        database = _database(data_root)
+        scheduler = LaunchAgentManager(
+            database,
+            launcher=Path.home() / ".local" / "bin" / "open-source-ai-news-wire",
+        )
+        service = DashboardService(database, scheduler=scheduler)
         payload = {
             "runtime_root": str(service.database.paths.root),
             "schedule": service.schedule_status(),
@@ -339,8 +350,10 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"isolation_gate": "passed" if passed else "failed"}, indent=2))
             return 0 if passed else 1
         if arguments.action == "enable":
-            if database.get_state("assistance_isolation_gate", "not_run") != "passed":
-                parser.error("assistance cannot be enabled until check-isolation passes")
+            if not assistance_isolation_current(database):
+                parser.error(
+                    "assistance cannot be enabled until the current release-bound isolation check passes"
+                )
             database.set_state("assistance_enabled", "true", now)
         elif arguments.action == "disable":
             database.set_state("assistance_enabled", "false", now)
@@ -348,10 +361,7 @@ def main(argv: list[str] | None = None) -> int:
             output_id = run_assistance_work(database)
             print(json.dumps({"output_id": output_id}, indent=2))
             return 0
-        print(json.dumps({
-            "enabled": database.get_state("assistance_enabled", "false") == "true",
-            "isolation_gate": database.get_state("assistance_isolation_gate", "not_run"),
-        }, indent=2))
+        print(json.dumps(assistance_status(database), indent=2))
         return 0
 
     if arguments.command == "pilot":

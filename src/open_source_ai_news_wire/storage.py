@@ -604,7 +604,130 @@ class Database:
                 raise MigrationRequired(
                     f"Database schema {version} requires explicit migration to {SCHEMA_VERSION}"
                 )
+        self._repair_037_orphaned_evidence()
         self.paths.database.chmod(0o600)
+
+    def _repair_037_orphaned_evidence(self) -> None:
+        """Repair the pre-0.3.7 evidence/work-item split without deleting history."""
+        repair_key = "repair_0_3_7_orphaned_evidence"
+        now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            prior = connection.execute(
+                "SELECT value FROM app_state WHERE key = ?", (repair_key,)
+            ).fetchone()
+            if prior and prior["value"] == "complete":
+                connection.rollback()
+                return
+
+            superseded: list[dict[str, int]] = []
+            requeued: list[int] = []
+            queued = connection.execute(
+                "SELECT id, story_id, requested_url, canonical_url FROM evidence_source WHERE status = 'queued' ORDER BY id"
+            ).fetchall()
+            for evidence in queued:
+                evidence_id = int(evidence["id"])
+                active_work = connection.execute(
+                    """
+                    SELECT id FROM work_item
+                    WHERE kind = 'evidence_enrichment'
+                      AND status IN ('pending', 'queued', 'running')
+                      AND json_valid(payload_json)
+                      AND json_extract(payload_json, '$.evidence_source_id') = ?
+                    LIMIT 1
+                    """,
+                    (evidence_id,),
+                ).fetchone()
+                if active_work:
+                    continue
+                duplicate = connection.execute(
+                    """
+                    SELECT id FROM evidence_source
+                    WHERE story_id = ? AND id != ?
+                      AND status IN ('fetched', 'confirmed')
+                      AND (requested_url = ? OR canonical_url = ?)
+                    ORDER BY CASE status WHEN 'confirmed' THEN 0 ELSE 1 END, id
+                    LIMIT 1
+                    """,
+                    (
+                        evidence["story_id"],
+                        evidence_id,
+                        evidence["requested_url"],
+                        evidence["canonical_url"],
+                    ),
+                ).fetchone()
+                if duplicate:
+                    duplicate_id = int(duplicate["id"])
+                    connection.execute(
+                        """
+                        UPDATE evidence_source
+                        SET status = 'excluded', excluded_at = ?, updated_at = ?,
+                            error_class = 'superseded_duplicate',
+                            confirmation_reason = ?
+                        WHERE id = ? AND status = 'queued'
+                        """,
+                        (
+                            now,
+                            now,
+                            f"Superseded by preserved evidence proposal {duplicate_id}.",
+                            evidence_id,
+                        ),
+                    )
+                    superseded.append(
+                        {"evidence_source_id": evidence_id, "superseded_by": duplicate_id}
+                    )
+                    continue
+
+                connection.execute(
+                    """
+                    INSERT INTO work_item(
+                        kind, story_id, status, priority, payload_json, created_at,
+                        updated_at, idempotency_key, available_at
+                    ) VALUES('evidence_enrichment', ?, 'queued', 70, ?, ?, ?, ?, ?)
+                    ON CONFLICT(idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+                    """,
+                    (
+                        evidence["story_id"],
+                        self.json({"schema_version": 1, "evidence_source_id": evidence_id}),
+                        now,
+                        now,
+                        f"evidence-repair:{evidence_id}",
+                        now,
+                    ),
+                )
+                requeued.append(evidence_id)
+
+            connection.execute(
+                """
+                INSERT INTO app_state(key, value, updated_at) VALUES(?, 'complete', ?)
+                ON CONFLICT(key) DO UPDATE SET value='complete', updated_at=excluded.updated_at
+                """,
+                (repair_key, now),
+            )
+            if superseded or requeued:
+                connection.execute(
+                    """
+                    INSERT INTO diagnostic_event(level, event_type, message, created_at, detail_json)
+                    VALUES('info', 'orphaned_evidence_repair', ?, ?, ?)
+                    """,
+                    (
+                        "Reconciled evidence proposals that had no active enrichment work item.",
+                        now,
+                        self.json(
+                            {
+                                "superseded": superseded,
+                                "requeued_evidence_source_ids": requeued,
+                            }
+                        ),
+                    ),
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def schema_version(self) -> int:
         if not self.paths.database.exists():
@@ -1019,14 +1142,15 @@ class Database:
                         )
                     if invalid_draft_ids:
                         placeholders = ",".join("?" for _ in invalid_draft_ids)
-                        connection.execute(
-                            f"""
+                        quarantine_query = f"""
                             UPDATE work_item
                             SET status = 'needs_reapproval',
                                 last_error_class = 'legacy_approval_snapshot_incomplete',
                                 updated_at = ?
                             WHERE id IN ({placeholders})
-                            """,
+                            """  # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- placeholders are generated only from integer IDs
+                        connection.execute(
+                            quarantine_query,
                             (now, *invalid_draft_ids),
                         )
                         connection.execute(

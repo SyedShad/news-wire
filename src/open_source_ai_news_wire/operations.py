@@ -7,8 +7,9 @@ import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from .scheduler import SchedulerStatus, live_scheduler_status
 from .storage import Database, database_size
 
 
@@ -36,7 +37,12 @@ class PurgePreview:
     effects: dict[str, Any]
 
 
-def diagnostic_payload(database: Database) -> dict[str, Any]:
+def diagnostic_payload(
+    database: Database,
+    *,
+    scheduler_status: Callable[[], SchedulerStatus] | None = None,
+) -> dict[str, Any]:
+    live_schedule = (scheduler_status or (lambda: live_scheduler_status(database)))()
     source_health = database.query(
         """
         SELECT r.id, r.family, s.health, s.failure_streak, s.last_checked_at,
@@ -53,7 +59,8 @@ def diagnostic_payload(database: Database) -> dict[str, Any]:
         counts[table] = int(database.one(f"SELECT COUNT(*) AS count FROM {table}")["count"])
     pressure = database.storage_pressure()
     queue = database.one(
-        "SELECT COUNT(*) AS count, MIN(created_at) AS oldest_at FROM work_item WHERE status IN ('pending', 'queued', 'running')"
+        "SELECT COUNT(*) AS count, MIN(created_at) AS oldest_at FROM work_item "
+        "WHERE status IN ('pending', 'queued', 'running', 'generating', 'waiting')"
     ) or {"count": 0, "oldest_at": None}
     return {
         "generated_at": _now(),
@@ -66,8 +73,10 @@ def diagnostic_payload(database: Database) -> dict[str, Any]:
         "queue": queue,
         "source_health": source_health,
         "schedule": {
-            "installed": database.get_state("schedule_installed", "false") == "true",
-            "status": database.get_state("schedule_status", "not_installed"),
+            "installed": live_schedule.installed,
+            "loaded": live_schedule.loaded,
+            "status": live_schedule.state,
+            "error": live_schedule.error,
             "last_scan_at": database.get_state("last_scan_at", "Never"),
         },
         "assistance": {

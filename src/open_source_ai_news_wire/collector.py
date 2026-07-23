@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import inspect
 import json
 import re
@@ -31,7 +32,7 @@ from .network import (
     resolve_known_short_url,
 )
 from .qualification import Qualification, qualify
-from .evidence import publisher_key
+from .evidence import normalize_public_https_url, publisher_key
 from .settings import load_settings
 from .source_registry import synchronize_sources
 from .storage import Database
@@ -81,6 +82,10 @@ def _signature(value: object) -> str:
     return hashlib.sha256(Database.json(value).encode("utf-8")).hexdigest()
 
 
+def _unknown_original_time(status: str | None) -> bool:
+    return str(status or "").startswith("unknown_original")
+
+
 class Collector:
     def __init__(
         self,
@@ -94,6 +99,9 @@ class Collector:
         self.client_factory = client_factory
         self.now = now
         self.short_link_resolver = short_link_resolver
+        self._discovery_enrichment_candidates: dict[
+            tuple[str, str], tuple[int, str]
+        ] = {}
 
     def scan(
         self,
@@ -112,6 +120,7 @@ class Collector:
             critical_bytes=int(storage["critical_free_bytes"]),
         )
         started = self.now()
+        self._discovery_enrichment_candidates = {}
         if pressure.level == "critical":
             scan_id = self.database.execute(
                 """
@@ -175,6 +184,9 @@ class Collector:
                         source_url=fetched.url,
                         observed_at=self.now(),
                     )
+                    observations = self._contextualize_discovery_timestamps(
+                        source, observations
+                    )
                     observations = self._contextualize_release_titles(source, observations)
                     observations = self._contextualize_native_metrics(source, observations)
                     observations = self._definition_filtered_observations(source, observations)
@@ -209,6 +221,8 @@ class Collector:
             except Exception as error:
                 self._record_failure(source, transaction_id, error)
                 failures += 1
+
+        self._queue_discovery_enrichment(limit=20)
 
         offline = bool(
             network_failures and successes == 0 and failures == 0 and backlog == 0
@@ -283,6 +297,37 @@ class Collector:
             self.database.set_state("network_offline_active", "false", finished)
             self.database.set_state("network_offline_alerted", "false", finished)
         return ScanSummary(scan_id, result, successes, failures, discovered, offline)
+
+    @staticmethod
+    def _contextualize_discovery_timestamps(
+        source: dict[str, Any], observations: list[Observation]
+    ) -> list[Observation]:
+        """Keep aggregator time as discovery metadata, never original time."""
+        if not (
+            source.get("monitoring_role") == "Discovery"
+            and source.get("family") == "Aggregation"
+        ):
+            return observations
+        contextualized: list[Observation] = []
+        for item in observations:
+            metadata = dict(item.metadata)
+            discovery_time = item.aggregator_published_at or item.published_at
+            metadata.pop("source_reported_at", None)
+            metadata["aggregator_published_at"] = discovery_time
+            metadata["effective_published_at"] = discovery_time
+            metadata["timestamp_status"] = "unknown_original_discovery_time"
+            contextualized.append(
+                Observation(
+                    item.external_id,
+                    item.title,
+                    item.url,
+                    discovery_time,
+                    item.summary,
+                    item.language,
+                    metadata,
+                )
+            )
+        return contextualized
 
     @staticmethod
     def _contextualize_release_titles(
@@ -493,6 +538,19 @@ class Collector:
                 continue
             if exclude_terms and any(contains(text, term) for term in exclude_terms):
                 continue
+            if source.get("family") in {"Aggregation", "Accessible social signals"}:
+                # A feed query or hashtag is only a retrieval mechanism.  It
+                # cannot supply the semantic AI context needed for ingestion.
+                prose = re.sub(r"#\s*[\w-]+", " ", text)
+                ai_context = re.compile(
+                    r"\b(?:ai|agi|llms?|artificial intelligence|machine learning|"
+                    r"language models?|foundation models?|neural networks?|"
+                    r"openai|anthropic|deepmind|chatgpt|claude|gemini|llama|"
+                    r"mistral|hugging face|generative ai)\b",
+                    re.IGNORECASE,
+                )
+                if not ai_context.search(prose):
+                    continue
             filtered.append(observation)
         return filtered
 
@@ -591,6 +649,7 @@ class Collector:
         with self.database.transaction() as connection:
             recovered = str(source.get("state_health") or "") == "degraded" or int(source.get("state_failure_streak") or 0) >= 3
             for observation in observations:
+                preliminary_priority = 0
                 prior_row = connection.execute(
                     """
                     SELECT * FROM raw_observation
@@ -783,6 +842,11 @@ class Collector:
                         novelty=8 if atomic_claim_changed else 3 if existing_story else 10,
                     )
                     if qualification.relevant:
+                        preliminary_priority = (
+                            qualification.importance_score
+                            if _unknown_original_time(observation.timestamp_status)
+                            else qualification.score
+                        )
                         story_id = self._persist_story(
                             connection,
                             source,
@@ -800,9 +864,33 @@ class Collector:
                 else:
                     existing_story = self._find_story(connection, observation)
                     story_id = str(existing_story["id"]) if existing_story else None
+                    if story_id and prior and (
+                        str(prior.get("source_reported_at") or "")
+                        != str(observation.source_reported_at or "")
+                        or str(prior.get("aggregator_published_at") or "")
+                        != str(observation.aggregator_published_at or "")
+                        or str(prior.get("effective_published_at") or "")
+                        != observation.effective_published_at
+                        or str(prior.get("timestamp_status") or "")
+                        != observation.timestamp_status
+                    ):
+                        self._persist_publication_time_correction(
+                            connection,
+                            story_id,
+                            source,
+                            observation,
+                            source_revision_number,
+                            observed_at,
+                        )
                 if story_id:
                     self._record_discovery_leads(
-                        connection, story_id, source, observation, observed_at
+                        connection,
+                        story_id,
+                        source,
+                        observation,
+                        observed_at,
+                        preliminary_priority=preliminary_priority,
+                        new_observation=not prior,
                     )
                     self._record_momentum_snapshot(
                         connection, story_id, source, observation, observed_at
@@ -851,17 +939,20 @@ class Collector:
                 )
         return changed
 
-    @staticmethod
     def _record_discovery_leads(
+        self,
         connection: Any,
         story_id: str,
         source: dict[str, Any],
         observation: Observation,
         observed_at: str,
+        *,
+        preliminary_priority: int = 0,
+        new_observation: bool = False,
     ) -> None:
         leads = observation.metadata.get("selected_tweets", [])
         if not isinstance(leads, list):
-            return
+            leads = []
         for lead in leads:
             if not isinstance(lead, dict) or not lead.get("url"):
                 continue
@@ -902,7 +993,7 @@ class Collector:
             )
         public_links = observation.metadata.get("public_links", [])
         if not isinstance(public_links, list):
-            return
+            public_links = []
         for link in public_links:
             if not isinstance(link, dict) or not link.get("url"):
                 continue
@@ -934,13 +1025,140 @@ class Collector:
                     observed_at,
                 ),
             )
-            evidence = connection.execute(
-                "SELECT id FROM evidence_source WHERE story_id = ? AND canonical_url = ?",
-                (story_id, final_url),
-            ).fetchone()
-            if evidence:
-                continue
-            evidence_cursor = connection.execute(
+            self._propose_discovery_enrichment(
+                story_id,
+                final_url,
+                priority=preliminary_priority,
+                observed_at=observed_at,
+            )
+
+        if (
+            new_observation
+            and source.get("monitoring_role") == "Discovery"
+            and self._is_external_public_discovery_url(source, observation.url)
+        ):
+            self._propose_discovery_enrichment(
+                story_id,
+                observation.url,
+                priority=preliminary_priority,
+                observed_at=observed_at,
+            )
+
+    @staticmethod
+    def _is_external_public_discovery_url(
+        source: dict[str, Any], url: str
+    ) -> bool:
+        try:
+            normalized = normalize_public_https_url(url)
+        except ValueError:
+            return False
+        host = (urlsplit(normalized).hostname or "").lower().rstrip(".")
+        try:
+            source_hosts = {
+                str(value).lower().rstrip(".")
+                for value in json.loads(source.get("base_hosts_json") or "[]")
+            }
+        except (TypeError, json.JSONDecodeError):
+            source_hosts = set()
+        social_hosts = {
+            "x.com", "www.x.com", "twitter.com", "www.twitter.com",
+            "news.ycombinator.com", "mastodon.social", "huggingnews.com",
+            "www.huggingnews.com", "api.huggingnews.com",
+        }
+        return bool(host and host not in source_hosts and host not in social_hosts)
+
+    def _propose_discovery_enrichment(
+        self,
+        story_id: str,
+        url: str,
+        *,
+        priority: int,
+        observed_at: str,
+    ) -> None:
+        try:
+            normalized = normalize_public_https_url(url)
+        except ValueError:
+            return
+        host = (urlsplit(normalized).hostname or "").lower().rstrip(".")
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        if address is not None and not address.is_global:
+            return
+        key = (story_id, normalized)
+        bounded_priority = max(0, min(100, int(priority)))
+        existing = self._discovery_enrichment_candidates.get(key)
+        if existing is None or bounded_priority > existing[0]:
+            self._discovery_enrichment_candidates[key] = (
+                bounded_priority,
+                observed_at,
+            )
+
+    def _queue_discovery_enrichment(self, *, limit: int) -> int:
+        selected = sorted(
+            self._discovery_enrichment_candidates.items(),
+            key=lambda item: (-item[1][0], item[0][1], item[0][0]),
+        )[: max(0, limit)]
+        if not selected:
+            return 0
+        queued = 0
+        with self.database.transaction() as connection:
+            for (story_id, url), (priority, observed_at) in selected:
+                queued += int(
+                    self._ensure_discovery_enrichment_work(
+                        connection,
+                        story_id,
+                        url,
+                        priority=priority,
+                        observed_at=observed_at,
+                    )
+                )
+        return queued
+
+    @staticmethod
+    def _ensure_discovery_enrichment_work(
+        connection: Any,
+        story_id: str,
+        url: str,
+        *,
+        priority: int,
+        observed_at: str,
+    ) -> bool:
+        """Atomically bind one proposal to one idempotent work record."""
+        normalized = normalize_public_https_url(url)
+        idempotency_key = "evidence:" + story_id + ":" + hashlib.sha256(
+            normalized.encode("utf-8")
+        ).hexdigest()
+        evidence = connection.execute(
+            """
+            SELECT id, status FROM evidence_source
+            WHERE story_id = ? AND canonical_url = ?
+            """,
+            (story_id, normalized),
+        ).fetchone()
+        existing_work = connection.execute(
+            "SELECT id, status, payload_json FROM work_item WHERE idempotency_key = ?",
+            (idempotency_key,),
+        ).fetchone()
+
+        if existing_work:
+            try:
+                bound_id = int(
+                    json.loads(str(existing_work["payload_json"] or "{}"))
+                    .get("evidence_source_id")
+                    or 0
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                bound_id = 0
+            if bound_id and connection.execute(
+                "SELECT 1 FROM evidence_source WHERE id = ? AND story_id = ?",
+                (bound_id, story_id),
+            ).fetchone():
+                return False
+
+        if not evidence:
+            cursor = connection.execute(
                 """
                 INSERT INTO evidence_source(
                     story_id, requested_url, canonical_url, publisher_key,
@@ -949,34 +1167,58 @@ class Collector:
                 """,
                 (
                     story_id,
-                    final_url,
-                    final_url,
-                    publisher_key(final_url),
+                    normalized,
+                    normalized,
+                    publisher_key(normalized),
                     observed_at,
                     observed_at,
                 ),
             )
-            evidence_id = int(evidence_cursor.lastrowid)
-            idempotency_key = "evidence:" + story_id + ":" + hashlib.sha256(
-                final_url.encode("utf-8")
-            ).hexdigest()
+            evidence_id = int(cursor.lastrowid)
+        else:
+            evidence_id = int(evidence["id"])
+            if str(evidence["status"]) not in {"queued", "failed"}:
+                return False
+
+        payload = Database.json(
+            {"schema_version": 1, "evidence_source_id": evidence_id}
+        )
+        if existing_work:
             connection.execute(
                 """
-                INSERT INTO work_item(
-                    kind, story_id, status, priority, payload_json, created_at,
-                    updated_at, idempotency_key, available_at
-                ) VALUES('evidence_enrichment', ?, 'queued', 70, ?, ?, ?, ?, ?)
-                ON CONFLICT(idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+                UPDATE work_item
+                SET story_id = ?, status = 'queued', priority = ?, payload_json = ?,
+                    updated_at = ?, available_at = ?, last_error_class = NULL
+                WHERE id = ?
                 """,
                 (
                     story_id,
-                    Database.json({"schema_version": 1, "evidence_source_id": evidence_id}),
+                    priority,
+                    payload,
                     observed_at,
                     observed_at,
-                    idempotency_key,
-                    observed_at,
+                    existing_work["id"],
                 ),
             )
+            return True
+        connection.execute(
+            """
+            INSERT INTO work_item(
+                kind, story_id, status, priority, payload_json, created_at,
+                updated_at, idempotency_key, available_at
+            ) VALUES('evidence_enrichment', ?, 'queued', ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                story_id,
+                priority,
+                payload,
+                observed_at,
+                observed_at,
+                idempotency_key,
+                observed_at,
+            ),
+        )
+        return True
 
     @staticmethod
     def _record_momentum_snapshot(
@@ -1077,7 +1319,20 @@ class Collector:
     @staticmethod
     def _story_claim_set_signature(connection: Any, story_id: str) -> str:
         rows = connection.execute(
-            "SELECT text FROM claim WHERE story_id = ? ORDER BY id", (story_id,)
+            """
+            SELECT DISTINCT c.text
+            FROM claim c
+            WHERE c.story_id = ?
+              AND EXISTS (
+                  SELECT 1
+                  FROM evidence_link e
+                  JOIN source_item s ON s.id = e.source_item_id
+                  WHERE e.claim_id = c.id
+                    AND s.source_role IN ('Event', 'Reporting')
+              )
+            ORDER BY c.text
+            """,
+            (story_id,),
         ).fetchall()
         return atomic_claim_signature(str(row["text"]) for row in rows)
 
@@ -1182,6 +1437,49 @@ class Collector:
                 return dict(row)
         return None
 
+    @staticmethod
+    def _persist_publication_time_correction(
+        connection: Any,
+        story_id: str,
+        source: dict[str, Any],
+        observation: Observation,
+        source_revision_number: int,
+        observed_at: str,
+    ) -> None:
+        """Apply timestamp provenance without creating an editorial revision."""
+        connection.execute(
+            """
+            UPDATE source_item
+            SET published_at = ?, source_reported_at = ?,
+                aggregator_published_at = ?, effective_published_at = ?,
+                timestamp_status = ?, source_revision = ?
+            WHERE story_id = ? AND source_registry_id = ? AND fingerprint = ?
+            """,
+            (
+                observation.effective_published_at,
+                observation.source_reported_at,
+                observation.aggregator_published_at,
+                observation.effective_published_at,
+                observation.timestamp_status,
+                max(1, source_revision_number),
+                story_id,
+                source["id"],
+                observation.fingerprint,
+            ),
+        )
+        known = connection.execute(
+            """
+            SELECT MIN(effective_published_at) AS value FROM source_item
+            WHERE story_id = ? AND timestamp_status NOT LIKE 'unknown_original%'
+            """,
+            (story_id,),
+        ).fetchone()["value"]
+        if known:
+            connection.execute(
+                "UPDATE story_cluster SET first_public_at = ?, updated_at = ? WHERE id = ?",
+                (known, observed_at, story_id),
+            )
+
     def _persist_story(
         self,
         connection: Any,
@@ -1204,7 +1502,21 @@ class Collector:
                 f"{observation.fingerprint}:{observation.published_at}".encode("utf-8")
             ).hexdigest()[:20]
             evidence_gate = role == "Event"
-            status = "candidate" if evidence_gate and qualification.importance_gate else "watch" if role == "Discovery" and qualification.score >= 65 and qualification.impact_score >= 26 else "signal"
+            current_time_known = not _unknown_original_time(
+                observation.timestamp_status
+            )
+            status = (
+                "candidate"
+                if evidence_gate and qualification.importance_gate
+                else "watch"
+                if (
+                    role == "Discovery"
+                    and current_time_known
+                    and qualification.score >= 65
+                    and qualification.impact_score >= 26
+                )
+                else "signal"
+            )
             priority = "High potential" if status == "watch" else qualification.priority
             slug = re.sub(r"[^a-z0-9]+", "-", observation.title.lower()).strip("-")[:100]
             connection.execute(
@@ -1222,7 +1534,13 @@ class Collector:
                     story_id, slug or story_id, observation.title,
                     observation.summary or observation.title, qualification.lane,
                     qualification.openness_class, status, priority, qualification.score,
-                    qualification.freshness, observation.published_at, observed_at,
+                    qualification.freshness,
+                    (
+                        observed_at
+                        if _unknown_original_time(observation.timestamp_status)
+                        else observation.effective_published_at
+                    ),
+                    observed_at,
                     qualification.opportunity_strength, qualification.relevance_bridge,
                     qualification.counterargument,
                     (datetime.fromisoformat(observed_at.replace("Z", "+00:00")) + timedelta(hours=24)).isoformat().replace("+00:00", "Z") if status == "watch" else None,
@@ -1335,9 +1653,16 @@ class Collector:
             (story_id, source_item_id, observation.language),
         )
         first_public = connection.execute(
-            "SELECT MIN(effective_published_at) AS value FROM source_item WHERE story_id = ?",
+            """
+            SELECT MIN(effective_published_at) AS value FROM source_item
+            WHERE story_id = ? AND timestamp_status NOT LIKE 'unknown_original%'
+            """,
             (story_id,),
         ).fetchone()["value"]
+        if not first_public:
+            first_public = connection.execute(
+                "SELECT first_public_at FROM story_cluster WHERE id = ?", (story_id,)
+            ).fetchone()["first_public_at"]
         legacy_evidence = connection.execute(
             "SELECT source_role, canonical_url, url FROM source_item WHERE story_id = ?",
             (story_id,),
