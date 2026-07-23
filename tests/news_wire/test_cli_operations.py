@@ -166,6 +166,27 @@ def test_cli_application_lifecycle(monkeypatch, tmp_path: Path, capsys) -> None:
     assert FakeInstaller.uninstalled is True
 
 
+def test_cli_install_does_not_initialize_prior_schema_before_installer(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    root = tmp_path / "runtime"
+    database = cli._uninitialized_database(str(root))
+    database.migrate()
+    database.execute(
+        "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+        (str(SCHEMA_VERSION - 1),),
+    )
+    monkeypatch.setattr(cli, "LocalInstaller", FakeInstaller)
+    report = tmp_path / "validation.json"
+    report.write_text("{}", encoding="utf-8")
+
+    assert cli.main([
+        "--data-root", str(root), "app", "install", "--source-root", str(tmp_path),
+        "--validation-report", str(report),
+    ]) == 0
+    assert json.loads(capsys.readouterr().out)["release_id"] == "0.2.0-test"
+
+
 def test_cli_assistance_and_pilot(monkeypatch, tmp_path: Path, capsys) -> None:
     root = tmp_path / "runtime"
     monkeypatch.setattr(cli, "CodexInvoker", lambda: object())

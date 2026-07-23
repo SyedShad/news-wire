@@ -276,7 +276,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if arguments.command == "app":
-        database = _database(data_root)
+        # Installation owns the explicit forward migration. Initializing the
+        # incoming application database here would reject the supported prior
+        # schema before LocalInstaller can run its commit-bound release and
+        # migration transaction.
+        database = (
+            _uninitialized_database(data_root)
+            if arguments.action == "install"
+            else _database(data_root)
+        )
         if arguments.action == "install" and not arguments.validation_report:
             parser.error("app install requires --validation-report")
         installer = LocalInstaller(
