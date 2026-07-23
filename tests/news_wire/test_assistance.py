@@ -1309,6 +1309,8 @@ def test_codex_invoker_builds_isolated_command_and_validates_result(tmp_path: Pa
     assert "--ignore-user-config" in arguments
     assert "--strict-config" in arguments
     assert 'approval_policy="never"' in arguments
+    assert "analytics.enabled=false" in arguments
+    assert "feedback.enabled=false" in arguments
     assert not str(captured["environment"]["CODEX_HOME"]).startswith(str(captured["cwd"]))
     assert captured["environment"]["HOME"] != str(Path.home())
     assert captured["environment"]["CFFIXED_USER_HOME"] == captured["environment"]["HOME"]

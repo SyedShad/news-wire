@@ -43,7 +43,7 @@ from .storage import SCHEMA_VERSION, Database
 
 
 PROMPT_VERSION = "v3"
-ISOLATION_CANARY_VERSION = "0.3.7-v1"
+ISOLATION_CANARY_VERSION = "0.3.7-v2"
 ISOLATION_ATTESTATION_HOURS = 24
 ISOLATION_ATTESTATION_STATE = "assistance_isolation_attestation"
 EXPECTED_CODEX_TEAM_ID = "2DC432GLL2"
@@ -192,6 +192,10 @@ def _codex_security_arguments() -> list[str]:
         "--strict-config",
         "-c",
         'approval_policy="never"',
+        "-c",
+        "analytics.enabled=false",
+        "-c",
+        "feedback.enabled=false",
         "--sandbox",
         "read-only",
         "--ignore-rules",
@@ -392,6 +396,7 @@ def _policy_digest() -> str:
             43123,
         ),
         "tls": "unchanged-end-to-end",
+        "codex_security_arguments": _codex_security_arguments(),
         "disabled_features": list(_DISABLED_CODEX_FEATURES),
         "forbidden_events": sorted(_FORBIDDEN_CODEX_EVENT_TYPES),
         "schema_version": SCHEMA_VERSION,
