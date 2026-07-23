@@ -214,7 +214,16 @@ class Worker:
                 ) VALUES('scout_scan', 'queued', 100, ?, ?, ?, ?, ?)
                 ON CONFLICT(idempotency_key) WHERE idempotency_key IS NOT NULL DO UPDATE SET
                     payload_json=excluded.payload_json,
+                    created_at=CASE
+                        WHEN work_item.status = 'running' THEN work_item.created_at
+                        ELSE excluded.created_at
+                    END,
                     updated_at=excluded.updated_at,
+                    available_at=CASE
+                        WHEN work_item.status = 'running' THEN work_item.available_at
+                        ELSE excluded.available_at
+                    END,
+                    last_error_class=NULL,
                     status=CASE WHEN work_item.status = 'running' THEN work_item.status ELSE 'queued' END
                 """,
                 (payload, now, now, key, now),
