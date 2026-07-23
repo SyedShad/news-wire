@@ -293,6 +293,47 @@ def test_release_provenance_uses_full_hashes_and_rejects_tampered_wheel(
         installer.rollback(release.release_id)
 
 
+def test_install_materializes_uv_python_symlink_inside_release(tmp_path: Path) -> None:
+    source = Path(__file__).parents[2]
+    database = Database(resolve_runtime_paths(tmp_path / "runtime"))
+    database.initialize()
+    uv_python = tmp_path / "uv-managed-python"
+    uv_python.write_bytes(b"pinned python executable")
+    uv_python.chmod(0o700)
+
+    def fake_runner(arguments: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        if "build" in arguments:
+            output = Path(arguments[arguments.index("--out-dir") + 1])
+            (output / "wire.whl").write_bytes(b"reviewed wheel bytes")
+        elif "venv" in arguments:
+            environment = Path(arguments[-1])
+            (environment / "bin").mkdir(parents=True)
+            (environment / "bin" / "python").symlink_to(uv_python)
+        elif "pip" in arguments:
+            python = Path(arguments[arguments.index("--python") + 1])
+            executable = python.parent / "open-source-ai-news-wire"
+            executable.write_text("#!/bin/sh\n", encoding="utf-8")
+            executable.chmod(0o700)
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    installer = LocalInstaller(
+        source,
+        database.paths,
+        application_root=tmp_path / "app",
+        binary_root=tmp_path / "bin",
+        runner=fake_runner,
+        provenance_runner=_dummy_provenance_runner,
+        allow_unverified_source=True,
+        validation_report=_validation_report(source),
+    )
+
+    release = installer.install()
+    installed_python = release.path / "venv" / "bin" / "python"
+    assert installed_python.is_symlink() is False
+    assert installed_python.read_bytes() == uv_python.read_bytes()
+    assert installed_python.stat().st_mode & 0o777 == 0o700
+
+
 @pytest.mark.parametrize(
     ("status_output", "merge_code", "message"),
     (
