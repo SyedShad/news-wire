@@ -84,9 +84,11 @@ jobs:
         with:
           persist-credentials: false
 
-      # Semgrep CE scans the repository with the community rule set (Python,
-      # shell, YAML, JavaScript, Go) and blocks the change on a finding.
+      # Semgrep CE scans the repository with the high-signal default community
+      # rules and blocks the change on a finding. An explicit registry config is
+      # required when anonymous metrics are disabled; `--config=auto` exits
+      # before scanning in that mode.
       - name: Run Semgrep SAST scan
         env:
           SEMGREP_SEND_METRICS: off
-        run: semgrep scan --config=auto
+        run: semgrep scan --config=p/default
