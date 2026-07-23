@@ -1,66 +1,93 @@
 # Open Source AI News Wire
 
-Open Source AI News Wire is a local-first monitor for fresh open-ecosystem, AGI, and broader AI developments. It collects public no-login sources, clusters and qualifies evidence deterministically, and presents the result in a secured local review dashboard.
+Open Source AI News Wire is a local application for monitoring and reviewing public AI news. It collects public, no-login sources, groups related reports, ranks current review work, and helps a human turn selected stories into source-linked drafts.
 
-Reporting is neutral by default. The evidence-qualified path offers a separately labelled open-source lens when a Strong or Moderate opportunity is supported. A distinct, warned manual-approval path can override the drafting gates without changing their recorded results. The system never publishes automatically.
+It covers open-source and open-weight AI, AGI developments, policy, safety, research, and broader AI news. Reporting is neutral by default. A separate open-source lens is available when the reviewer explicitly chooses it.
 
-## V1 capabilities
+The application never publishes automatically.
 
-- Dated registry covering official AI organizations, open ecosystems, research, government and law, corporate filings, safety and security, independent reporting, aggregators, public newsletters, and accessible social signals.
-- Incremental RSS/Atom, JSON, sitemap, GitHub-release, research-feed, and dedicated dated Anthropic, Meta, CISA, HuggingNews JSON, and Mastodon adapters with bounded SSRF-resistant networking.
-- Dynamic 24-hour Review Now ranking that separates durable importance, current review priority, source momentum, and verification; older context and material-update re-entry remain explicit.
-- Evidence-aware clustering, primary/independent-confirmation gates, evidence-first qualification, separately audited manual candidate overrides, candidate and watch lifecycles, correction handling, and 72-hour automatic recovery.
-- Local SQLite and content-addressed evidence storage outside Git, with explicit migration, diagnostics, integrity, storage-pressure, and purge operations.
-- User-level macOS LaunchAgent at minute `00` and `30`, plus login/load recovery. It runs while the Mac is locked and awake, but does not prevent sleep or change power policy.
-- Packet-only Codex assistance behind mandatory filesystem, credential, and private-network isolation canaries and a local usage budget. No API key or paid fallback is supported.
-- Approval-only immediate drafting with durable recovery, visible generation and retry states, versioned evidence and guidance history, production-safe Markdown/HTML source exports, and native notices protected by a 72-hour fail-closed automatic activation gate and historical-alert watermark.
+![The fictional demo dashboard showing the Priority Wire, source health, schedule, and notices](docs/assets/screenshots/0.3.7/01-overview.png)
 
-## Install locally
+## What the product includes
 
-Python 3.12.13 and dependencies are provisioned through `uv`; runtime data defaults to `~/open-source-ai-news-wire-data`.
+- **Public-source monitoring:** scheduled and on-demand collection from dated public sources.
+- **Local review dashboard:** fresh stories, evidence state, source roles, priority, and editorial decisions in one interface.
+- **macOS scheduling and recovery:** scans at minute `00` and `30` while the Mac is awake, plus recovery after missed time.
+- **Optional ChatGPT drafting:** human-approved neutral or open-source-lens drafts, with an editable local fallback when assistance is unavailable.
+
+The normal workflow is:
+
+```mermaid
+flowchart LR
+    A[Public sources] --> B[Review Now]
+    B --> C{Human decision}
+    C -->|Review evidence| D[Qualified candidate]
+    C -->|Manual override| E[Human-selected candidate]
+    D --> F[Approve draft mode]
+    E --> F
+    F --> G[Edit and export]
+    G --> H[Manual publication]
+```
+
+## Quick start
+
+Requirements:
+
+- macOS
+- Git access to this repository
+- [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
+- ChatGPT with Codex access only if you want assisted drafting
 
 ```bash
+git clone https://github.com/SyedShad/open-source-ai-news-wire.git
+cd open-source-ai-news-wire
 uv python install 3.12.13
 uv sync --locked
 uv run open-source-ai-news-wire migrate
-uv run open-source-ai-news-wire app install --source-root "$PWD"
-~/.local/bin/open-source-ai-news-wire schedule install \
-  --launcher ~/.local/bin/open-source-ai-news-wire
-~/.local/bin/open-source-ai-news-wire pilot start-shadow
+uv run open-source-ai-news-wire dashboard
 ```
 
-Open the on-demand interface with:
+The dashboard opens on a loopback-only address on your Mac. Use the one-time access link printed by the command if the browser does not open automatically.
+
+To install the half-hour macOS schedule from this checkout:
 
 ```bash
-~/.local/bin/open-source-ai-news-wire dashboard
+uv run open-source-ai-news-wire schedule install \
+  --launcher "$PWD/.venv/bin/open-source-ai-news-wire"
+uv run open-source-ai-news-wire schedule status
 ```
 
-The dashboard binds only to loopback, selects a random port, and requires its one-time process-local access link. See [docs/operator-guide.md](docs/operator-guide.md) for routine operation and recovery.
+See [Getting started](docs/guide/getting-started.md) for the full setup and first review.
 
-Release `0.3.7` retains schema version 7 and restores fail-closed ChatGPT drafting. The signed Codex binary bundled with ChatGPT can reach only a short-lived loopback CONNECT broker; the broker permits reviewed ChatGPT/OpenAI hosts, validates every DNS answer, pins the exact public peer, and leaves end-to-end TLS intact. A release-bound 24-hour isolation attestation must be current before assistance can be enabled or used. If assistance is unavailable, approval still creates a source-bound editable draft shell immediately, and a later valid AI result supersedes that shell atomically.
+## User guide
 
-Story and material revisions remain audited separately: exact approved claim/source signatures are immutable, source or claim drift requires reapproval, and only a changed normalized atomic-claim set may create a material-update ranking anchor. Aggregator timestamps are discovery times. If the linked article's original date is unknown, the item is labelled `Newly surfaced`, receives no freshness points, and cannot appear as Breaking or Fresh. Publication metadata corrections remain source revisions rather than material updates.
+| Guide | Use it for |
+|---|---|
+| [Product guide](docs/guide/index.md) | Understand the product, its parts, and its boundaries |
+| [Getting started](docs/guide/getting-started.md) | Install, launch, schedule, and verify the application |
+| [Features and use cases](docs/guide/features-and-use-cases.md) | See every user-visible capability and when to use it |
+| [Everyday workflows](docs/guide/everyday-workflows.md) | Review, verify, approve, draft, revise, and export |
+| [Releases](docs/guide/releases.md) | Check the current version, update, and review release history |
 
-## Development and verification
+## Current release
 
-```bash
-uv sync --locked
-uv run pytest tests/news_wire
-uv run pytest --cov --cov-branch --cov-report=term-missing
-```
+The current application release is [v0.3.7](https://github.com/SyedShad/open-source-ai-news-wire/releases/tag/v0.3.7) with database schema 7. It restores optional ChatGPT drafting behind a release-bound local check and preserves a deterministic editable draft when assistance cannot run.
 
-Controlled live checks are intentionally separate from deterministic fixtures. Runtime content, credentials, live-source access, and Codex access never enter CI.
+See the [release guide](docs/guide/releases.md) and [changelog](CHANGELOG.md) for details.
 
-## Safety and data boundaries
+## Important limits
 
-- Runtime data must remain outside every Git worktree; the default is `~/open-source-ai-news-wire-data`.
-- There is no backup, restore, cloud synchronization, destination integration, or automatic publishing feature.
-- Scheduler or application uninstall leaves runtime data untouched.
-- Sources requiring accounts, cookies, payment, paywall circumvention, or unstable access stay disabled.
-- Assistance fails closed if its filesystem/private-network isolation canary fails; deterministic monitoring continues.
-- Purge is preview-first and protected editorial/evidence categories require an additional explicit flag.
+- Collection runs on a schedule; it is not a guaranteed real-time wire service.
+- Sources must be public and usable without accounts, cookies, payment, or access bypasses.
+- Scheduled work runs while the Mac is awake. A locked screen is fine; sleep pauses work.
+- Popularity and source breadth can raise attention but do not verify a claim.
+- ChatGPT assistance is optional and can remain unavailable if its local checks fail.
+- A human must approve every draft and publish it manually.
+- Runtime data stays local and has no built-in backup in V1.
 
-The full design and gates are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md). Shared terminology is in [CONTEXT.md](CONTEXT.md), and the security model is in [docs/security-threat-model.md](docs/security-threat-model.md).
+## Maintainer references
+
+Everyday users should start with the guides above. Maintainer details remain in the [local operator guide](docs/operator-guide.md), [source validation register](docs/source-registry-validation.md), and [security threat model](docs/security-threat-model.md).
 
 ## License
 
