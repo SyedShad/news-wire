@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Open Source AI News Wire releases**
 
+## [0.3.8] - 2026-07-24
+
+### Security
+
+- Renewed the exact release pin for the Apple-signed ChatGPT-bundled Codex 0.146.0-alpha.3 after re-verifying its approved path, OpenAI team, identifier, SHA-256, CDHash, and designated requirement. The fail-closed trust policy is unchanged.
+
 ## [0.3.7] - 2026-07-24
 
 ### Added

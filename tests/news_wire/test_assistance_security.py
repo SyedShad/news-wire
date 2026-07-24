@@ -244,6 +244,61 @@ def test_binary_identity_checks_signature_team_version_hash_and_cdhash(
         verify_codex_identity(codex, command_runner=runner)
 
 
+def test_release_pin_accepts_only_the_reviewed_0146_codex_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reviewed_version = "codex-cli 0.146.0-alpha.3"
+    reviewed_sha256 = (
+        "01b89e3cb5b6759c64bc7b47f3f659100e74d743750106ea586b041981f03519"
+    )
+    reviewed_cdhash = "e7be866d785c0388ea7e05d0a4ae5b729f94dbe8"
+    assert assistance.EXPECTED_CODEX_VERSION == reviewed_version
+    assert assistance.EXPECTED_CODEX_SHA256 == reviewed_sha256
+    assert assistance.EXPECTED_CODEX_CDHASH == reviewed_cdhash
+
+    codex = tmp_path / "ChatGPT.app" / "Contents" / "Resources" / "codex"
+    codex.parent.mkdir(parents=True)
+    codex.write_bytes(b"reviewed-0146-binary")
+    codex.chmod(0o755)
+    monkeypatch.setattr(assistance, "_known_codex_binary_paths", lambda: (codex,))
+    monkeypatch.setattr(
+        assistance, "_digest_file", lambda _path: reviewed_sha256
+    )
+
+    def runner(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+        if "--verify" in arguments:
+            return subprocess.CompletedProcess(arguments, 0, "", "valid on disk")
+        if "-dvvv" in arguments:
+            details = (
+                "Identifier=codex\nTeamIdentifier=2DC432GLL2\n"
+                f"CDHash={reviewed_cdhash}\n"
+            )
+            return subprocess.CompletedProcess(arguments, 0, "", details)
+        if "--requirements" in arguments:
+            requirement = (
+                'designated => identifier codex and anchor apple generic and '
+                'certificate leaf[subject.OU] = "2DC432GLL2"'
+            )
+            return subprocess.CompletedProcess(arguments, 0, "", requirement)
+        return subprocess.CompletedProcess(
+            arguments, 0, f"{reviewed_version}\n", ""
+        )
+
+    assert verify_codex_identity(codex, command_runner=runner).version.endswith(
+        "0.146.0-alpha.3"
+    )
+
+    for field, invalid in (
+        ("EXPECTED_CODEX_VERSION", "codex-cli 0.146.0-alpha.2"),
+        ("EXPECTED_CODEX_SHA256", "0" * 64),
+        ("EXPECTED_CODEX_CDHASH", "0" * 40),
+    ):
+        with monkeypatch.context() as changed_pin:
+            changed_pin.setattr(assistance, field, invalid)
+            with pytest.raises(AssistanceConfigurationError, match="identity_drift"):
+                verify_codex_identity(codex, command_runner=runner)
+
+
 def test_release_attestation_rejects_expiry_policy_and_binary_drift(tmp_path: Path) -> None:
     database = _database(tmp_path)
     issued = datetime(2026, 7, 23, 0, 0, tzinfo=UTC)

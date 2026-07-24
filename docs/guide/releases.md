@@ -79,6 +79,12 @@ Rollback is allowed only when the selected installed release supports the curren
 
 ## News Wire release history
 
+### 0.3.8 - Bundled Codex identity refresh
+
+- Renewed the exact release pin for the verified ChatGPT-bundled Codex 0.146.0-alpha.3.
+- Preserved the existing approved path, Apple-signature, OpenAI team, sandbox, broker, and no-tools checks.
+- Kept schema 7 and required a fresh 24-hour isolation attestation before assisted drafting resumes.
+
 ### 0.3.7 - Operational recovery
 
 - Restored optional assisted drafting through a restricted local broker.

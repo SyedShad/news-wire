@@ -345,7 +345,7 @@ def resolve_known_short_url(
         return normalized
 
     headers = {
-        "User-Agent": "OpenSourceAINewsWire/0.3.7 (+local viability pilot)",
+        "User-Agent": "OpenSourceAINewsWire/0.3.8 (+local viability pilot)",
         "Accept": "text/html, application/xhtml+xml;q=0.8, */*;q=0.1",
     }
     injected_client = (
