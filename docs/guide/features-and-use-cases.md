@@ -1,6 +1,6 @@
 # Features and use cases
 
-This page lists the user-visible capabilities in release 0.3.7 and explains when each one is useful.
+This page lists the user-visible capabilities in release 0.3.8 and explains when each one is useful.
 
 ## Coverage
 

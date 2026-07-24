@@ -6,23 +6,20 @@ Open Source AI News Wire uses semantic application versions and explicit databas
 
 | Item | Value |
 |---|---|
-| Application | 0.3.7 |
+| Application | 0.3.8 |
 | Database schema | 7 |
-| Release tag | [`v0.3.7`](https://github.com/SyedShad/open-source-ai-news-wire/releases/tag/v0.3.7) |
-| Validated source commit | `47c77c45dd726271920c588267aec9ceb8190e1a` |
+| Release tag | [`v0.3.8`](https://github.com/SyedShad/open-source-ai-news-wire/releases/tag/v0.3.8) |
+| Validated source commit | `513ac0358d94297825c6a6da04e856880a2d351b` |
 | Distribution | Private source repository; no prebuilt binary attached |
 
-Release 0.3.7 restores optional ChatGPT drafting while keeping the application usable when assistance cannot run. It also corrects how aggregator discovery dates affect freshness and repairs an orphaned evidence-work state without deleting its history.
+Release 0.3.8 renews the exact identity approval for the current Apple-signed ChatGPT-bundled Codex while keeping the application usable when assistance cannot run. It does not weaken the signature, path, broker, sandbox, or no-tools controls.
 
 Highlights:
 
-- A short-lived local connection broker limits assisted drafting to reviewed ChatGPT/OpenAI endpoints.
+- The exact version, SHA-256, and CDHash are pinned to a freshly verified ChatGPT-bundled Codex 0.146.0-alpha.3.
+- A changed executable continues to fail closed and requires a new release review.
 - One current release-bound assistance check controls enablement, generation, dashboard status, and readiness.
-- Every approval has an editable deterministic fallback shell.
-- Aggregator time is treated as discovery time, not automatically as the linked article's original publication time.
-- Unknown original dates appear as Newly surfaced and receive no freshness points.
-- High-attention Discovery links can be inspected automatically, but human confirmation is still required for verification.
-- Scheduler health is read from the actual user LaunchAgent.
+- Every approval retains an editable deterministic fallback shell.
 
 See the complete [changelog](../../CHANGELOG.md) for the file-level release record.
 

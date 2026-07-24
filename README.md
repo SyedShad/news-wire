@@ -71,7 +71,7 @@ See [Getting started](docs/guide/getting-started.md) for the full setup and firs
 
 ## Current release
 
-The current application release is [v0.3.7](https://github.com/SyedShad/open-source-ai-news-wire/releases/tag/v0.3.7) with database schema 7. It restores optional ChatGPT drafting behind a release-bound local check and preserves a deterministic editable draft when assistance cannot run.
+The current application release is [v0.3.8](https://github.com/SyedShad/open-source-ai-news-wire/releases/tag/v0.3.8) with database schema 7. It renews the reviewed ChatGPT-bundled Codex identity while preserving the release-bound local check and deterministic editable draft fallback.
 
 See the [release guide](docs/guide/releases.md) and [changelog](CHANGELOG.md) for details.
 
