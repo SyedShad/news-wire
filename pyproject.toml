@@ -13,7 +13,7 @@ dependencies = [
 open-source-ai-news-wire = "open_source_ai_news_wire.cli:main"
 
 [build-system]
-requires = ["setuptools>=75"]
+requires = ["setuptools>=83.0.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
@@ -33,13 +33,13 @@ open_source_ai_news_wire = [
 
 [dependency-groups]
 dev = [
-  "pytest>=9.1.0,<10",
+  "pytest>=9.1.1,<10",
   "pytest-cov>=7,<8",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=9.1.0,<10",
+  "pytest>=9.1.1,<10",
   "pytest-cov>=7,<8",
 ]
 
