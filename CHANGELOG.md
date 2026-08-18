@@ -44,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unauthenticated pages, APIs, server-rendered payloads, and exports fail closed;
   remote mutations require both owner authentication and a current heartbeat.
 
+### Fixed
+
+- Owner login, logout, and command submissions now accept Sites' authenticated
+  sandboxed `Origin: null` requests only when the configured request origin,
+  same-site browser metadata, and internal authenticated dispatch headers all
+  match; cross-site submissions remain rejected.
+
 ## [0.4.0] - 2026-07-31
 
 ### Added

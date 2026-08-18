@@ -116,7 +116,11 @@ const context = { waitUntil() {}, passThroughOnException() {} };
 
 function fetchApp(path, init = {}, environment = baseEnvironment) {
   globalThis.__CLOUDFLARE_TEST_ENV__ = environment;
-  return worker.fetch(new Request(`http://localhost${path}`, init), environment, context);
+  return worker.fetch(
+    new Request(`${new URL(environment.AUTH_BASE_URL).origin}${path}`, init),
+    environment,
+    context,
+  );
 }
 
 function masterRequest(password, ip, accept = "application/json") {
@@ -326,4 +330,58 @@ test("master authentication covers failure, throttling, lockout, success, rotati
   const afterLogout = await fetchApp("/api/session", { headers: { cookie: logoutCookie } });
   assert.equal(afterLogout.status, 401);
   assert.ok(database.audits.length >= 5);
+});
+
+test("Sites sandboxed owner login and logout accept authenticated opaque-origin navigation", async () => {
+  const environment = {
+    ...baseEnvironment,
+    AUTH_BASE_URL: "https://dashboard.example.chatgpt.site",
+  };
+  const sitesHeaders = {
+    accept: "application/json",
+    "content-type": "application/x-www-form-urlencoded",
+    origin: "null",
+    "sec-fetch-site": "same-origin",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-dest": "document",
+    "x-dispatched-app": "dashboard-example",
+    "oai-authenticated-user-id": "owner-account-id",
+    "cf-connecting-ip": "203.0.113.30",
+  };
+  const login = await fetchApp(
+    "/api/auth/master",
+    {
+      method: "POST",
+      headers: sitesHeaders,
+      body: new URLSearchParams({ password: masterPassword }),
+      redirect: "manual",
+    },
+    environment,
+  );
+  assert.equal(login.status, 200);
+  const cookie = (login.headers.get("set-cookie") ?? "").split(";", 1)[0];
+  assert.match(cookie, /^osainw_session=/);
+
+  const logout = await fetchApp(
+    "/api/auth/logout",
+    {
+      method: "POST",
+      headers: { ...sitesHeaders, cookie },
+      redirect: "manual",
+    },
+    environment,
+  );
+  assert.equal(logout.status, 303);
+
+  const rejected = await fetchApp(
+    "/api/auth/master",
+    {
+      method: "POST",
+      headers: { ...sitesHeaders, "sec-fetch-site": "cross-site" },
+      body: new URLSearchParams({ password: masterPassword }),
+      redirect: "manual",
+    },
+    environment,
+  );
+  assert.equal(rejected.status, 503);
 });

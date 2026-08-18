@@ -20,10 +20,36 @@ export function secureCookie(request: Request, source: AuthRuntimeEnv): boolean 
   return authBaseUrl(request, source).protocol === "https:";
 }
 
-export function assertSameOrigin(request: Request, source: AuthRuntimeEnv): void {
-  const origin = request.headers.get("origin");
+export function isSameOriginRequest(
+  request: Request,
+  source: AuthRuntimeEnv,
+): boolean {
   const expected = authBaseUrl(request, source).origin;
-  if (!origin || origin !== expected) throw new Error("Cross-origin request rejected");
+  const origin = request.headers.get("origin");
+  if (origin === expected) return true;
+
+  // Sites serves owner pages inside an authenticated sandbox that serializes
+  // form and fetch initiators as the opaque `null` origin. Accept that case
+  // only for the configured Sites origin, trusted browser fetch metadata, and
+  // the internal authenticated dispatch headers. Cross-site forms report
+  // Sec-Fetch-Site: cross-site and continue to fail closed.
+  if (
+    origin !== "null" ||
+    !expected.endsWith(".chatgpt.site") ||
+    new URL(request.url).origin !== expected ||
+    request.headers.get("sec-fetch-site") !== "same-origin" ||
+    !request.headers.get("x-dispatched-app")?.trim() ||
+    !request.headers.get("oai-authenticated-user-id")?.trim()
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function assertSameOrigin(request: Request, source: AuthRuntimeEnv): void {
+  if (!isSameOriginRequest(request, source)) {
+    throw new Error("Cross-origin request rejected");
+  }
 }
 
 export async function requestFingerprint(

@@ -1,15 +1,11 @@
 import { NextResponse } from "next/server";
 import { authorizeApiRequest } from "@/lib/auth/api.ts";
 import { audit } from "@/lib/auth/store.ts";
-import { authBaseUrl, runtimeEnv } from "@/lib/auth/config.ts";
+import { runtimeEnv } from "@/lib/auth/config.ts";
+import { isSameOriginRequest } from "@/lib/auth/http.ts";
 import { noStore } from "@/lib/auth/responses.ts";
 import { enqueueCommand, listCommands, readSnapshot } from "@/lib/dashboard/store.ts";
 import { validateOwnerCommand } from "@/lib/dashboard/validation.ts";
-
-function sameOrigin(request: Request): boolean {
-  const origin = request.headers.get("origin");
-  return Boolean(origin) && origin === authBaseUrl(request, runtimeEnv()).origin;
-}
 
 export async function GET(request: Request) {
   const authorization = await authorizeApiRequest(request, ["master"]);
@@ -20,7 +16,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const authorization = await authorizeApiRequest(request, ["master"]);
   if (authorization.response) return authorization.response;
-  if (!sameOrigin(request)) {
+  if (!isSameOriginRequest(request, runtimeEnv())) {
     return noStore(NextResponse.json({ ok: false, error: "same_origin_required" }, { status: 403 }));
   }
   try {

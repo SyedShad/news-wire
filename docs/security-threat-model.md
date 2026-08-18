@@ -27,6 +27,11 @@ The application password is a generated 256-bit value. Its salted
 PBKDF2-HMAC-SHA256 verifier uses the workerd runtime's enforced 100,000-iteration
 maximum; private Sites access, throttling, lockout, credential-versioned
 sessions, and logout are independent controls around that verifier.
+Sites sandboxed owner forms may serialize their origin as `null`; those requests
+are accepted only when their URL matches the configured production origin,
+browser fetch metadata reports `same-origin`, and Sites supplies both its
+authenticated user and internal dispatch headers. Cross-site forms remain
+rejected before password verification or mutation processing.
 The custom Sites perimeter independently requires a machine-access bearer token
 for bridge requests. That token and the HMAC secret use separate macOS Keychain
 services and never appear in source, local JSON configuration, LaunchAgent

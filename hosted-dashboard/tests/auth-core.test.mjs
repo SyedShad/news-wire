@@ -12,6 +12,7 @@ import {
   can,
   canMutate,
 } from "../lib/auth/authorization.ts";
+import { isSameOriginRequest } from "../lib/auth/http.ts";
 
 test("allows both exact Workspace domains and rejects all others", () => {
   assert.equal(approvedEmailDomain("person@sentient.foundation"), "sentient.foundation");
@@ -39,6 +40,52 @@ test("verifies a slow salted master-password digest", async () => {
   assert.throws(
     () => parsePasswordVerifier(verifier.replace("100000", "99999")),
     /Invalid master password verifier format/,
+  );
+});
+
+test("accepts the Sites opaque origin only with authenticated same-site dispatch metadata", () => {
+  const source = {
+    AUTH_BASE_URL: "https://dashboard.example.chatgpt.site",
+  };
+  const headers = {
+    origin: "null",
+    "sec-fetch-site": "same-origin",
+    "x-dispatched-app": "dashboard-example",
+    "oai-authenticated-user-id": "owner-account-id",
+  };
+  assert.equal(
+    isSameOriginRequest(
+      new Request("https://dashboard.example.chatgpt.site/api/auth/master", { headers }),
+      source,
+    ),
+    true,
+  );
+  assert.equal(
+    isSameOriginRequest(
+      new Request("https://dashboard.example.chatgpt.site/api/auth/master", {
+        headers: { ...headers, "sec-fetch-site": "cross-site" },
+      }),
+      source,
+    ),
+    false,
+  );
+  assert.equal(
+    isSameOriginRequest(
+      new Request("https://dashboard.example.chatgpt.site/api/auth/master", {
+        headers: { ...headers, "oai-authenticated-user-id": "" },
+      }),
+      source,
+    ),
+    false,
+  );
+  assert.equal(
+    isSameOriginRequest(
+      new Request("https://dashboard.example.chatgpt.site/api/auth/master", {
+        headers: { ...headers, origin: "https://attacker.example" },
+      }),
+      source,
+    ),
+    false,
   );
 });
 
