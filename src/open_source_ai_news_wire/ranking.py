@@ -102,14 +102,20 @@ def rank_story(
         if freshness in {"Breaking", "Fresh", "Updated"}
         else 0
     )
-    review_score = min(100, importance + evidence + momentum + current_freshness)
+    organic_score = min(100, importance + evidence + momentum + current_freshness)
+    trust_state = str(story.get("source_trust_state") or "research_required")
+    research_status = str(story.get("research_status") or "queued")
+    floor_applied = bool(story.get("priority_floor_applied")) or trust_state == "trusted" or research_status in {
+        "complete", "partial", "failed", "unavailable",
+    }
+    review_score = max(organic_score, 80) if floor_applied else organic_score
 
-    if freshness == "Older":
+    if review_score >= 80:
+        priority = "Urgent"
+    elif freshness == "Older":
         priority = "Older context"
     elif freshness == "Newly surfaced":
         priority = "Newly surfaced"
-    elif review_score >= 80:
-        priority = "Urgent"
     elif review_score >= 65:
         priority = "High"
     else:
@@ -131,6 +137,15 @@ def rank_story(
             "ranking_age_hours": anchor_age,
             "ranking_age_label": _age_label(anchor_age),
             "review_score": review_score,
+            "organic_score": organic_score,
+            "priority_floor_applied": floor_applied,
+            "score_floor_explanation": (
+                "Trusted source: Urgent floor applied immediately."
+                if trust_state == "trusted"
+                else "Automatic research reached a terminal state: Urgent floor applied."
+                if floor_applied
+                else "Automatic research is still running; the organic score is shown."
+            ),
             "priority": priority,
             "importance_score": importance,
             "impact_level": "High impact" if importance >= 40 else "Notable" if importance >= 30 else "Standard impact",

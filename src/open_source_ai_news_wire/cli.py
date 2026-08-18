@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import asdict
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -18,6 +19,14 @@ from .assistance import (
 )
 from .demo import seed_demo_data
 from .installer import LocalInstaller
+from .hosted_bridge import (
+    HostedBridgeLaunchAgent,
+    create_hosted_bridge,
+    generate_bridge_secret,
+    load_bridge_config,
+    save_bridge_config,
+    store_bridge_secret,
+)
 from .operations import create_purge_plan, execute_purge_plan, export_diagnostics
 from .pilot import PilotGateError, PilotManager
 from .runner import Worker
@@ -58,6 +67,18 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--story", help="Open one story after the one-time local authorization")
 
     subparsers.add_parser("status", help="Print local dashboard status as JSON")
+
+    hosted_bridge = subparsers.add_parser(
+        "hosted-bridge", help="Manage the outbound-only hosted dashboard bridge"
+    )
+    hosted_bridge.add_argument(
+        "action",
+        choices=("configure", "run", "once", "install", "start", "stop", "status", "uninstall"),
+    )
+    hosted_bridge.add_argument("--url", help="Hosted dashboard HTTPS origin")
+    hosted_bridge.add_argument("--secret-stdin", action="store_true", help=argparse.SUPPRESS)
+    hosted_bridge.add_argument("--generate-secret", action="store_true", help=argparse.SUPPRESS)
+    hosted_bridge.add_argument("--interval-seconds", type=int, default=10)
 
     scan = subparsers.add_parser("scan", help="Run one bounded deterministic scan")
     scan.add_argument(
@@ -174,6 +195,56 @@ def main(argv: list[str] | None = None) -> int:
             "overview": service.overview()["counts"],
         }
         print(json.dumps(payload, indent=2))
+        return 0
+
+    if arguments.command == "hosted-bridge":
+        database = _database(data_root)
+        if arguments.action == "configure":
+            if not arguments.url:
+                parser.error("hosted-bridge configure requires --url")
+            save_bridge_config(database.paths, arguments.url)
+            if arguments.secret_stdin and arguments.generate_secret:
+                parser.error("choose either --secret-stdin or --generate-secret")
+            if arguments.secret_stdin:
+                secret = sys.stdin.readline().strip()
+                if not secret:
+                    parser.error("no bridge secret was provided on standard input")
+                store_bridge_secret(arguments.url, secret)
+            elif arguments.generate_secret:
+                store_bridge_secret(arguments.url, generate_bridge_secret())
+            print("Hosted dashboard bridge configuration saved; no secret was printed.")
+            return 0
+        base_url = arguments.url or load_bridge_config(database.paths)
+        if arguments.action in {"run", "once"}:
+            bridge = create_hosted_bridge(
+                database,
+                base_url,
+                interval_seconds=max(10, arguments.interval_seconds),
+            )
+            if arguments.action == "once":
+                print(json.dumps(bridge.sync_once(), indent=2))
+            else:
+                bridge.run_forever()
+            return 0
+        manager = HostedBridgeLaunchAgent(database, base_url)
+        if arguments.action == "install":
+            state = manager.install()
+        elif arguments.action == "start":
+            state = manager.start()
+        elif arguments.action == "stop":
+            state = manager.stop()
+        elif arguments.action == "uninstall":
+            state = manager.uninstall()
+        else:
+            state = manager.status()
+        print(json.dumps({
+            "installed": state.installed,
+            "loaded": state.loaded,
+            "running": state.running,
+            "state": state.state,
+            "last_exit_code": state.last_exit_code,
+            "plist_path": str(state.plist_path),
+        }, indent=2))
         return 0
 
     if arguments.command == "scan":
@@ -301,6 +372,10 @@ def main(argv: list[str] | None = None) -> int:
         installer = LocalInstaller(
             Path(arguments.source_root),
             database.paths,
+            # Listing is read-only, and an explicit rollback must be able to
+            # verify and label an already installed audited-override manifest.
+            # New installs keep the stricter provenance requirement.
+            allow_unverified_source=arguments.action in {"list", "rollback"},
             validation_report=(
                 Path(arguments.validation_report)
                 if arguments.validation_report

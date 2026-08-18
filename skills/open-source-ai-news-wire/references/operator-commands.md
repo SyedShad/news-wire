@@ -56,13 +56,13 @@ open-source-ai-news-wire pilot activate-notifications --confirm-reviewed
 open-source-ai-news-wire pilot stop-notifications
 ```
 
-The completion pilot uses the additional 72-hour validation and fail-closed automatic activation. The manual activation command is retained for compatibility. Drafting remains human-approved in both modes.
+The completion pilot uses the additional 72-hour validation and fail-closed automatic activation. The manual activation command is retained for compatibility. Content creation and publication remain user-controlled.
 
-Human-approved drafts are dispatched immediately by the local dashboard. `assistance run-pending` remains an operator recovery command; it is not the normal approval path.
+The dashboard's **Create content** action creates an editable shell immediately, starts a distinct fresh source search, and dispatches writing when that attempt reaches a terminal state. `assistance run-pending` remains an operator recovery command; it is not the normal content path.
 
-The dashboard's default `Review Now` window covers 24 hours and recalculates priority without a scan. `Newest first` changes only the ordering. `Older Context` and `All History` remain available for non-live review; they do not restore a live-priority label.
+The dashboard shows Ready, Researching, and Content-ready work. `Newest first` changes only ordering. `Older Context` and `All History` remain available for audit; they do not restore a live-priority label.
 
-If normal drafting is locked, the dashboard offers separately labelled manual neutral and manual lens controls. Each requires the versioned native confirmation, records the unchanged gate snapshot, and dispatches one idempotent draft request. This is an editorial override, not evidence verification; the warning and audit labels never enter content exports.
+There are no qualification, approval, evidence, research, importance, lens, or manual-override controls. Only duplicate active content work and inactive archived or withdrawn stories are blocked. Trust and verification warnings remain in the dashboard and never enter content exports.
 
 ## Data deletion
 

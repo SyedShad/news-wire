@@ -161,7 +161,7 @@ class SafeHttpClient:
         connect_timeout: float = 10,
         read_timeout: float = 20,
         maximum_bytes: int = 5_000_000,
-        user_agent: str = "OpenSourceAINewsWire/0.2 (+local viability pilot)",
+        user_agent: str = "OpenSourceAINewsWire/0.4.0 (+local viability pilot)",
         allow_http_hosts: Iterable[str] = (),
         maximum_redirects: int = 3,
     ):
@@ -345,7 +345,7 @@ def resolve_known_short_url(
         return normalized
 
     headers = {
-        "User-Agent": "OpenSourceAINewsWire/0.3.8 (+local viability pilot)",
+        "User-Agent": "OpenSourceAINewsWire/0.4.0 (+local viability pilot)",
         "Accept": "text/html, application/xhtml+xml;q=0.8, */*;q=0.1",
     }
     injected_client = (

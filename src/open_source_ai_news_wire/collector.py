@@ -1501,23 +1501,11 @@ class Collector:
             story_id = "story-" + hashlib.sha256(
                 f"{observation.fingerprint}:{observation.published_at}".encode("utf-8")
             ).hexdigest()[:20]
-            evidence_gate = role == "Event"
-            current_time_known = not _unknown_original_time(
-                observation.timestamp_status
-            )
-            status = (
-                "candidate"
-                if evidence_gate and qualification.importance_gate
-                else "watch"
-                if (
-                    role == "Discovery"
-                    and current_time_known
-                    and qualification.score >= 65
-                    and qualification.impact_score >= 26
-                )
-                else "signal"
-            )
-            priority = "High potential" if status == "watch" else qualification.priority
+            trust_class = str(source.get("trust_class") or "research_required")
+            floor_applied = trust_class == "trusted"
+            review_score = max(qualification.score, 80) if floor_applied else qualification.score
+            status = "ready"
+            priority = "Urgent" if floor_applied else qualification.priority
             slug = re.sub(r"[^a-z0-9]+", "-", observation.title.lower()).strip("-")[:100]
             connection.execute(
                 """
@@ -1527,13 +1515,15 @@ class Collector:
                     opportunity_strength, relevance_bridge, counterargument,
                     watch_expires_at, watch_status, material_update, created_at, updated_at,
                     importance_score, importance_json, material_updated_at, ingestion_context,
-                    story_revision, material_revision
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    story_revision, material_revision, organic_score, review_score,
+                    priority_floor_applied, source_trust_state, research_status,
+                    verification_notice
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     story_id, slug or story_id, observation.title,
                     observation.summary or observation.title, qualification.lane,
-                    qualification.openness_class, status, priority, qualification.score,
+                    qualification.openness_class, status, priority, review_score,
                     qualification.freshness,
                     (
                         observed_at
@@ -1543,8 +1533,8 @@ class Collector:
                     observed_at,
                     qualification.opportunity_strength, qualification.relevance_bridge,
                     qualification.counterargument,
-                    (datetime.fromisoformat(observed_at.replace("Z", "+00:00")) + timedelta(hours=24)).isoformat().replace("+00:00", "Z") if status == "watch" else None,
-                    "Active" if status == "watch" else None,
+                    None,
+                    None,
                     0, observed_at, observed_at,
                     qualification.importance_score,
                     Database.json({
@@ -1557,6 +1547,12 @@ class Collector:
                     ingestion_context,
                     1,
                     1,
+                    qualification.score,
+                    review_score,
+                    int(floor_applied),
+                    trust_class,
+                    "not_needed" if floor_applied else "queued",
+                    "" if floor_applied else "Verify this yourself",
                 ),
             )
             before_claim_signature = atomic_claim_signature([])
@@ -1685,20 +1681,46 @@ class Collector:
             and row["reporting_origin_key"]
         }
         evidence_gate = event_count >= 1 or len(reporting_publishers) >= 2
-        current = connection.execute("SELECT status, priority_score, importance_score FROM story_cluster WHERE id = ?", (story_id,)).fetchone()
+        trusted_source = connection.execute(
+            """
+            SELECT 1 FROM source_item si
+            JOIN source_registry sr ON sr.id = si.source_registry_id
+            WHERE si.story_id = ? AND sr.trust_class = 'trusted' LIMIT 1
+            """,
+            (story_id,),
+        ).fetchone()
+        current = connection.execute(
+            """
+            SELECT status, priority_score, importance_score, organic_score,
+                   priority_floor_applied, research_status
+            FROM story_cluster WHERE id = ?
+            """,
+            (story_id,),
+        ).fetchone()
         new_status = current["status"]
-        if evidence_gate and qualification.importance_gate and new_status in {"signal", "watch"}:
-            new_status = "candidate"
-        priority = qualification.priority if new_status != "watch" else "High potential"
+        if new_status in {"signal", "watch", "candidate", "approved"}:
+            new_status = "ready"
+        trust_state = "trusted" if trusted_source else "research_required"
+        research_status = "not_needed" if trusted_source else str(current["research_status"] or "queued")
+        floor_applied = bool(trusted_source) or research_status in {
+            "complete", "partial", "failed", "unavailable",
+        }
+        organic_score = max(int(current["organic_score"] or 0), qualification.score)
+        review_score = max(organic_score, 80) if floor_applied else organic_score
+        priority = "Urgent" if floor_applied else qualification.priority
         connection.execute(
             """
             UPDATE story_cluster SET first_public_at = ?, status = ?, priority = ?,
-                priority_score = MAX(priority_score, ?),
-                importance_score = MAX(importance_score, ?), importance_json = ?, updated_at = ?
+                priority_score = ?, organic_score = ?, review_score = ?,
+                priority_floor_applied = ?, source_trust_state = ?, research_status = ?,
+                verification_notice = ?, importance_score = MAX(importance_score, ?),
+                importance_json = ?, updated_at = ?
             WHERE id = ?
             """,
             (
-                first_public, new_status, priority, qualification.score,
+                first_public, new_status, priority, review_score, organic_score,
+                review_score, int(floor_applied), trust_state, research_status,
+                "" if trusted_source else "Verify this yourself",
                 qualification.importance_score,
                 Database.json({
                     "material_importance": qualification.impact_score,
@@ -1731,24 +1753,6 @@ class Collector:
                 observed_at if evidence_gate and qualification.importance_gate else None,
             ),
         )
-        if new_status == "watch":
-            expires = (datetime.fromisoformat(observed_at.replace("Z", "+00:00")) + timedelta(hours=24)).isoformat().replace("+00:00", "Z")
-            exists = connection.execute(
-                "SELECT 1 FROM watch_notice WHERE story_id = ? AND status = 'active'", (story_id,)
-            ).fetchone()
-            if not exists:
-                connection.execute(
-                    """
-                    INSERT INTO watch_notice(story_id, reason, trace_json, status, next_check_at, expires_at, created_at, updated_at)
-                    VALUES(?, ?, ?, 'active', ?, ?, ?, ?)
-                    """,
-                    (
-                        story_id, "High-potential public trace awaiting verification.",
-                        Database.json({"source_id": source["id"], "url": observation.url}),
-                        (datetime.fromisoformat(observed_at.replace("Z", "+00:00")) + timedelta(minutes=30)).isoformat().replace("+00:00", "Z"),
-                        expires, observed_at, observed_at,
-                    ),
-                )
         if qualification.opportunity_strength in {"Strong", "Moderate"}:
             connection.execute(
                 """
@@ -1766,8 +1770,8 @@ class Collector:
                     Database.json({"deterministic": True}), observed_at,
                 ),
             )
-        if new_status in {"candidate", "watch"} and (priority in {"Urgent", "High", "High potential"}):
-            kind = "watch" if new_status == "watch" else "candidate"
+        if new_status == "ready" and priority in {"Urgent", "High"}:
+            kind = "ready"
             existing_alert = connection.execute(
                 "SELECT 1 FROM alert WHERE story_id = ? AND kind = ? AND read_at IS NULL",
                 (story_id, kind),
@@ -1779,9 +1783,9 @@ class Collector:
                     VALUES(?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        story_id, kind, "high" if priority in {"Urgent", "High"} else "watch",
+                        story_id, kind, "high",
                         observation.title,
-                        "Verified candidate ready for review." if kind == "candidate" else "Unverified high-potential signal under watch.",
+                        "Story is ready for content creation.",
                         observed_at,
                     ),
                 )
@@ -1794,4 +1798,49 @@ class Collector:
                 observed_at=observed_at,
                 headline=observation.title,
             )
+        if trust_state == "research_required":
+            self._ensure_background_research(connection, story_id, observed_at, review_score)
         return story_id
+
+    @staticmethod
+    def _ensure_background_research(
+        connection: Any,
+        story_id: str,
+        observed_at: str,
+        priority: int,
+    ) -> None:
+        if connection.execute(
+            "SELECT 1 FROM research_attempt WHERE story_id = ? AND purpose = 'background' LIMIT 1",
+            (story_id,),
+        ).fetchone():
+            return
+        attempt = connection.execute(
+            """
+            INSERT INTO research_attempt(
+                story_id, purpose, status, created_at, updated_at
+            ) VALUES(?, 'background', 'queued', ?, ?)
+            """,
+            (story_id, observed_at, observed_at),
+        )
+        attempt_id = int(attempt.lastrowid)
+        connection.execute(
+            """
+            INSERT INTO work_item(
+                kind, story_id, status, priority, payload_json, created_at,
+                updated_at, idempotency_key, available_at
+            ) VALUES('source_research', ?, 'queued', ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                story_id,
+                max(0, min(100, priority)),
+                Database.json({
+                    "schema_version": 1,
+                    "purpose": "background",
+                    "research_attempt_id": attempt_id,
+                }),
+                observed_at,
+                observed_at,
+                f"source-research:background:{story_id}",
+                observed_at,
+            ),
+        )

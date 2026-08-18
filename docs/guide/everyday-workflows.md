@@ -1,232 +1,86 @@
 # Everyday workflows
 
-This guide covers the normal path from a new story to an edited export. It also explains when to use the manual override, older context, recovery, and source-health controls.
-
-## Start a review session
+## Start a session
 
 ```bash
 uv run open-source-ai-news-wire dashboard
 ```
 
-Open **Review inbox** from the sidebar. The default queue is **Review Now · 24 hours** sorted by review priority.
+Open **News inbox**. Use review priority for the most time-sensitive items, newest-first for chronology, Older Context for historical material, and All History for audit work. Filter by lane or state when useful.
 
-Use the queue controls according to the task:
+## Understand a story
 
-- Keep **Review priority** to review the best current combination of impact, evidence, momentum, and freshness.
-- Select **Newest first** to inspect the latest ranking anchors regardless of score.
-- Select **Older Context** for stories outside the live 24-hour window.
-- Select **All History** only for retrospective or audit work.
-- Use the lane, state, and queue-type filters to narrow the list.
+The story page shows the timeline, organic and review scores, source trust state, research status and history, claims, sources, provenance, and decision history.
 
-Opening a story never approves it or creates a draft.
+- **Trusted source** means the configured publisher was reviewed as first-party, governmental, original research, or vetted reporting.
+- **Researching** means the automatic 30-second source search is active.
+- **Research complete** means the attempt reached a terminal state; partial or unavailable results remain visible.
+- **Verify this yourself** is an editorial dashboard warning for a research-required detection. It is never copied into a Reddit draft or export.
 
-## Review a story
+No qualification action is required. Trusted stories receive the Urgent score floor immediately; research-required stories receive it after their automatic attempt ends.
 
-On the story page, check these sections in order:
+## Create content
 
-1. **Header:** freshness, review score, impact, attention, and evidence state.
-2. **Cluster timeline:** original publication, local detection, and any genuine material update.
-3. **Claim ledger:** the atomic claims and their current verification state.
-4. **Sources by role:** Event, Reporting, and Discovery sources kept separate.
-5. **Evidence and qualification:** what has passed, what is locked, and what the reviewer can confirm.
-6. **Draft approval:** normal or manual drafting actions.
+Select **Create content** on any active story.
 
-Do not use attention as a substitute for evidence. A story may be important and popular while still needing source review.
+The application immediately creates and opens an editable source-bound shell. It also records a new `draft_refresh` attempt, even if background research already ran. The fresh search looks for up to three current independent sources and adds only relevant, public, safely fetched HTTPS pages.
 
-## Verify and qualify a story normally
+Search and writing are separate. A timeout, unsafe result, duplicate publisher, account limit, or no-result outcome stays visible but never removes the shell. Only a repeated click while the same content request is active is prevented.
 
-Use this path when you can establish one first-party Event source or two independent original Reporting publications.
+## Edit the Reddit draft
 
-### 1. Inspect a source
+Review these fields:
 
-Choose **Inspect linked source**, **Inspect discovery lead**, or enter another public HTTPS URL and choose **Inspect source**.
+1. **Title:** concise and factual.
+2. **Body:** value first, casual but accurate, and supported by attached sources.
+3. **Suggested flair:** use it only if it fits the eventual community.
+4. **Reminder:** keep the exact `Verify rules before posting`.
+5. **Sources:** confirm each natural Markdown link supports the nearby statement.
+6. **Engagement:** end with a genuine open-ended question.
 
-Inspection is queued. Wait for the next worker pass or use **Run now** on Schedule and usage. A successful fetch appears as a proposal that still needs human confirmation.
+The application does not assume a subreddit. Edit the shell or generated version as needed and save a new version. Use Copy, Markdown export, or HTML export only after checking the story and destination rules.
 
-### 2. Confirm its role
+Final publication happens manually outside the application.
 
-For a fetched proposal:
+## Handle a changed story
 
-- Choose **Event / first-party source** only when the page is first-party for the event.
-- Choose **Reporting source** for journalism or analysis that reports the development.
-- Keep **Discovery source** when the page is primarily a lead, aggregator, or public post.
+A genuine claim change records a material update and may require the current content to be revised. Return to the story, inspect its updated sources and research history, then select **Create content** again after prior active work is complete. Every request receives a distinct fresh-search attempt and uses the latest story revision before writing.
 
-For Event evidence, confirm first-party status. For Reporting evidence, confirm or correct:
+Earlier drafts, sources, research attempts, corrections, and decisions stay in history.
 
-- the original reporting publication;
-- whether the hosted page is original, syndicated, or citing another publication; and
-- the original article URL when it is publicly available.
+## Archive or withdraw
 
-Suggestions do not affect qualification until a human confirms them.
-
-### 3. Map the source to claims
-
-Choose one relationship for each relevant claim:
-
-- **Directly supports the claim** when the page establishes it.
-- **Reports or attributes the claim** when the page establishes that someone made the claim without independently proving it.
-- **Contradicts the claim** when the evidence conflicts with it.
-- **Context only** when it helps explain the story without proving the claim.
-
-Use no relationship for claims the source does not address.
-
-### 4. Qualify the candidate
-
-After the evidence gate passes, choose **Qualify as candidate**.
-
-If automated importance did not pass, enter a reason for the human importance override. This leaves the automated score unchanged.
-
-Qualification does not create a draft. It only unlocks the separate drafting decision.
-
-## Select a story manually
-
-Use the manual path when the story is editorially useful but normal evidence, importance, or lens eligibility remains locked.
-
-1. Review every available claim and stored source.
-2. In Draft approval, choose **Manually approve and create neutral draft** or **Manually approve and create open-source lens draft**.
-3. Read the native browser warning.
-4. Choose **OK** only if you intend to create the draft from the currently stored material.
-
-No written reason is required. The action records the current gate snapshot and dispatches the draft immediately.
-
-Manual selection does not:
-
-- verify the story;
-- change an automated gate to passed;
-- promote a Discovery source to qualifying evidence; or
-- insert warning language into the draft or exports.
-
-The manual path remains unavailable for archived, withdrawn, claim-less, or source-less stories.
-
-## Choose a drafting mode
-
-### Neutral draft
-
-Choose a Neutral News Brief when the goal is a compact, facts-first report. This is the default mode.
-
-### Open-source lens draft
-
-Choose an Open-Source Lens Brief when a concrete open-source interpretation is useful. The lens remains separate from the factual report and should include a limitation or counterargument.
-
-The normal path requires a Strong or Moderate opportunity. The warned manual path can override that eligibility decision.
-
-You can add optional guidance before approval, such as:
-
-- keep the distinction between an announced policy and a final rule;
-- preserve the uncertainty around a reported capability; or
-- focus the lens on auditability rather than access.
-
-Guidance cannot add facts or URLs that are absent from the approved story and source snapshot.
-
-## Wait for or recover draft generation
-
-Approval begins generation immediately. If the approving story tab remains open, it polls while work is active and opens the editor when the draft is ready.
-
-If you leave the tab, open **Drafts** and review the visible request state:
-
-| State | Meaning | Normal action |
-|---|---|---|
-| Starting or Generating | The committed request is active | Wait for completion |
-| Waiting | A temporary prerequisite is unavailable | Follow the displayed condition or use the editable shell |
-| Retrying | The one automatic transient retry is active | Wait for the retry |
-| Failed | The failure needs a human action | Read the safe reason and choose Retry when available |
-| Needs reapproval | Claims or approved sources changed | Return to the story and approve again |
-| Draft ready | A versioned draft exists | Open Review draft |
-
-If assisted drafting cannot run, the application creates an editable shell from the approved snapshot. Saving the shell makes it the completed manual draft and cancels pending assisted work.
-
-## Edit, revise, and export
-
-![Fictional draft history with one current version](../assets/screenshots/0.3.7/06-drafts-and-history.png)
-
-Open a draft from **Drafts & history**.
-
-1. Review the headline, metadata, and factual brief.
-2. Check natural source attribution and the first-use Markdown links.
-3. If this is a lens brief, review the labelled lens and its limitation.
-4. Compare the content with the evidence snapshot and correction state.
-5. Choose **Save as version N** to preserve the current version and create a revision.
-6. Use **Copy brief**, **Export Markdown**, or **Export HTML** when the content is ready.
-
-Exports are destination-neutral. Markdown uses portable links, and HTML renders only validated links from the approved source packet.
-
-Publication is a separate manual action outside the application.
-
-## Respond to a correction or material change
-
-A claim or approved source-passage change can invalidate a pending approval or mark a draft as needing review.
-
-When that happens:
-
-1. Return to the story.
-2. Review the changed claim or source.
-3. Confirm or exclude updated evidence as needed.
-4. Requalify if the effective evidence gate no longer passes.
-5. Approve a new draft request explicitly.
-
-Older draft versions and the original decision history remain preserved.
-
-Routine engagement, parser metadata, formatting, and duplicate mentions do not require reapproval and do not refresh the material-update clock.
+Use Archive for material you want removed from active work but preserved in history. Use Withdraw when the story should no longer be treated as publishable. These are the only editorial state controls that intentionally make **Create content** unavailable.
 
 ## Check source health
 
-Open **Sources & health** or run:
-
 ```bash
 uv run open-source-ai-news-wire sources health
-```
-
-Use the page to distinguish:
-
-- an individual degraded source;
-- a locally disabled source;
-- a public endpoint that is currently unavailable under the product rules; and
-- a whole-Mac network outage.
-
-Disable or enable a source only when you intend to change local collection:
-
-```bash
 uv run open-source-ai-news-wire sources disable SOURCE_ID
 uv run open-source-ai-news-wire sources enable SOURCE_ID
 ```
 
-Existing stories and source history remain in the corpus.
+Distinguish an individual degraded endpoint, a locally disabled source, a remote rate limit, and a whole-Mac outage. Existing stories and provenance remain stored when a source is disabled.
 
-## Run now, pause, or resume
-
-Use **Schedule & usage** or the equivalent commands:
+## Run now, pause, resume, or catch up
 
 ```bash
 uv run open-source-ai-news-wire schedule run-now
 uv run open-source-ai-news-wire schedule pause
 uv run open-source-ai-news-wire schedule resume
 uv run open-source-ai-news-wire schedule status
+uv run open-source-ai-news-wire catch-up --start 2026-07-01 --end 2026-07-07
 ```
 
-Run now queues one bounded scan. Overlapping triggers are combined instead of running parallel collectors.
+Overlapping scans coalesce. Pause stops future scheduled triggers; resume restores the `:00` and `:30` cadence. Catch-up preserves original publication time and uses the same trust and coverage rules.
 
-Pause stops future scheduled triggers. Resume returns to the normal `:00` and `:30` cadence.
+## If assistance is unavailable
 
-## Recover an older interval
-
-Automatic recovery covers up to 72 hours. For an older interval, use the Extended catch-up form or run:
+The editable shell remains usable. Check the visible condition with:
 
 ```bash
-uv run open-source-ai-news-wire catch-up \
-  --start 2026-07-01 \
-  --end 2026-07-07
+uv run open-source-ai-news-wire assistance status
+uv run open-source-ai-news-wire assistance check-isolation
 ```
 
-The dates are inclusive. Catch-up uses the same relevance and evidence rules and never rewrites an old publication time as fresh.
-
-## Archive a story
-
-Choose **Archive** when a story no longer needs active review. Archiving removes it from current work but preserves its sources, claims, evidence, and decision history.
-
-Archiving does not delete runtime data.
-
-## End the dashboard session
-
-Choose **Stop dashboard** in the sidebar. This ends only the on-demand web interface.
-
-The scheduler, local database, source state, and drafts remain unchanged.
+Do not bypass isolation, public-network, or account checks. You can finish the shell manually from stored safe sources, or restore assistance and let durable work recover. The local background allowance is informational and does not block automatic research.

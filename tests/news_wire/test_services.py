@@ -23,14 +23,14 @@ def service(tmp_path: Path) -> DashboardService:
     return DashboardService(database)
 
 
-def test_overview_separates_candidates_watches_and_drafts(service: DashboardService) -> None:
+def test_overview_separates_ready_researching_and_content(service: DashboardService) -> None:
     data = service.overview()
     assert data["counts"] == {
-        "candidates": 2,
-        "watches": 1,
-        "draft_ready": 1,
+        "ready": 3,
+        "researching": 0,
+        "content_ready": 1,
         "urgent": 2,
-        "review_now": 3,
+        "review_now": 4,
     }
     assert data["sources"]["degraded"] == 1
     assert data["schedule"]["background_units"] == 3
@@ -66,7 +66,7 @@ def test_review_now_excludes_old_and_completed_work_and_supports_newest_sort(
 
     current = service.list_story_page(window="review_now", sort="priority")
     assert "old-urgent" not in {story["id"] for story in current["stories"]}
-    assert "story-demo-eval-004" not in {story["id"] for story in current["stories"]}
+    assert "story-demo-eval-004" in {story["id"] for story in current["stories"]}
     assert all(story["freshness"] in {"Breaking", "Fresh", "Updated"} for story in current["stories"])
 
     newest = service.list_story_page(window="review_now", sort="newest")["stories"]
@@ -648,6 +648,7 @@ def test_editable_shell_builder_handles_invalid_and_duplicate_snapshot_rows(
             "hosting_publisher_name": "",
             "reporting_origin_name": "",
             "provenance_type": "unknown",
+            "source_provenance": "configured",
         }
     ]
     assert service._create_editable_draft_shell(int(work["id"]), snapshot) == created
@@ -1089,7 +1090,7 @@ def test_settings_alerts_and_evidence_failure_paths(service: DashboardService) -
     assert settings["counts"]["stories"] == 5
     assert settings["counts"]["registered sources"] == 12
     assert settings["counts"]["source items"] == 9
-    assert settings["app_version"] == "0.3.8"
+    assert settings["app_version"] == "0.4.1"
     assert settings["purge_preview"]["operations_count"] == 1
     assert settings["demo_mode"] is True
     assert service.mark_alerts_read() == 6

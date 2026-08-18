@@ -1183,7 +1183,7 @@ def test_unknown_original_discovery_creates_no_fresh_watch(tmp_path: Path) -> No
 
     assert database.one(
         "SELECT status, first_public_at FROM story_cluster WHERE id = ?", (story_id,)
-    ) == {"status": "signal", "first_public_at": "2026-07-23T09:00:00Z"}
+    ) == {"status": "ready", "first_public_at": "2026-07-23T09:00:00Z"}
     assert database.one(
         "SELECT COUNT(*) AS count FROM watch_notice WHERE story_id = ?", (story_id,)
     ) == {"count": 0}
@@ -1448,7 +1448,7 @@ def test_collector_is_incremental_and_creates_verified_candidate(tmp_path: Path)
     assert second.discovered_count == 0
     assert database.one("SELECT COUNT(*) AS count FROM raw_observation") == {"count": 1}
     story = database.one("SELECT status, priority, lane FROM story_cluster")
-    assert story == {"status": "candidate", "priority": "Urgent", "lane": "Open Ecosystem News"}
+    assert story == {"status": "ready", "priority": "Urgent", "lane": "Open Ecosystem News"}
     assert database.one("SELECT evidence_gate, importance_gate FROM candidate") == {
         "evidence_gate": 1,
         "importance_gate": 1,
@@ -1806,6 +1806,7 @@ def test_discovery_source_creates_watch_only_above_both_thresholds(tmp_path: Pat
     override_path = database.paths.config / "sources.local.json"
     overrides = json.loads(override_path.read_text(encoding="utf-8"))
     overrides["sources"]["openai-news"]["monitoring_role"] = "Discovery"
+    overrides["sources"]["openai-news"]["trust_class"] = "research_required"
     override_path.write_text(json.dumps(overrides), encoding="utf-8")
 
     def factory(source: dict[str, object]) -> SafeHttpClient:
@@ -1824,9 +1825,9 @@ def test_discovery_source_creates_watch_only_above_both_thresholds(tmp_path: Pat
 
     Collector(database, client_factory=factory, now=lambda: "2026-07-14T10:00:00Z").scan()
     assert database.one("SELECT status, watch_status FROM story_cluster") == {
-        "status": "watch", "watch_status": "Active"
+        "status": "ready", "watch_status": None
     }
-    assert database.one("SELECT status FROM watch_notice") == {"status": "active"}
+    assert database.one("SELECT COUNT(*) AS count FROM research_attempt") == {"count": 1}
 
 
 def test_interval_filter_and_critical_storage_gate(tmp_path: Path, monkeypatch) -> None:

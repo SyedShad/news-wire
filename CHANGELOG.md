@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Open Source AI News Wire releases**
 
+## [0.4.1] - 2026-08-18
+
+### Added
+
+- Full owner-only ChatGPT Sites dashboard covering overview, review inbox,
+  story evidence, content history, versioned draft editing, exports, sources,
+  schedule and usage, settings, diagnostics, filters, sorting, and pagination.
+- Outbound-only bridge protocol v2 with normalized incremental D1 projections,
+  on-demand historical reads, ten-second heartbeats, and a macOS LaunchAgent.
+- Five-minute idempotent owner commands with completion polling, clear failure
+  results, offline control gating, and a harmless bridge healthcheck.
+
+### Changed
+
+- The hosted launch path now uses only the generated owner password. Google
+  Workspace viewer access is deferred to a later release.
+- Hosted bridge lifecycle reporting distinguishes installed, loaded, running,
+  stopped, and failed states; starting a loaded service now kick-starts it.
+
+### Security
+
+- Signed bridge traffic enforces HMAC timestamps, one-time nonces, replay
+  rejection, payload limits, schema validation, version checks, redaction, and
+  an explicit operation allowlist. The laptop accepts no inbound connection.
+- Unauthenticated pages, APIs, server-rendered payloads, and exports fail closed;
+  remote mutations require both owner authentication and a current heartbeat.
+
+## [0.4.0] - 2026-07-31
+
+### Added
+
+- Explicit trusted and research-required source classes, durable background and draft-refresh research attempts, and source provenance for configured, background-search, and draft-search evidence.
+- One always-available Create content action that creates an editable shell before a fresh bounded source search and packet-only Reddit drafting.
+- Reddit post fields for suggested flair and the exact reminder `Verify rules before posting`.
+
+### Changed
+
+- Active legacy signals, watches, and candidates migrate to Ready. Trusted stories receive an immediate Urgent score floor of 80; research-required stories receive the same floor after any terminal research outcome.
+- Broader AI News now accepts only developments directly concerning privacy, security, or regulation.
+- Candidate, Watch, qualification, approval, manual-override, and lens controls are retired from the dashboard. Archive, withdraw, audit history, and fully manual publishing remain.
+- Local background usage is still accounted for but no longer blocks research.
+
+### Security
+
+- Fresh source discovery runs in a separate secured Codex invocation that permits web search only. Final writing remains packet-only with local and remote tools disabled.
+- Renewed the reviewed Apple-signed bundled Codex pin for `codex-cli 0.146.0-alpha.9.2` and added the secured search path to the release canary.
+- Added the exact TLS-validated West US OpenAI service hostname requested by that signed client during the secured search canary; wildcard and parent-domain grants remain prohibited.
+
 ## [0.3.8] - 2026-07-24
 
 ### Security

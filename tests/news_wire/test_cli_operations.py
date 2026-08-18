@@ -124,8 +124,10 @@ def test_cli_diagnostics_and_purge(tmp_path: Path, capsys) -> None:
 
 class FakeInstaller:
     uninstalled = False
+    last_kwargs = {}
 
-    def __init__(self, _source_root, _paths, **_kwargs):
+    def __init__(self, _source_root, _paths, **kwargs):
+        self.__class__.last_kwargs = kwargs
         self.launcher = Path("/tmp/wire")
         self.release = InstalledRelease("0.2.0-test", Path("/tmp/release"), True, "0.2.0", 2)
 
@@ -154,11 +156,13 @@ def test_cli_application_lifecycle(monkeypatch, tmp_path: Path, capsys) -> None:
     ]) == 0
     assert json.loads(capsys.readouterr().out)["release_id"] == "0.2.0-test"
     assert cli.main(["--data-root", str(root), "app", "list"]) == 0
+    assert FakeInstaller.last_kwargs["allow_unverified_source"] is True
     listed = json.loads(capsys.readouterr().out)[0]
     assert listed["schema_version"] == 2
     assert listed["verified"] is True
     assert listed["provenance"] == "verified"
     assert cli.main(["--data-root", str(root), "app", "rollback", "--release-id", "0.2.0-test"]) == 0
+    assert FakeInstaller.last_kwargs["allow_unverified_source"] is True
     assert "Active release" in capsys.readouterr().out
     with pytest.raises(SystemExit):
         cli.main(["--data-root", str(root), "app", "rollback"])

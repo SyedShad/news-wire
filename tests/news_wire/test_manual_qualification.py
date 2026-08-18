@@ -794,7 +794,7 @@ def test_qualification_creation_claim_states_and_repeat_invalidation(tmp_path) -
     }
 
 
-def test_web_routes_fail_closed_and_show_gate_reasons(tmp_path) -> None:
+def test_web_routes_retire_qualification_and_keep_safe_url_checks(tmp_path) -> None:
     app = create_app(
         data_root=tmp_path / "wire-data",
         auth_required=False,
@@ -808,15 +808,15 @@ def test_web_routes_fail_closed_and_show_gate_reasons(tmp_path) -> None:
     story_id = "story-demo-watch-003"
 
     rendered = client.get(f"/stories/{story_id}")
-    assert b"Evidence and qualification" in rendered.data
-    assert b"Qualification remains locked until one Event source or two independent original reporting publishers are confirmed" in rendered.data
-    assert b"Investigate evidence" in rendered.data
+    assert b"Ready for content" in rendered.data
+    assert b"Create content" in rendered.data
+    assert b"Evidence gate" not in rendered.data
 
     response = client.post(
         f"/stories/{story_id}/qualify",
         data={"csrf_token": token, "reason": "Bypass"},
     )
-    assert response.status_code == 303
+    assert response.status_code == 410
     assert app.config["DATABASE"].one(
         "SELECT status FROM story_cluster WHERE id = ?", (story_id,)
     ) == {"status": "watch"}
@@ -879,10 +879,16 @@ def test_web_evidence_routes_complete_qualification_lifecycle(tmp_path) -> None:
         f"/stories/{story_id}/qualify",
         data={"csrf_token": token, "reason": "Evidence-backed manual decision."},
     )
-    assert response.status_code == 303
-    assert database.one("SELECT status FROM story_cluster WHERE id = ?", (story_id,)) == {
-        "status": "candidate"
-    }
+    assert response.status_code == 410
+    content = client.post(
+        f"/stories/{story_id}/content",
+        data={"csrf_token": token},
+    )
+    assert content.status_code == 303
+    assert database.one(
+        "SELECT kind FROM work_item WHERE story_id = ? AND kind = 'content'",
+        (story_id,),
+    ) == {"kind": "content"}
 
     response = client.post(
         f"/stories/{story_id}/evidence/{evidence_id}/exclude",
@@ -933,5 +939,5 @@ def test_web_reporting_confirmation_records_server_derived_origin_identity(tmp_p
         "origin_status": "confirmed",
     }
     rendered = client.get(f"/stories/{story_id}")
-    assert b"Original reporting: Axios" in rendered.data
-    assert b"Reports or attributes the claim" in rendered.data
+    assert b"Source provenance" in rendered.data
+    assert b"Create content" in rendered.data

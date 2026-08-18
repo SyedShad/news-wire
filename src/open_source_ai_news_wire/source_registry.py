@@ -32,8 +32,9 @@ def synchronize_sources(database: Database) -> int:
                 INSERT INTO source_registry(
                     id, name, family, monitoring_role, url, enabled, health,
                     failure_streak, lag_minutes, detail, adapter, base_hosts_json,
-                    parser_version, minimum_interval_minutes, checked_date, definition_json
-                ) VALUES(?, ?, ?, ?, ?, ?, 'pending', 0, 0, ?, ?, ?, ?, ?, ?, ?)
+                    parser_version, minimum_interval_minutes, checked_date,
+                    definition_json, trust_class
+                ) VALUES(?, ?, ?, ?, ?, ?, 'pending', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     family = excluded.family,
@@ -45,6 +46,7 @@ def synchronize_sources(database: Database) -> int:
                     parser_version = excluded.parser_version,
                     minimum_interval_minutes = excluded.minimum_interval_minutes,
                     checked_date = excluded.checked_date,
+                    trust_class = excluded.trust_class,
                     definition_json = excluded.definition_json
                 """,
                 (
@@ -61,6 +63,7 @@ def synchronize_sources(database: Database) -> int:
                     int(definition["minimum_interval_minutes"]),
                     definition.get("checked_date"),
                     Database.json(definition),
+                    definition["trust_class"],
                 ),
             )
             connection.execute(

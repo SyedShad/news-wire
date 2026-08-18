@@ -37,9 +37,9 @@ def csrf(client) -> str:
     "path, marker",
     [
         ("/", "What changed in AI?"),
-        ("/inbox", "Human decision queue"),
-        ("/stories/story-demo-runtime-001", "Claim ledger"),
-        ("/drafts", "Drafts & history"),
+        ("/inbox", "Fast content queue"),
+        ("/stories/story-demo-runtime-001", "Ready for content"),
+        ("/drafts", "Content & history"),
         ("/drafts/1", "Edit version 1"),
         ("/sources", "Sources & health"),
         ("/schedule", "Schedule & usage"),
@@ -59,20 +59,12 @@ def test_overview_exposes_queue_lag_and_scan_bounds(client) -> None:
     assert b"Next pass" in rendered.data
 
 
-def test_story_exposes_timeline_citation_chain_and_translation_state(app: Flask, client) -> None:
+def test_story_exposes_research_claims_and_source_provenance(app: Flask, client) -> None:
     rendered = client.get("/stories/story-demo-runtime-001")
-    assert b"Cluster timeline" in rendered.data
-    assert b"Citation chain" in rendered.data
-    assert b"Translation state" in rendered.data
-    assert b"No translation was required" in rendered.data
-
-    app.config["DATABASE"].execute(
-        "UPDATE source_item SET language = 'de' WHERE story_id = 'story-demo-runtime-001' AND id = (SELECT MIN(id) FROM source_item WHERE story_id = 'story-demo-runtime-001')"
-    )
-    translated = client.get("/stories/story-demo-runtime-001")
-    assert b"Original-language passages are preserved" in translated.data
-    assert b"No machine-translated passage is stored" in translated.data
-
+    assert b"Research history" in rendered.data
+    assert b"Claims" in rendered.data
+    assert b"Source provenance" in rendered.data
+    assert b"Create content" in rendered.data
 
 def test_security_headers_and_loopback_host_enforcement(client) -> None:
     response = client.get("/")
@@ -125,18 +117,14 @@ def test_state_change_requires_csrf(client) -> None:
 def test_review_action_and_source_toggle_are_functional(app: Flask, client) -> None:
     token = csrf(client)
     response = client.post(
-        "/stories/story-demo-runtime-001/review",
-        data={"csrf_token": token, "action": "approve_neutral", "reason": "Neutral facts first."},
+        "/stories/story-demo-runtime-001/content",
+        data={"csrf_token": token, "guidance": "Keep the facts tight."},
     )
     assert response.status_code == 303
-    story = app.config["DATABASE"].one(
-        "SELECT status FROM story_cluster WHERE id = 'story-demo-runtime-001'"
-    )
-    assert story["status"] == "approved"
-    approved_page = client.get("/stories/story-demo-runtime-001")
-    assert b"Draft generation" in approved_page.data
-    assert b"Starting" in approved_page.data
-    assert b"Approve and create neutral draft" not in approved_page.data
+    assert response.headers["Location"].endswith("/drafts/2")
+    assert app.config["DATABASE"].one(
+        "SELECT kind, status FROM work_item WHERE story_id = 'story-demo-runtime-001' ORDER BY id DESC LIMIT 1"
+    ) == {"kind": "content", "status": "waiting"}
 
     source_before = app.config["DATABASE"].one(
         "SELECT enabled FROM source_registry WHERE id = 'hacker-news'"
@@ -156,18 +144,17 @@ def test_review_action_and_source_toggle_are_functional(app: Flask, client) -> N
     assert b"status-disabled" in source_page.data
 
 
-def test_locked_story_offers_confirmed_manual_override_without_weakening_normal_actions(
+def test_every_active_story_offers_content_and_old_approvals_are_gone(
     app: Flask, client
 ) -> None:
     rendered = client.get("/stories/story-demo-watch-003")
     assert rendered.status_code == 200
-    assert b"Manually approve and create neutral draft" in rendered.data
-    assert b"Manually approve and create open-source lens draft" in rendered.data
-    assert b'data-manual-override-action' in rendered.data
-    assert b'data-manual-confirmation-version' in rendered.data
+    assert b"Create content" in rendered.data
+    assert b"Manually approve" not in rendered.data
+    assert b"open-source lens draft" not in rendered.data
 
     token = csrf(client)
-    missing_confirmation = client.post(
+    obsolete = client.post(
         "/stories/story-demo-watch-003/review",
         data={
             "csrf_token": token,
@@ -175,66 +162,30 @@ def test_locked_story_offers_confirmed_manual_override_without_weakening_normal_
             "confirmation_version": "",
         },
     )
-    assert missing_confirmation.status_code == 303
+    assert obsolete.status_code == 410
+    created = client.post(
+        "/stories/story-demo-watch-003/content",
+        data={"csrf_token": token},
+    )
+    assert created.status_code == 303
     assert app.config["DATABASE"].one(
-        "SELECT status FROM story_cluster WHERE id = 'story-demo-watch-003'"
-    ) == {"status": "watch"}
-    assert app.config["DATABASE"].one(
-        "SELECT COUNT(*) AS count FROM review_action WHERE action LIKE 'manual_approve_%'"
-    )["count"] == 0
-
-    forged = client.post(
-        "/stories/story-demo-watch-003/review",
-        data={
-            "csrf_token": token,
-            "action": "manual_approve_unknown",
-            "confirmation_version": "manual_override_v1",
-        },
-    )
-    assert forged.status_code == 303
-    assert app.config["DATABASE"].one(
-        "SELECT COUNT(*) AS count FROM work_item WHERE kind = 'draft'"
-    )["count"] == 0
-
-    approved = client.post(
-        "/stories/story-demo-watch-003/review",
-        data={
-            "csrf_token": token,
-            "action": "manual_approve_lens",
-            "confirmation_version": "manual_override_v1",
-        },
-    )
-    assert approved.status_code == 303
-    assert approved.headers["Location"].endswith(
-        "/stories/story-demo-watch-003?draft_started=1"
-    )
-    work = app.config["DATABASE"].one(
-        "SELECT payload_json FROM work_item WHERE story_id = 'story-demo-watch-003'"
-    )
-    assert json.loads(work["payload_json"])["approval_basis"] == "manual_override"
-    approved_page = client.get(approved.headers["Location"])
-    assert b"Manually approved" in approved_page.data
+        "SELECT kind FROM work_item WHERE story_id = 'story-demo-watch-003' AND kind = 'content'"
+    ) == {"kind": "content"}
 
 
-def test_manual_override_requires_csrf_and_browser_cancel_contract(app: Flask, client) -> None:
+def test_content_requires_csrf_and_has_no_browser_approval_prompt(app: Flask, client) -> None:
     rejected = client.post(
-        "/stories/story-demo-watch-003/review",
-        data={
-            "action": "manual_approve_neutral",
-            "confirmation_version": "manual_override_v1",
-        },
+        "/stories/story-demo-watch-003/content",
+        data={},
     )
     assert rejected.status_code == 400
     assert app.config["DATABASE"].one(
-        "SELECT COUNT(*) AS count FROM work_item WHERE kind = 'draft'"
+        "SELECT COUNT(*) AS count FROM work_item WHERE kind = 'content'"
     )["count"] == 0
 
     javascript = client.get("/static/app.js")
-    assert b"Qualification requirements have not passed" in javascript.data
-    assert b"Manual approval will create a draft from the currently available sources" in javascript.data
-    assert b"window.confirm" in javascript.data
-    assert b"event.preventDefault()" in javascript.data
-    assert b"manual_override_v1" in javascript.data
+    assert b"Qualification requirements have not passed" not in javascript.data
+    assert b"manual_override_v1" not in javascript.data
 
 
 def test_sources_expose_cursor_failure_and_recovery_state(client) -> None:
@@ -269,7 +220,7 @@ def test_draft_edit_creates_new_version(app: Flask, client) -> None:
     assert b"Open previous version" in comparison.data
 
 
-def test_approval_exposes_live_status_and_retry_of_same_request(tmp_path: Path) -> None:
+def test_content_action_exposes_live_shell_status(tmp_path: Path) -> None:
     dispatched: list[int] = []
     application = create_app(
         data_root=tmp_path / "wire-data",
@@ -281,41 +232,26 @@ def test_approval_exposes_live_status_and_retry_of_same_request(tmp_path: Path) 
     browser = application.test_client()
     token = csrf(browser)
 
-    approved = browser.post(
-        "/stories/story-demo-runtime-001/review",
-        data={"csrf_token": token, "action": "approve_neutral", "reason": "Facts first."},
+    created = browser.post(
+        "/stories/story-demo-runtime-001/content",
+        data={"csrf_token": token, "guidance": "Facts first."},
     )
-    assert approved.status_code == 303
-    assert approved.headers["Location"].endswith(
-        "/stories/story-demo-runtime-001?draft_started=1"
-    )
+    assert created.status_code == 303
+    assert created.headers["Location"].endswith("/drafts/2")
     assert len(dispatched) == 1
     work_id = dispatched[0]
     status = browser.get("/stories/story-demo-runtime-001/draft-status.json")
     assert status.status_code == 200
-    assert status.json["status"] == "starting"
-    assert status.json["active"] is True
+    assert status.json["status"] == "waiting"
+    assert status.json["active"] is False
     assert status.json["draft_url"] == "/drafts/2"
     assert status.json["manual_editor_available"] is True
 
-    application.config["DATABASE"].execute(
-        "UPDATE work_item SET status = 'failed', attempt_count = 2, last_error_class = 'codex_timeout' WHERE id = ?",
-        (work_id,),
-    )
-    failed_page = browser.get("/stories/story-demo-runtime-001")
-    assert b"Failed" in failed_page.data
-    assert b"Retry generation" in failed_page.data
-    retried = browser.post(
-        "/stories/story-demo-runtime-001/draft/retry",
-        data={"csrf_token": token},
-    )
-    assert retried.status_code == 303
-    assert dispatched == [work_id, work_id]
     assert application.config["DATABASE"].one(
-        "SELECT COUNT(*) AS count FROM work_item WHERE kind = 'draft'"
+        "SELECT COUNT(*) AS count FROM work_item WHERE kind = 'content'"
     )["count"] == 1
     assert application.config["DATABASE"].one(
-        "SELECT COUNT(*) AS count FROM review_action WHERE action = 'approve_neutral'"
+        "SELECT COUNT(*) AS count FROM review_action WHERE action = 'create_content'"
     )["count"] == 1
 
 
@@ -338,7 +274,7 @@ def test_draft_polling_opens_only_a_continuously_visible_story_tab(client) -> No
     assert b"!draftTabWasHidden && !document.hidden" in javascript.data
 
 
-def test_fast_completed_approval_still_marks_original_tab_for_auto_open(tmp_path: Path) -> None:
+def test_fast_completed_content_returns_the_immediate_shell(tmp_path: Path) -> None:
     holder: dict[str, object] = {}
 
     def complete_immediately(work_item_id: int) -> None:
@@ -380,23 +316,22 @@ def test_fast_completed_approval_still_marks_original_tab_for_auto_open(tmp_path
     browser = application.test_client()
     token = csrf(browser)
 
-    approved = browser.post(
-        "/stories/story-demo-runtime-001/review",
-        data={"csrf_token": token, "action": "approve_neutral"},
+    created = browser.post(
+        "/stories/story-demo-runtime-001/content",
+        data={"csrf_token": token},
     )
-    rendered = browser.get(approved.headers["Location"])
-
-    assert b'data-draft-active="false"' in rendered.data
-    assert b'data-draft-auto-open="true"' in rendered.data
-    assert b"Draft ready" in rendered.data
-    assert b'href="/drafts/3"' in rendered.data
+    assert created.status_code == 303
+    rendered = browser.get(created.headers["Location"])
+    assert rendered.status_code == 200
+    assert b"Immediate draft" not in rendered.data
+    assert b"Edit version" in rendered.data
 
 
 def test_drafts_history_shows_failed_request_without_draft(app: Flask, client) -> None:
     token = csrf(client)
     client.post(
-        "/stories/story-demo-runtime-001/review",
-        data={"csrf_token": token, "action": "approve_neutral"},
+        "/stories/story-demo-runtime-001/content",
+        data={"csrf_token": token},
     )
     app.config["DATABASE"].execute(
         "UPDATE work_item SET status = 'failed', last_error_class = 'codex_timeout' WHERE story_id = 'story-demo-runtime-001'"
@@ -409,7 +344,7 @@ def test_drafts_history_shows_failed_request_without_draft(app: Flask, client) -
 
 def test_draft_exposes_copy_to_clipboard_output(client) -> None:
     rendered = client.get("/drafts/1")
-    assert b"Copy brief" in rendered.data
+    assert b"Copy post" in rendered.data
     assert b"data-copy-text=" in rendered.data
     assert b"## Sources" in rendered.data
     assert b"Correction status" in rendered.data
@@ -600,7 +535,7 @@ def test_missing_resources_and_invalid_actions_fail_safely(app: Flask, client) -
         "/stories/story-demo-watch-003/review",
         data={"csrf_token": token, "action": "approve_neutral"},
     )
-    assert invalid_review.status_code == 303
+    assert invalid_review.status_code == 410
     assert app.config["DATABASE"].one(
         "SELECT status FROM story_cluster WHERE id = 'story-demo-watch-003'"
     )["status"] == "watch"
@@ -649,8 +584,7 @@ def test_external_story_links_reject_active_schemes(app: Flask, client) -> None:
 
 def test_neutral_editor_does_not_expose_lens_field(client) -> None:
     rendered = client.get("/drafts/1")
-    assert b"Neutral mode" in rendered.data
-    assert b"separate eligible lens approval" in rendered.data
+    assert b"Open-source lens" not in rendered.data
     assert b'name="lens" value=""' in rendered.data
 
 

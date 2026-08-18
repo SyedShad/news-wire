@@ -6,20 +6,25 @@ Open Source AI News Wire uses semantic application versions and explicit databas
 
 | Item | Value |
 |---|---|
-| Application | 0.3.8 |
-| Database schema | 7 |
-| Release tag | [`v0.3.8`](https://github.com/SyedShad/open-source-ai-news-wire/releases/tag/v0.3.8) |
-| Validated source commit | `513ac0358d94297825c6a6da04e856880a2d351b` |
-| Distribution | Private source repository; no prebuilt binary attached |
+| Application | 0.4.1 |
+| Database schema | 8 |
+| Release tag | Pending local validation and source release |
+| Validated source commit | Bound by the local validation report at install time |
+| Distribution | Owner source repository; no prebuilt binary attached |
 
-Release 0.3.8 renews the exact identity approval for the current Apple-signed ChatGPT-bundled Codex while keeping the application usable when assistance cannot run. It does not weaken the signature, path, broker, sandbox, or no-tools controls.
+Release 0.4.1 adds the owner-only online dashboard and verified outbound laptop
+bridge to the v0.4 trust-and-status workflow while keeping security checks and
+final publication manual.
 
 Highlights:
 
-- The exact version, SHA-256, and CDHash are pinned to a freshly verified ChatGPT-bundled Codex 0.146.0-alpha.3.
-- A changed executable continues to fail closed and requires a new release review.
-- One current release-bound assistance check controls enablement, generation, dashboard status, and readiness.
-- Every approval retains an editable deterministic fallback shell.
+- Trusted detections receive an immediate Urgent floor; research-required detections research automatically and receive the same floor at any terminal outcome.
+- Every active story has one Create content action that creates a shell before its own fresh search.
+- Broader AI News is restricted to privacy, security, and regulation.
+- Reddit output follows one source-linked style and remains manually edited and published.
+- The reviewed identity pin is `codex-cli 0.146.0-alpha.9.2`; source discovery permits only web search, and final writing permits no tools.
+- The ChatGPT Sites frontend uses a redacted hosted read projection and expiring
+  relay queues; SQLite and every canonical mutation remain on the laptop.
 
 See the complete [changelog](../../CHANGELOG.md) for the file-level release record.
 
@@ -62,19 +67,40 @@ uv run open-source-ai-news-wire sources health
 uv run open-source-ai-news-wire dashboard
 ```
 
-The migration operates on the configured local data root. The application does not create a backup before migration. Read the release notes and confirm the intended schema before updating.
+The migration operates on the configured local data root. The application does not create a backup before migration. Pause scheduling and snapshot the database before moving to schema 8, then run a fresh isolation/search canary before resuming assistance.
 
 If the schedule was installed with the checkout's `.venv/bin/open-source-ai-news-wire` launcher, `uv sync --locked` updates that same environment and no schedule reinstall is normally required.
 
 ## Immutable maintainer installs
 
-The application also supports immutable local releases with an atomic current-version switch. That path requires a clean commit reachable from private `main` and a validation report bound to the exact commit.
+The application also supports immutable local releases with an atomic current-version switch. That path requires a clean commit reachable from owner `main` and a validation report bound to the exact commit.
 
 It is a release-maintainer workflow, not the everyday installation path. See [Updates and rollback](../operator-guide.md#updates-and-rollback) for the commands and release safeguards.
 
 Rollback is allowed only when the selected installed release supports the current database schema. Runtime data is never automatically rolled back or deleted.
 
 ## News Wire release history
+
+### 0.4.1 - Owner-only online dashboard
+
+- Added full hosted parity for overview, inbox, story and evidence detail,
+  drafts and version history, exports, sources, schedule and usage, settings,
+  diagnostics, filtering, sorting, and pagination.
+- Added outbound-only bridge protocol v2 with normalized projections,
+  on-demand historical reads, ten-second polling, replay protection, payload
+  limits, version checks, idempotent commands, and five-minute expiry.
+- Added reliable bridge LaunchAgent lifecycle reporting and restart behavior.
+- Kept the local loopback dashboard as the emergency operator fallback.
+
+### 0.4.0 - Fast, ungated content workflow
+
+- Added explicit source trust classes and durable background and draft-refresh research attempts.
+- Applied an Urgent review-score floor of 80 immediately for trusted sources and after every terminal research outcome for other sources.
+- Replaced qualification and approval controls with one Create content action and an immediate editable shell.
+- Added a separate fresh web-search-only source pass before packet-only Reddit writing.
+- Restricted Broader AI News to privacy, security, and regulation.
+- Migrated active signals, watches, and candidates to Ready while preserving inactive and historical records.
+- Renewed the signed Codex identity pin and isolation/search canary for `codex-cli 0.146.0-alpha.9.2`.
 
 ### 0.3.8 - Bundled Codex identity refresh
 
@@ -142,7 +168,8 @@ Rollback is allowed only when the selected installed release supports the curren
 ## What a release does not include
 
 - Runtime news data or drafts.
-- A cloud service or hosted dashboard.
+- A hosted canonical corpus, inbound laptop listener, or cloud execution of
+  collection, research, drafting, or editorial mutations.
 - A backup or synchronization service.
 - An OpenAI API key or paid fallback.
 - Automatic notification activation.

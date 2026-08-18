@@ -229,7 +229,7 @@ def test_v4_migration_requires_reporting_origin_review_and_preserves_draft(tmp_p
         "SELECT DISTINCT origin_status FROM evidence_source ORDER BY origin_status"
     ) == [{"origin_status": "needs_review"}]
     assert database.one("SELECT evidence_gate FROM candidate") == {"evidence_gate": 0}
-    assert database.one("SELECT status FROM story_cluster") == {"status": "signal"}
+    assert database.one("SELECT status FROM story_cluster") == {"status": "ready"}
     assert database.one("SELECT status, body FROM draft") == {
         "status": "Needs Review",
         "body": "Preserve me",
@@ -337,7 +337,7 @@ def test_v6_migration_adds_dynamic_ranking_state_without_reusing_generic_update_
     assert story["importance_score"] > 0
     assert story["material_updated_at"] is None
     assert story["ingestion_context"] == "legacy"
-    assert story["priority"] == "Standard"
+    assert story["priority"] == "Urgent"
     assert story["priority_score"] == 88
     assert story["freshness"] == "Breaking"
     assert database.one("SELECT COUNT(*) AS count FROM discovery_lead") == {"count": 0}
@@ -468,7 +468,7 @@ def test_v7_migration_versions_revisions_disables_assistance_and_repairs_only_ex
         "timestamp_status": "legacy_assumed",
     }
     assert database.get_state("assistance_enabled") == "false"
-    assert database.get_state("assistance_isolation_gate") == "requires_0.3.6_revalidation"
+    assert database.get_state("assistance_isolation_gate") == "requires_0.4.0_revalidation"
     repair = database.one(
         "SELECT detail_json FROM diagnostic_event WHERE event_type = 'false_material_update_repair'"
     )
@@ -476,24 +476,40 @@ def test_v7_migration_versions_revisions_disables_assistance_and_repairs_only_ex
         "story-debeeae2b4fa78a37fda"
     ]
     work = database.query(
-        "SELECT id, status, last_error_class FROM work_item ORDER BY id"
+        "SELECT id, status, last_error_class FROM work_item WHERE kind = 'draft' ORDER BY id"
     )
     assert [row["status"] for row in work] == [
-        "needs_reapproval",
-        "needs_reapproval",
-        "needs_reapproval",
-        "needs_reapproval",
-        "needs_reapproval",
-        "pending",
+        "cancelled",
+        "cancelled",
+        "cancelled",
+        "cancelled",
+        "cancelled",
+        "cancelled",
         "completed",
         "cancelled",
-        "needs_reapproval",
+        "cancelled",
     ]
     assert all(
-        row["last_error_class"] == "legacy_approval_snapshot_incomplete"
-        for row in work[:5]
+        row["last_error_class"] == "obsolete_editorial_gate"
+        for row in [*work[:6], work[8]]
     )
-    assert all(row["last_error_class"] is None for row in work[5:])
+    assert work[6]["last_error_class"] is None
+    assert work[7]["last_error_class"] is None
+    migrated_research = database.one(
+        """
+        SELECT ra.purpose, ra.status, ra.error_class
+        FROM research_attempt ra
+        WHERE ra.story_id = 'story-670cb7d55f310b539bbc'
+        """
+    )
+    assert migrated_research == {
+        "purpose": "background",
+        "status": "unavailable",
+        "error_class": "migration_research_unavailable",
+    }
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM work_item WHERE kind = 'source_research'"
+    ) == {"count": 0}
     quarantine = database.one(
         "SELECT detail_json FROM diagnostic_event WHERE event_type = 'legacy_draft_snapshot_quarantine'"
     )

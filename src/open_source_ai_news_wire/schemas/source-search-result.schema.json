@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.open-source-ai-news-wire/schemas/source-search-result-v1.json",
+  "type": "object",
+  "required": ["schema_version", "operation", "results", "notes"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "operation": {"type": "string", "const": "source_search"},
+    "results": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["url", "title", "publisher", "published_at", "snippet"],
+        "properties": {
+          "url": {"type": "string", "maxLength": 2048},
+          "title": {"type": "string", "maxLength": 500},
+          "publisher": {"type": "string", "maxLength": 160},
+          "published_at": {"type": "string", "maxLength": 40},
+          "snippet": {"type": "string", "maxLength": 1000}
+        },
+        "additionalProperties": false
+      }
+    },
+    "notes": {"type": "string", "maxLength": 1000}
+  },
+  "additionalProperties": false
+}

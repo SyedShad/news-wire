@@ -64,6 +64,20 @@ def test_connect_parser_accepts_only_exact_reviewed_hosts() -> None:
         "sdmntprcentralus.oaiusercontent.com",
         443,
     )
+    search_region = parse_connect_request(
+        _connect("sdmntprwestus.oaiusercontent.com")
+    )
+    assert (search_region.host, search_region.port) == (
+        "sdmntprwestus.oaiusercontent.com",
+        443,
+    )
+    search_fallback = parse_connect_request(
+        _connect("sdmntpreastus2.oaiusercontent.com")
+    )
+    assert (search_fallback.host, search_fallback.port) == (
+        "sdmntpreastus2.oaiusercontent.com",
+        443,
+    )
 
     cases = (
         (b"GET / HTTP/1.1\r\nHost: chatgpt.com\r\n\r\n", "malformed"),
@@ -247,11 +261,11 @@ def test_binary_identity_checks_signature_team_version_hash_and_cdhash(
 def test_release_pin_accepts_only_the_reviewed_0146_codex_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    reviewed_version = "codex-cli 0.146.0-alpha.3"
+    reviewed_version = "codex-cli 0.146.0-alpha.9.2"
     reviewed_sha256 = (
-        "01b89e3cb5b6759c64bc7b47f3f659100e74d743750106ea586b041981f03519"
+        "68474c6192406b8a0278243c8283b87a84798a69fb498f30c3715861f8082542"
     )
-    reviewed_cdhash = "e7be866d785c0388ea7e05d0a4ae5b729f94dbe8"
+    reviewed_cdhash = "dce9780d114a670768798d0dc0de4a96b422c309"
     assert assistance.EXPECTED_CODEX_VERSION == reviewed_version
     assert assistance.EXPECTED_CODEX_SHA256 == reviewed_sha256
     assert assistance.EXPECTED_CODEX_CDHASH == reviewed_cdhash
@@ -285,7 +299,7 @@ def test_release_pin_accepts_only_the_reviewed_0146_codex_identity(
         )
 
     assert verify_codex_identity(codex, command_runner=runner).version.endswith(
-        "0.146.0-alpha.3"
+        "0.146.0-alpha.9.2"
     )
 
     for field, invalid in (

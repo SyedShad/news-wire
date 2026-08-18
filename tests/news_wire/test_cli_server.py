@@ -23,7 +23,8 @@ def test_cli_init_seed_and_status(tmp_path: Path, capsys) -> None:
     capsys.readouterr()
     assert cli.main(["--data-root", str(root), "status"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["overview"]["candidates"] == 2
+    assert payload["overview"]["ready"] == 3
+    assert payload["overview"]["content_ready"] == 1
     assert payload["schedule"]["background_units"] == 3
 
 

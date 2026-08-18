@@ -73,10 +73,10 @@ You can also open the Overview and choose **Queue scout run**. A second trigger 
 
 After the scan finishes:
 
-1. Open **Review inbox**.
-2. Keep the default **Review Now · 24 hours** window.
-3. Confirm that current stories show freshness, review score, impact, attention, and verification separately.
-4. Open a story to review its claims and sources.
+1. Open **News inbox**.
+2. Confirm that current stories appear as Ready, Researching, or Content ready.
+3. Check that trust status, research history, score-floor explanation, and source provenance are visible.
+4. Open a story and confirm it has one available **Create content** action.
 
 ## 6. Install the local schedule
 
@@ -101,9 +101,9 @@ uv run open-source-ai-news-wire schedule status
 
 Pausing the schedule does not stop an already running scan and does not remove collected data.
 
-## 7. Enable ChatGPT drafting
+## 7. Enable ChatGPT search and drafting
 
-This step is optional. Collection, review, evidence work, and manual draft editing work without it.
+This step is optional. Collection, automatic terminal-state scoring, and manual shell editing work without it.
 
 Make sure the ChatGPT application is installed, Codex access is available, and the account is signed in. Then run:
 
@@ -113,9 +113,9 @@ uv run open-source-ai-news-wire assistance status
 uv run open-source-ai-news-wire assistance enable
 ```
 
-Enablement succeeds only when the current release-bound check passes. The check expires after 24 hours and may be renewed by the worker within its background allowance.
+Enablement succeeds only when the current release-bound identity, no-tools writing, and web-search-only discovery checks pass. The check expires after 24 hours.
 
-If assistance is unavailable, a human draft approval still creates an editable local shell immediately. The dashboard shows the specific waiting or failure condition.
+If assistance is unavailable, **Create content** still creates an editable local shell immediately. The dashboard shows the specific search or writing condition; the user can complete the shell manually.
 
 ## 8. Keep notifications in shadow mode
 

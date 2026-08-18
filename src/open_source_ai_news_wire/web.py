@@ -113,8 +113,15 @@ def create_app(
         def generate() -> None:
             try:
                 from .assistance import run_assistance_work
+                from .research import run_content_pipeline
 
-                run_assistance_work(database, work_item_id)
+                work = database.one(
+                    "SELECT kind FROM work_item WHERE id = ?", (work_item_id,)
+                )
+                if work and work["kind"] == "content":
+                    run_content_pipeline(database, work_item_id)
+                else:
+                    run_assistance_work(database, work_item_id)
             except Exception:
                 # The assistance layer records a safe, user-visible terminal or
                 # retry state. Never let a daemon thread failure stop Flask.
@@ -399,20 +406,40 @@ def create_app(
 
     @app.post("/stories/<story_id>/qualify")
     def qualify_story(story_id: str) -> Response:
+        if not database.one("SELECT 1 FROM story_cluster WHERE id = ?", (story_id,)):
+            abort(404)
+        abort(
+            410,
+            description="Qualification is obsolete in v0.4.0. Every active story can use Create content.",
+        )
+
+    @app.post("/stories/<story_id>/content")
+    def create_story_content(story_id: str) -> Response:
         try:
-            service.qualify_story(story_id, request.form.get("reason", ""))
-        except (ValueError, LookupError) as error:
+            _work_id, draft_id = service.create_content(
+                story_id, request.form.get("guidance", "")
+            )
+        except LookupError:
+            abort(404)
+        except ValueError as error:
             flash(str(error), "error")
-        else:
-            flash("Story qualified as a candidate. Draft approval is now available.", "success")
-        return redirect(url_for("story_detail", story_id=story_id), code=303)
+            return redirect(url_for("story_detail", story_id=story_id), code=303)
+        flash(
+            "Editable content is ready. A fresh source search and Reddit draft are running now.",
+            "success",
+        )
+        return redirect(url_for("draft_detail", draft_id=draft_id), code=303)
 
     @app.post("/stories/<story_id>/review")
     def review_story(story_id: str) -> Response:
         action = request.form.get("action", "")
+        if action not in {"archive", "withdraw"}:
+            abort(
+                410,
+                description="Content approvals are obsolete in v0.4.0. Use Create content.",
+            )
         reason = request.form.get("reason", "")
         confirmation_version = request.form.get("confirmation_version", "")
-        draft_started = False
         try:
             status = service.review(
                 story_id,
@@ -423,19 +450,12 @@ def create_app(
         except (ValueError, LookupError) as error:
             flash(str(error), "error")
         else:
-            draft_started = status == "approved"
             labels = {
-                "approved": "Approval saved. Draft generation is starting now.",
                 "archived": "Story archived. Evidence and history were preserved.",
                 "withdrawn": "Story withdrawn. Its audit history was preserved.",
-                "candidate": "Story accepted as a candidate.",
             }
             flash(labels.get(status, "Review action saved."), "success")
-        destination = url_for(
-            "story_detail",
-            story_id=story_id,
-            **({"draft_started": "1"} if draft_started else {}),
-        )
+        destination = url_for("story_detail", story_id=story_id)
         return redirect(destination, code=303)
 
     @app.get("/stories/<story_id>/draft-status.json")
@@ -500,6 +520,8 @@ def create_app(
                 request.form.get("metadata", ""),
                 request.form.get("body", ""),
                 request.form.get("lens", ""),
+                request.form.get("suggested_flair", ""),
+                request.form.get("subreddit_reminder", "Verify rules before posting"),
             )
         except (ValueError, LookupError) as error:
             flash(str(error), "error")

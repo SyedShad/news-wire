@@ -70,7 +70,7 @@ def load_source_definitions(paths: RuntimePaths) -> list[dict[str, Any]]:
     tracked = _read_packaged_json("definitions", "sources.json")
     local = _local_json(paths.config / "sources.local.json")
     definitions = tracked.get("sources")
-    if tracked.get("schema_version") != 1 or not isinstance(definitions, list):
+    if tracked.get("schema_version") != 2 or not isinstance(definitions, list):
         raise InvalidConfiguration("Unsupported source-registry schema")
     overrides = local.get("sources", {})
     if overrides and not isinstance(overrides, dict):
@@ -88,6 +88,10 @@ def load_source_definitions(paths: RuntimePaths) -> list[dict[str, Any]]:
         if override and not isinstance(override, dict):
             raise InvalidConfiguration(f"Invalid local source override: {source_id}")
         merged = _merge(item, override)
+        if merged.get("trust_class") not in {"trusted", "research_required"}:
+            raise InvalidConfiguration(
+                f"Source {source_id} requires trust_class trusted or research_required"
+            )
         merged["checked_date"] = tracked.get("checked_date")
         result.append(merged)
     unknown = set(overrides) - seen if isinstance(overrides, dict) else set()

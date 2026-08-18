@@ -15,7 +15,7 @@ from typing import Any
 from .config import RuntimePaths, ensure_runtime_layout
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def _exact_signature_records(value: object, *, source: bool) -> bool:
@@ -567,6 +567,39 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         """,
         "CREATE INDEX idx_source_revision_identity ON source_revision(source_id, external_id, revision_number DESC)",
         "CREATE INDEX idx_story_revisions ON story_cluster(story_revision, material_revision)",
+    ),
+    8: (
+        "ALTER TABLE source_registry ADD COLUMN trust_class TEXT NOT NULL DEFAULT 'research_required'",
+        "ALTER TABLE story_cluster ADD COLUMN organic_score INTEGER NOT NULL DEFAULT 0 CHECK(organic_score BETWEEN 0 AND 100)",
+        "ALTER TABLE story_cluster ADD COLUMN review_score INTEGER NOT NULL DEFAULT 0 CHECK(review_score BETWEEN 0 AND 100)",
+        "ALTER TABLE story_cluster ADD COLUMN priority_floor_applied INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE story_cluster ADD COLUMN source_trust_state TEXT NOT NULL DEFAULT 'research_required'",
+        "ALTER TABLE story_cluster ADD COLUMN research_status TEXT NOT NULL DEFAULT 'queued'",
+        "ALTER TABLE story_cluster ADD COLUMN verification_notice TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE draft ADD COLUMN suggested_flair TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE draft ADD COLUMN subreddit_reminder TEXT NOT NULL DEFAULT 'Verify rules before posting'",
+        "ALTER TABLE draft ADD COLUMN search_attempt_id INTEGER REFERENCES research_attempt(id)",
+        "ALTER TABLE evidence_source ADD COLUMN research_attempt_id INTEGER REFERENCES research_attempt(id)",
+        "ALTER TABLE evidence_source ADD COLUMN source_provenance TEXT NOT NULL DEFAULT 'configured'",
+        """
+        CREATE TABLE research_attempt (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            story_id TEXT NOT NULL REFERENCES story_cluster(id) ON DELETE CASCADE,
+            purpose TEXT NOT NULL CHECK(purpose IN ('background', 'draft_refresh')),
+            status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'complete', 'partial', 'failed', 'unavailable')),
+            query TEXT NOT NULL DEFAULT '',
+            result_count INTEGER NOT NULL DEFAULT 0 CHECK(result_count BETWEEN 0 AND 3),
+            error_class TEXT,
+            detail TEXT NOT NULL DEFAULT '',
+            started_at TEXT,
+            completed_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX idx_research_attempt_story ON research_attempt(story_id, purpose, created_at DESC)",
+        "CREATE INDEX idx_research_attempt_status ON research_attempt(status, purpose, created_at)",
+        "CREATE INDEX idx_evidence_source_attempt ON evidence_source(research_attempt_id)",
     ),
 }
 
@@ -1172,6 +1205,132 @@ class Database:
                     for key, value in (
                         ("assistance_enabled", "false"),
                         ("assistance_isolation_gate", "requires_0.3.6_revalidation"),
+                        ("assistance_unavailable_reason", "security_revalidation"),
+                    ):
+                        connection.execute(
+                            """
+                            INSERT INTO app_state(key, value, updated_at) VALUES(?, ?, ?)
+                            ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+                            """,
+                            (key, value, now),
+                        )
+                if version == 7:
+                    now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                    connection.execute(
+                        """
+                        UPDATE source_registry
+                        SET trust_class = CASE
+                            WHEN monitoring_role IN ('Event', 'Reporting') OR family = 'Research'
+                                THEN 'trusted'
+                            ELSE 'research_required'
+                        END
+                        """
+                    )
+                    connection.execute(
+                        """
+                        UPDATE story_cluster
+                        SET organic_score = priority_score,
+                            source_trust_state = CASE WHEN EXISTS (
+                                SELECT 1 FROM source_item si
+                                JOIN source_registry sr ON sr.id = si.source_registry_id
+                                WHERE si.story_id = story_cluster.id
+                                  AND sr.trust_class = 'trusted'
+                            ) THEN 'trusted' ELSE 'research_required' END
+                        """
+                    )
+                    connection.execute(
+                        """
+                        UPDATE story_cluster
+                        SET status = 'ready'
+                        WHERE status IN ('signal', 'watch', 'candidate')
+                        """
+                    )
+                    connection.execute(
+                        """
+                        UPDATE story_cluster
+                        SET research_status = CASE
+                                WHEN source_trust_state = 'trusted' THEN 'not_needed'
+                                ELSE 'unavailable'
+                            END,
+                            verification_notice = CASE
+                                WHEN source_trust_state = 'trusted' THEN ''
+                                ELSE 'Verify this yourself'
+                            END,
+                            priority_floor_applied = CASE
+                                WHEN status NOT IN ('archived', 'withdrawn') THEN 1
+                                ELSE 0
+                            END,
+                            review_score = CASE
+                                WHEN status NOT IN ('archived', 'withdrawn')
+                                    THEN MAX(organic_score, 80)
+                                ELSE organic_score
+                            END,
+                            priority_score = CASE
+                                WHEN status NOT IN ('archived', 'withdrawn')
+                                    THEN MAX(organic_score, 80)
+                                ELSE organic_score
+                            END,
+                            priority = CASE
+                                WHEN status NOT IN ('archived', 'withdrawn') THEN 'Urgent'
+                                ELSE priority
+                            END,
+                            watch_status = CASE
+                                WHEN status = 'ready' THEN NULL ELSE watch_status
+                            END,
+                            watch_expires_at = CASE
+                                WHEN status = 'ready' THEN NULL ELSE watch_expires_at
+                            END,
+                            updated_at = ?
+                        """,
+                        (now,),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO research_attempt(
+                            story_id, purpose, status, result_count, error_class,
+                            detail, started_at, completed_at, created_at, updated_at
+                        )
+                        SELECT id, 'background', 'unavailable', 0,
+                               'migration_research_unavailable',
+                               'Story predates automatic research; verify it yourself.',
+                               ?, ?, ?, ?
+                        FROM story_cluster
+                        WHERE status NOT IN ('archived', 'withdrawn')
+                          AND source_trust_state = 'research_required'
+                        """,
+                        (now, now, now, now),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE work_item
+                        SET status = 'cancelled', last_error_class = 'obsolete_editorial_gate',
+                            updated_at = ?
+                        WHERE kind = 'draft'
+                          AND status NOT IN ('completed', 'cancelled', 'failed')
+                        """,
+                        (now,),
+                    )
+                    if connection.execute(
+                        "SELECT 1 FROM story_cluster LIMIT 1"
+                    ).fetchone():
+                        connection.execute(
+                            """
+                            INSERT INTO diagnostic_event(level, event_type, message, created_at, detail_json)
+                            VALUES('info', 'schema8_ungated_workflow', ?, ?, ?)
+                            """,
+                            (
+                                "Migrated active stories to the trust-and-status workflow.",
+                                now,
+                                self.json({
+                                    "active_status": "ready",
+                                    "priority_floor": 80,
+                                    "legacy_draft_work": "cancelled",
+                                }),
+                            ),
+                        )
+                    for key, value in (
+                        ("assistance_enabled", "false"),
+                        ("assistance_isolation_gate", "requires_0.4.0_revalidation"),
                         ("assistance_unavailable_reason", "security_revalidation"),
                     ):
                         connection.execute(

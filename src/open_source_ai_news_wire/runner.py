@@ -19,6 +19,7 @@ from .assistance import (
 from .evidence import EvidenceEnricher
 from .notifications import NativeNotifier
 from .pilot import PilotManager
+from .research import SourceResearchService
 from .scheduler import next_scheduled_run
 from .storage import Database
 
@@ -114,6 +115,7 @@ class Worker:
                     next_scheduled_run().isoformat().replace("+00:00", "Z"),
                     now_value,
                 )
+            self._process_source_research(deadline)
             self._maintain_watches()
             self._process_evidence(deadline)
             # A draft may need two five-minute Codex attempts plus its retry
@@ -129,6 +131,14 @@ class Worker:
 
     def _process_evidence(self, deadline: datetime) -> None:
         EvidenceEnricher(self.database).process_batch(limit=20, deadline=deadline)
+
+    def _process_source_research(self, deadline: datetime) -> None:
+        service = SourceResearchService(self.database)
+        for _ in range(20):
+            if datetime.now(UTC) >= deadline - timedelta(seconds=31):
+                return
+            if service.process_next(deadline=deadline) is None:
+                return
 
     def _process_assistance(self, *, drafts_only: bool = False) -> None:
         if self.database.get_state("assistance_enabled", "false") != "true":

@@ -1,0 +1,48 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1784881494943,
+      "tag": "0000_slippery_ted_forrester",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1784881532697,
+      "tag": "0001_adorable_thaddeus_ross",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1785769104083,
+      "tag": "0002_sudden_nomad",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1785772779042,
+      "tag": "0003_dark_master_mold",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1787039007439,
+      "tag": "0004_rare_ken_ellis",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1787039308887,
+      "tag": "0005_flawless_colleen_wing",
+      "breakpoints": true
+    }
+  ]
+}

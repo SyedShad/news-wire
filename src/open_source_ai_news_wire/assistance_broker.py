@@ -36,9 +36,11 @@ REVIEWED_CODEX_HOSTS = frozenset(
         # Keep this list explicit: parent-domain and wildcard access are not
         # permitted by the broker policy.
         "sdmntprcentralus.oaiusercontent.com",
+        "sdmntpreastus2.oaiusercontent.com",
         "sdmntprnorthcentralus.oaiusercontent.com",
         "sdmntprsoutheastus3.oaiusercontent.com",
         "sdmntprsouthcentralus.oaiusercontent.com",
+        "sdmntprwestus.oaiusercontent.com",
         "sdmntprwestus3.oaiusercontent.com",
     }
 )
@@ -149,7 +151,9 @@ def parse_connect_request(
         raise BrokerError("broker_connect_malformed", "Host header does not match CONNECT authority")
     reviewed = {item.casefold().rstrip(".") for item in allowed_hosts}
     if host not in reviewed:
-        raise BrokerError("broker_host_blocked", "destination host is not reviewed")
+        raise BrokerError(
+            "broker_host_blocked", f"destination host is not reviewed: {host}"
+        )
     return ConnectRequest(host=host, port=port, remainder=data[boundary + 4 :])
 
 
@@ -304,7 +308,7 @@ class _ConnectHandler(socketserver.BaseRequestHandler):
                 upstream.sendall(request.remainder)
             broker._relay(client, upstream)
         except BrokerError as error:
-            broker._record_failure(error.code)
+            broker._record_failure(error.code, str(error))
             try:
                 client.sendall(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
             except OSError:
@@ -342,6 +346,7 @@ class ConnectBroker:
         self._lock = threading.Lock()
         self._sockets: set[socket.socket] = set()
         self._failure_code = ""
+        self._failure_detail = ""
 
     @property
     def endpoint(self) -> tuple[str, int]:
@@ -359,6 +364,11 @@ class ConnectBroker:
     def failure_code(self) -> str:
         with self._lock:
             return self._failure_code
+
+    @property
+    def failure_detail(self) -> str:
+        with self._lock:
+            return self._failure_detail
 
     def start(self) -> "ConnectBroker":
         if self._server is not None:
@@ -400,13 +410,14 @@ class ConnectBroker:
     def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
         self.stop()
 
-    def _record_failure(self, code: str) -> None:
+    def _record_failure(self, code: str, detail: str = "") -> None:
         with self._lock:
             if not self._failure_code or (
                 self._failure_code in TRANSIENT_BROKER_FAILURES
                 and code not in TRANSIENT_BROKER_FAILURES
             ):
                 self._failure_code = code
+                self._failure_detail = detail[:500]
 
     def _track(self, connection: socket.socket) -> None:
         with self._lock:

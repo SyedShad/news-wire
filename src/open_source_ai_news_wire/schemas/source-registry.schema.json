@@ -1,21 +1,22 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://local.open-source-ai-news-wire/schemas/source-registry-v1.json",
+  "$id": "https://local.open-source-ai-news-wire/schemas/source-registry-v2.json",
   "type": "object",
   "required": ["schema_version", "checked_date", "sources"],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "checked_date": {"type": "string", "format": "date"},
     "sources": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "name", "family", "monitoring_role", "adapter", "url", "base_hosts", "enabled_by_default", "parser_version", "minimum_interval_minutes"],
+        "required": ["id", "name", "family", "monitoring_role", "trust_class", "adapter", "url", "base_hosts", "enabled_by_default", "parser_version", "minimum_interval_minutes"],
         "properties": {
           "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$"},
           "name": {"type": "string", "minLength": 1},
           "family": {"type": "string", "minLength": 1},
           "monitoring_role": {"enum": ["Event", "Reporting", "Discovery"]},
+          "trust_class": {"enum": ["trusted", "research_required"]},
           "adapter": {"enum": ["feed", "json", "html_listing", "sitemap", "github_release", "research_feed", "anthropic_newsroom", "meta_ai_blog", "cisa_advisories", "huggingnews", "huggingnews_json", "mastodon_signal"]},
           "url": {"type": "string", "format": "uri"},
           "base_hosts": {"type": "array", "minItems": 1, "items": {"type": "string"}},

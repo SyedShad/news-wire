@@ -260,9 +260,11 @@ class DashboardService:
         counts = self.database.one(
             """
             SELECT
-              SUM(CASE WHEN status = 'candidate' THEN 1 ELSE 0 END) AS candidates,
-              SUM(CASE WHEN status = 'watch' THEN 1 ELSE 0 END) AS watches,
-              SUM(CASE WHEN status = 'draft_ready' THEN 1 ELSE 0 END) AS draft_ready,
+              SUM(CASE WHEN status NOT IN ('archived', 'withdrawn', 'content_ready', 'draft_ready')
+                        AND research_status != 'researching' THEN 1 ELSE 0 END) AS ready,
+              SUM(CASE WHEN status NOT IN ('archived', 'withdrawn')
+                        AND research_status = 'researching' THEN 1 ELSE 0 END) AS researching,
+              SUM(CASE WHEN status IN ('content_ready', 'draft_ready') THEN 1 ELSE 0 END) AS content_ready,
               0 AS urgent
             FROM story_cluster
             """
@@ -279,8 +281,7 @@ class DashboardService:
         current_rows = [
             story for story in self._story_rows()
             if story["is_review_current"]
-            and story["status"] in {"signal", "watch", "candidate"}
-            and story.get("watch_status") != "Expired"
+            and story["status"] not in {"archived", "withdrawn"}
         ]
         current_rows.sort(key=ranking_sort_key)
         top_stories = current_rows[:5]
@@ -357,6 +358,14 @@ class DashboardService:
                 return False
             if lane and lane != "all" and story["lane"] != lane:
                 return False
+            if kind == "ready" and story["status"] in {"archived", "withdrawn", "content_ready", "draft_ready"}:
+                return False
+            if kind == "researching" and story.get("research_status") != "researching":
+                return False
+            if kind == "content_ready" and story["status"] not in {"content_ready", "draft_ready"}:
+                return False
+            # Kept only for historical deep links; the v0.4.0 dashboard no
+            # longer presents Candidate or Watch filters.
             if kind == "candidate" and story["status"] != "candidate":
                 return False
             if kind == "watch" and story["status"] != "watch":
@@ -370,8 +379,7 @@ class DashboardService:
             if window == "review_now":
                 return bool(
                     story["is_review_current"]
-                    and story["status"] in {"signal", "watch", "candidate"}
-                    and story.get("watch_status") != "Expired"
+                    and story["status"] not in {"archived", "withdrawn"}
                 )
             if window == "older":
                 return bool(
@@ -398,7 +406,7 @@ class DashboardService:
 
     def list_inbox_notices(self, kind: str | None = None) -> list[dict[str, Any]]:
         operational_kinds = ("health", "correction", "catch_up", "recovery")
-        if kind in {"candidate", "watch"}:
+        if kind in {"ready", "researching", "content_ready"}:
             return []
         if kind and kind != "all":
             if kind not in operational_kinds:
@@ -448,6 +456,13 @@ class DashboardService:
             action["qualification_snapshot"] = snapshot.get("qualification_snapshot") or {}
         story["drafts"] = self.database.query(
             "SELECT * FROM draft WHERE story_id = ? ORDER BY version DESC",
+            (story_id,),
+        )
+        story["research_attempts"] = self.database.query(
+            """
+            SELECT * FROM research_attempt
+            WHERE story_id = ? ORDER BY created_at DESC, id DESC
+            """,
             (story_id,),
         )
         story["evidence_sources"] = self.database.query(
@@ -584,6 +599,8 @@ class DashboardService:
                 "momentum_post_count", "momentum_daily_rank",
                 "momentum_velocity_points", "original_publication_known",
                 "is_newly_surfaced",
+                "organic_score", "priority_floor_applied",
+                "score_floor_explanation",
             ):
                 story[key] = ranked.get(key)
         story["discovery_leads"] = self.database.query(
@@ -592,6 +609,12 @@ class DashboardService:
             ORDER BY published_at, id
             """,
             (story_id,),
+        )
+        story["content_allowed"] = story["status"] not in {"archived", "withdrawn"}
+        story["trust_label"] = (
+            "Trusted source"
+            if story.get("source_trust_state") == "trusted"
+            else "Research required"
         )
         return story
 
@@ -966,7 +989,7 @@ class DashboardService:
             SELECT w.*, s.headline AS story_headline, s.lane, s.priority
             FROM work_item w
             JOIN story_cluster s ON s.id = w.story_id
-            WHERE w.kind = 'draft' AND w.status != 'completed'
+            WHERE w.kind IN ('content', 'draft') AND w.status != 'completed'
             ORDER BY w.updated_at DESC, w.id DESC
             """
         )
@@ -983,7 +1006,11 @@ class DashboardService:
                     "display_status": status["label"],
                     "status_code": status["status"],
                     "status_message": status["message"],
-                    "approval_basis": str(payload.get("approval_basis") or "verified"),
+                    "approval_basis": (
+                        "ungated"
+                        if work.get("kind") == "content"
+                        else str(payload.get("approval_basis") or "verified")
+                    ),
                 }
             )
         return sorted(
@@ -1070,17 +1097,17 @@ class DashboardService:
             "draft_ready": "Draft ready",
         }
         messages = {
-            "starting": "Your approval is saved and immediate draft generation is starting.",
-            "generating": "ChatGPT is creating the approved draft now.",
+            "starting": "Fresh source search and content generation are starting.",
+            "generating": "ChatGPT is creating the Reddit content now.",
             "waiting": "Drafting is waiting for a required local prerequisite.",
             "retrying": "A temporary failure is being retried once.",
-            "failed": "Draft generation could not complete safely. You can retry the same approval.",
-            "needs_reapproval": "The evidence changed after approval. Review and approve the story again.",
+            "failed": "Content generation could not complete safely. The editable shell remains available.",
+            "needs_reapproval": "A legacy draft request needs attention; create content again from the story.",
             "waiting_for_login": "Sign in to ChatGPT locally, then retry the preserved approval.",
             "waiting_for_isolation": "Run the local assistance security check, then retry the preserved approval.",
             "waiting_for_usage_reset": "ChatGPT usage is temporarily unavailable. The preserved approval can resume after reset.",
             "failed_security": "Drafting stopped because the current security policy did not pass. Review diagnostics before retrying.",
-            "draft_ready": "The approved draft is ready for human review.",
+            "draft_ready": "The content is ready for human review.",
         }
         if error_code in {"codex_unavailable", "CodexUnavailable"}:
             messages[status] = "The local ChatGPT drafting command is unavailable. Check the installation, then retry."
@@ -1142,7 +1169,7 @@ class DashboardService:
         work = self.database.one(
             """
             SELECT * FROM work_item
-            WHERE story_id = ? AND kind = 'draft'
+            WHERE story_id = ? AND kind IN ('content', 'draft')
             ORDER BY id DESC LIMIT 1
             """,
             (story_id,),
@@ -1188,7 +1215,7 @@ class DashboardService:
                 "story_id": story_id,
                 "draft_id": draft_id,
                 "updated_at": work["updated_at"],
-                "approval_basis": "verified",
+                "approval_basis": "ungated" if work.get("kind") == "content" else "verified",
                 "manual_editor_available": bool(
                     draft and draft["status"] == "Editable Shell"
                 ),
@@ -1198,7 +1225,11 @@ class DashboardService:
             payload = json.loads(str(work.get("payload_json") or "{}"))
         except json.JSONDecodeError:
             payload = {}
-        status["approval_basis"] = str(payload.get("approval_basis") or "verified")
+        status["approval_basis"] = (
+            "ungated"
+            if work.get("kind") == "content"
+            else str(payload.get("approval_basis") or "verified")
+        )
         status["manual_override_active"] = status["approval_basis"] == "manual_override"
         if status["status"] == "draft_ready" and not draft:
             status.update(
@@ -1235,7 +1266,7 @@ class DashboardService:
     ) -> int | None:
         """Create a source-bound manual fallback without claiming AI completion."""
         work_state = self.database.one(
-            "SELECT status FROM work_item WHERE id = ? AND kind = 'draft'",
+            "SELECT status, kind FROM work_item WHERE id = ? AND kind IN ('draft', 'content')",
             (work_item_id,),
         )
         if not work_state or work_state["status"] not in {
@@ -1264,6 +1295,11 @@ class DashboardService:
             summary = " ".join(str(first_claim).split())
         if not headline or not summary:
             return None
+        body = (
+            summary + "\n\nWhat do you think this development means in practice?"
+            if work_state["kind"] == "content"
+            else summary
+        )
 
         source_rows: list[dict[str, str]] = []
         seen: set[str] = set()
@@ -1300,48 +1336,58 @@ class DashboardService:
                         source.get("reporting_origin_name") or ""
                     )[:120],
                     "provenance_type": str(source.get("provenance_type") or "unknown")[:20],
+                    "source_provenance": str(source.get("source_provenance") or "configured")[:24],
                 }
             )
 
         now = utc_now()
         with self.database.transaction() as connection:
             work = connection.execute(
-                "SELECT status FROM work_item WHERE id = ? AND kind = 'draft'",
+                "SELECT status, kind FROM work_item WHERE id = ? AND kind IN ('draft', 'content')",
                 (work_item_id,),
             ).fetchone()
             if not work or work["status"] not in {"pending", "queued", "waiting", "failed"}:
                 return None
-            existing = connection.execute(
-                """
-                SELECT id FROM draft
-                WHERE story_id = ? AND status IN ('Current', 'Editable Shell')
-                ORDER BY version DESC LIMIT 1
-                """,
-                (story.get("id"),),
-            ).fetchone()
-            if existing:
-                return int(existing["id"])
+            if work["kind"] == "draft":
+                existing = connection.execute(
+                    """
+                    SELECT id FROM draft
+                    WHERE story_id = ? AND status IN ('Current', 'Editable Shell')
+                    ORDER BY version DESC LIMIT 1
+                    """,
+                    (story.get("id"),),
+                ).fetchone()
+                if existing:
+                    return int(existing["id"])
             version = int(
                 connection.execute(
                     "SELECT COALESCE(MAX(version), 0) AS version FROM draft WHERE story_id = ?",
                     (story.get("id"),),
                 ).fetchone()["version"]
             ) + 1
+            connection.execute(
+                """
+                UPDATE draft SET status = 'Superseded', updated_at = ?
+                WHERE story_id = ? AND status IN ('Current', 'Editable Shell')
+                """,
+                (now, story.get("id")),
+            )
             cursor = connection.execute(
                 """
                 INSERT INTO draft(
                     story_id, mode, status, version, headline, metadata, body, lens,
                     sources_json, created_at, updated_at, provenance_json,
-                    approval_snapshot_json
-                ) VALUES(?, ?, 'Editable Shell', ?, ?, ?, ?, '', ?, ?, ?, ?, ?)
+                    approval_snapshot_json, suggested_flair, subreddit_reminder,
+                    search_attempt_id
+                ) VALUES(?, ?, 'Editable Shell', ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     story.get("id"),
-                    approval_snapshot.get("mode") or "Neutral News Brief",
+                    approval_snapshot.get("mode") or "Reddit Post",
                     version,
                     headline,
-                    f"{story.get('freshness') or ''} · {story.get('lane') or ''}".strip(" ·"),
-                    summary,
+                    "",
+                    body,
                     Database.json(source_rows),
                     now,
                     now,
@@ -1352,6 +1398,9 @@ class DashboardService:
                         }
                     ),
                     Database.json(approval_snapshot),
+                    "News",
+                    "Verify rules before posting",
+                    approval_snapshot.get("search_attempt_id"),
                 ),
             )
             return int(cursor.lastrowid)
@@ -1381,6 +1430,14 @@ class DashboardService:
                 draft["approval_basis"] == "manual_override"
             )
             draft["source_rows"] = [self._source_parts(source) for source in draft["sources"]]
+            draft["search_attempt"] = (
+                self.database.one(
+                    "SELECT * FROM research_attempt WHERE id = ?",
+                    (draft["search_attempt_id"],),
+                )
+                if draft.get("search_attempt_id")
+                else None
+            )
             draft["history"] = self.database.query(
                 "SELECT id, version, status, updated_at FROM draft WHERE story_id = ? ORDER BY version DESC",
                 (draft["story_id"],),
@@ -1420,6 +1477,37 @@ class DashboardService:
                 }
             draft["comparison"] = comparison
         return draft
+
+    def _retired_review_action(
+        self,
+        story_id: str,
+        action: str,
+        reason: str = "",
+        confirmation_version: str = "",
+    ) -> str:
+        del confirmation_version
+        if action not in {"archive", "withdraw"}:
+            raise ValueError(
+                "This editorial action is obsolete. Use Create content; no qualification or approval gate remains."
+            )
+        story = self.database.one("SELECT * FROM story_cluster WHERE id = ?", (story_id,))
+        if not story:
+            raise LookupError("Story not found")
+        now = utc_now()
+        new_status = "archived" if action == "archive" else "withdrawn"
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO review_action(story_id, action, reason, created_at, story_revision)
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (story_id, action, reason.strip(), now, int(story.get("story_revision") or 1)),
+            )
+            connection.execute(
+                "UPDATE story_cluster SET status = ?, updated_at = ? WHERE id = ?",
+                (new_status, now, story_id),
+            )
+        return new_status
 
     def review(
         self,
@@ -1695,6 +1783,144 @@ class DashboardService:
             self._dispatch_draft(work_item_id)
         return new_status
 
+
+    def create_content(self, story_id: str, guidance: str = "") -> tuple[int, int]:
+        story = self.database.one("SELECT * FROM story_cluster WHERE id = ?", (story_id,))
+        if not story:
+            raise LookupError("Story not found")
+        if story["status"] in {"archived", "withdrawn"}:
+            raise ValueError("Archived or withdrawn stories cannot create content")
+        active = self.database.one(
+            """
+            SELECT id FROM work_item
+            WHERE story_id = ? AND kind = 'content'
+              AND status IN ('pending', 'queued', 'waiting', 'running', 'generating')
+            ORDER BY id DESC LIMIT 1
+            """,
+            (story_id,),
+        )
+        if active:
+            raise ValueError("Content creation is already active for this story")
+        claims = self.database.query(
+            "SELECT id, text, status, volatility FROM claim WHERE story_id = ? ORDER BY id",
+            (story_id,),
+        )
+        sources = self._draft_sources(story_id, allow_discovery=True)
+        now = utc_now()
+        with self.database.transaction() as connection:
+            current = connection.execute(
+                "SELECT * FROM story_cluster WHERE id = ?", (story_id,)
+            ).fetchone()
+            if not current or current["status"] in {"archived", "withdrawn"}:
+                raise ValueError("Story is no longer available for content creation")
+            duplicate = connection.execute(
+                """
+                SELECT 1 FROM work_item WHERE story_id = ? AND kind = 'content'
+                  AND status IN ('pending', 'queued', 'waiting', 'running', 'generating')
+                """,
+                (story_id,),
+            ).fetchone()
+            if duplicate:
+                raise ValueError("Content creation is already active for this story")
+            attempt_cursor = connection.execute(
+                """
+                INSERT INTO research_attempt(story_id, purpose, status, created_at, updated_at)
+                VALUES(?, 'draft_refresh', 'queued', ?, ?)
+                """,
+                (story_id, now, now),
+            )
+            attempt_id = int(attempt_cursor.lastrowid)
+            research_cursor = connection.execute(
+                """
+                INSERT INTO work_item(
+                    kind, story_id, status, priority, payload_json, created_at,
+                    updated_at, idempotency_key, available_at
+                ) VALUES('source_research', ?, 'queued', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    story_id,
+                    int(current["review_score"] or current["priority_score"] or 0),
+                    Database.json({
+                        "schema_version": 1,
+                        "purpose": "draft_refresh",
+                        "research_attempt_id": attempt_id,
+                        "story_revision": int(current["story_revision"] or 1),
+                    }),
+                    now,
+                    now,
+                    f"source-research:draft_refresh:{story_id}:{attempt_id}",
+                    now,
+                ),
+            )
+            research_work_id = int(research_cursor.lastrowid)
+            payload = {
+                "schema_version": 4,
+                "operation": "draft_reddit",
+                "story_id": story_id,
+                "story_revision": int(current["story_revision"] or 1),
+                "mode": "Reddit Post",
+                "human_guidance": guidance.strip()[:2000],
+                "requested_at": now,
+                "search_attempt_id": attempt_id,
+                "search_work_item_id": research_work_id,
+                "story": {
+                    "id": story_id,
+                    "headline": str(current["headline"]),
+                    "summary": str(current["summary"]),
+                    "lane": str(current["lane"]),
+                    "freshness": str(current["freshness"]),
+                    "first_public_at": str(current["first_public_at"]),
+                    "source_trust_state": str(current["source_trust_state"]),
+                },
+                "claims": claims,
+                "sources": sources,
+                "policy": {
+                    "style": "reddit-posts-v1.0.1",
+                    "subreddit_assumed": False,
+                    "subreddit_reminder": "Verify rules before posting",
+                },
+            }
+            work_cursor = connection.execute(
+                """
+                INSERT INTO work_item(
+                    kind, story_id, status, priority, payload_json, created_at,
+                    updated_at, idempotency_key, available_at
+                ) VALUES('content', ?, 'waiting', ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    story_id,
+                    int(current["review_score"] or current["priority_score"] or 0),
+                    Database.json(payload),
+                    now,
+                    now,
+                    f"content:{story_id}:{attempt_id}",
+                ),
+            )
+            work_item_id = int(work_cursor.lastrowid)
+            connection.execute(
+                """
+                INSERT INTO review_action(
+                    story_id, action, reason, draft_mode, created_at,
+                    approval_snapshot_json, story_revision
+                ) VALUES(?, 'create_content', ?, 'Reddit Post', ?, ?, ?)
+                """,
+                (
+                    story_id,
+                    guidance.strip()[:2000],
+                    now,
+                    Database.json({
+                        "content_work_item_id": work_item_id,
+                        "research_attempt_id": attempt_id,
+                    }),
+                    int(current["story_revision"] or 1),
+                ),
+            )
+        draft_id = self._create_editable_draft_shell(work_item_id, payload)
+        if draft_id is None:
+            raise RuntimeError("The editable content shell could not be created")
+        self._dispatch_draft(work_item_id)
+        return work_item_id, draft_id
+
     def retry_draft(self, story_id: str) -> int:
         story = self.database.one("SELECT * FROM story_cluster WHERE id = ?", (story_id,))
         if not story:
@@ -1759,7 +1985,16 @@ class DashboardService:
         self._dispatch_draft(int(work["id"]))
         return int(work["id"])
 
-    def save_draft(self, draft_id: int, headline: str, metadata: str, body: str, lens: str) -> int:
+    def save_draft(
+        self,
+        draft_id: int,
+        headline: str,
+        metadata: str,
+        body: str,
+        lens: str = "",
+        suggested_flair: str = "",
+        subreddit_reminder: str = "Verify rules before posting",
+    ) -> int:
         original = self.get_draft(draft_id)
         if not original:
             raise LookupError("Draft not found")
@@ -1769,10 +2004,16 @@ class DashboardService:
         metadata_value = metadata.strip()
         body_value = body.replace("\r\n", "\n").replace("\r", "\n").strip()
         lens_value = lens.replace("\r\n", "\n").replace("\r", "\n").strip()
+        flair_value = " ".join(suggested_flair.split())[:80]
+        reminder_value = subreddit_reminder.strip()
         if not headline_value or not body_value:
             raise ValueError("Headline and factual brief are required")
         self._validate_draft_links(body_value, original["sources"])
         self._validate_draft_links(lens_value, original["sources"])
+        if original["mode"] == "Reddit Post" and lens_value:
+            raise ValueError("Reddit content has one mode and cannot include a lens section")
+        if original["mode"] == "Reddit Post" and reminder_value != "Verify rules before posting":
+            raise ValueError("The posting reminder must remain: Verify rules before posting")
         if lens_value and original["mode"] != "Open-Source Lens Brief":
             raise ValueError("Open-source lens text requires an approved lens brief")
         if lens_value:
@@ -1826,7 +2067,7 @@ class DashboardService:
                     UPDATE work_item
                     SET status = 'cancelled', last_error_class = 'manual_draft_completed',
                         updated_at = ?, available_at = NULL
-                    WHERE id = ? AND story_id = ? AND kind = 'draft'
+                    WHERE id = ? AND story_id = ? AND kind IN ('content', 'draft')
                       AND status IN ('pending', 'queued', 'waiting', 'running', 'generating', 'failed')
                     """,
                     (now, locked_shell_work_item_id, original["story_id"]),
@@ -1848,8 +2089,9 @@ class DashboardService:
                 INSERT INTO draft(
                     story_id, mode, status, version, headline, metadata, body, lens,
                     sources_json, created_at, updated_at, supersedes_id,
-                    provenance_json, approval_snapshot_json
-                ) VALUES(?, ?, 'Current', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    provenance_json, approval_snapshot_json, suggested_flair,
+                    subreddit_reminder, search_attempt_id
+                ) VALUES(?, ?, 'Current', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     original["story_id"], original["mode"], int(current_version) + 1,
@@ -1857,6 +2099,9 @@ class DashboardService:
                     original["sources_json"], now, now, draft_id,
                     original.get("provenance_json") or "{}",
                     original.get("approval_snapshot_json") or "{}",
+                    flair_value,
+                    reminder_value if original["mode"] == "Reddit Post" else "",
+                    original.get("search_attempt_id"),
                 ),
             )
             connection.execute(
@@ -1865,8 +2110,12 @@ class DashboardService:
             )
             if locked_shell_work_item_id is not None:
                 connection.execute(
-                    "UPDATE story_cluster SET status = 'draft_ready', updated_at = ? WHERE id = ?",
-                    (now, original["story_id"]),
+                    "UPDATE story_cluster SET status = ?, updated_at = ? WHERE id = ?",
+                    (
+                        "content_ready" if original["mode"] == "Reddit Post" else "draft_ready",
+                        now,
+                        original["story_id"],
+                    ),
                 )
             return int(cursor.lastrowid)
 
@@ -2142,7 +2391,18 @@ class DashboardService:
         draft = self.get_draft(draft_id)
         if not draft:
             raise LookupError("Draft not found")
-        sections = [f"# {draft['headline']}", "", draft["metadata"], "", draft["body"]]
+        if draft["mode"] == "Reddit Post":
+            sections = [
+                f"**Title:** {draft['headline']}",
+                "",
+                str(draft["body"]),
+                "",
+                f"**Suggested flair:** {draft['suggested_flair'] or 'Not specified'}",
+                "",
+                "Verify rules before posting",
+            ]
+        else:
+            sections = [f"# {draft['headline']}", "", draft["metadata"], "", draft["body"]]
         if draft["lens"]:
             sections.extend(["", "## Open-Source Lens", "", draft["lens"]])
         sections.extend(["", "## Sources", ""])
@@ -2281,8 +2541,14 @@ class DashboardService:
         sources = "".join(f"<li>{self._source_html(source)}</li>" for source in draft["sources"])
         headline = html.escape(str(draft["headline"]))
         metadata = html.escape(str(draft["metadata"]))
+        reddit_meta = ""
+        if draft["mode"] == "Reddit Post":
+            reddit_meta = (
+                f"<p><strong>Suggested flair:</strong> {html.escape(str(draft['suggested_flair'] or 'Not specified'))}</p>"
+                "<p><strong>Verify rules before posting</strong></p>"
+            )
         return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>{headline}</title>
 <style>body{{font:17px/1.65 system-ui;max-width:760px;margin:7vh auto;padding:0 24px;color:#17201d}}h1{{font:700 42px/1.08 Georgia,serif}}.meta{{color:#61706a}}h2{{margin-top:2.4rem}}</style>
-</head><body><article><h1>{headline}</h1><p class="meta">{metadata}</p>{body}{lens}<h2>Sources</h2><ul>{sources}</ul></article></body></html>"""
+</head><body><article><h1>{headline}</h1><p class="meta">{metadata}</p>{body}{lens}{reddit_meta}<h2>Sources</h2><ul>{sources}</ul></article></body></html>"""

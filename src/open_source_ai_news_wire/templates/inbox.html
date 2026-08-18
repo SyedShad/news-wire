@@ -1,8 +1,8 @@
 {% extends "base.html" %}
-{% block title %}Review Inbox · Open Source AI News Wire{% endblock %}
+{% block title %}News Inbox · Open Source AI News Wire{% endblock %}
 {% block content %}
 <header class="page-header">
-  <div><p class="kicker">Human decision queue</p><h1>Review inbox</h1><p class="lede">Verification is visible. Viewing an item never approves a draft.</p></div>
+  <div><p class="kicker">Fast content queue</p><h1>News inbox</h1><p class="lede">Trust, research, and provenance are visible. Every active story can create content.</p></div>
   <form action="{{ url_for('read_alerts') }}" method="post">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <button class="button button-secondary" type="submit">Mark notices read</button>
@@ -19,28 +19,28 @@
   </label>
   <label>Queue type
     <select name="kind">
-      {% for value, label in [('all','All review work'),('candidate','Candidates'),('watch','Watch notices'),('correction','Corrections'),('catch_up','Catch-up'),('health','Health notices')] %}
+      {% for value, label in [('all','All news'),('ready','Ready'),('researching','Researching'),('content_ready','Content ready'),('correction','Corrections'),('catch_up','Catch-up'),('health','Health notices')] %}
       <option value="{{ value }}" {{ 'selected' if selected_kind == value else '' }}>{{ label }}</option>
       {% endfor %}
     </select>
   </label>
   <label>Status
     <select name="status">
-      {% for value, label in [('all','All states'),('candidate','Candidate'),('watch','Watch'),('approved','Approved'),('draft_ready','Draft ready'),('archived','Archived'),('withdrawn','Withdrawn')] %}
+      {% for value, label in [('all','All states'),('ready','Ready'),('content_ready','Content ready'),('archived','Archived'),('withdrawn','Withdrawn')] %}
       <option value="{{ value }}" {{ 'selected' if selected_status == value else '' }}>{{ label }}</option>
       {% endfor %}
     </select>
   </label>
   <label>Coverage lane
     <select name="lane">
-      {% for value in ['all','Open Ecosystem News','AGI Development','Broader AI News','Open-Source Lens Opportunity'] %}
+      {% for value in ['all','Open Ecosystem News','AGI Development','Broader AI News'] %}
       <option value="{{ value }}" {{ 'selected' if selected_lane == value else '' }}>{{ 'All coverage lanes' if value == 'all' else value }}</option>
       {% endfor %}
     </select>
   </label>
   <label>Sort
     <select name="sort">
-      <option value="priority" {{ 'selected' if selected_sort == 'priority' else '' }}>Review priority</option>
+      <option value="priority" {{ 'selected' if selected_sort == 'priority' else '' }}>Priority</option>
       <option value="newest" {{ 'selected' if selected_sort == 'newest' else '' }}>Newest first</option>
     </select>
   </label>

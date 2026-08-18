@@ -1,7 +1,7 @@
 {% extends "base.html" %}
-{% block title %}Drafts · Open Source AI News Wire{% endblock %}
+{% block title %}Content · Open Source AI News Wire{% endblock %}
 {% block content %}
-<header class="page-header"><div><p class="kicker">Human-approved editorial work</p><h1>Drafts & history</h1><p class="lede">Every revision is a new version. Corrections never silently replace earlier text.</p></div></header>
+<header class="page-header"><div><p class="kicker">Manual publishing workspace</p><h1>Content & history</h1><p class="lede">Every revision is a new version. You make the final posting decision.</p></div></header>
 <section class="panel">
   <div class="table-list draft-list">
   {% for entry in drafts %}
@@ -12,12 +12,12 @@
       </div>
       <div class="table-main">
         <strong>{{ entry.headline if entry.entry_kind == 'draft' else entry.story_headline }}</strong>
-        <small>{{ entry.mode }} · {{ entry.lane }}{% if entry.approval_basis == 'manual_override' %} · Manually approved{% endif %}{% if entry.entry_kind == 'request' %} · {{ entry.status_message }}{% endif %}</small>
+        <small>{{ entry.mode }} · {{ entry.lane }}{% if entry.entry_kind == 'request' %} · {{ entry.status_message }}{% endif %}</small>
       </div>
       <div class="table-date">{{ entry.updated_at|wire_time }}<span>→</span></div>
     </a>
   {% else %}
-    <div class="empty-state"><strong>No drafts yet.</strong><span>Approve a verified candidate from the Review Inbox.</span></div>
+    <div class="empty-state"><strong>No content yet.</strong><span>Open any active story and select Create content.</span></div>
   {% endfor %}
   </div>
 </section>

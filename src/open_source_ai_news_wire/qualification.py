@@ -25,9 +25,12 @@ AGI_TERMS = {
     "capability evaluation", "general-purpose ai",
 }
 BROADER_TERMS = {
-    "regulation", "regulator", "policy", "law", "court", "copyright", "safety",
-    "security", "incident", "misuse", "acquisition", "funding", "compute", "chip",
-    "export control", "partnership", "launch", "release", "evaluation", "research",
+    "privacy", "personal data", "personal information", "data protection",
+    "surveillance", "biometric", "cybersecurity", "cyber security", "security",
+    "vulnerability", "vulnerabilities", "breach", "breaches", "attack", "attacks",
+    "misuse", "security incident", "security incidents", "regulation", "regulations",
+    "regulator", "regulators", "legislation", "law", "laws", "court", "courts",
+    "compliance", "copyright", "policy enforcement", "enforcement", "export control",
 }
 IMPACT_TERMS = {
     "launch", "release", "regulation", "law", "ban", "acquisition", "funding",
@@ -134,6 +137,11 @@ def qualify(
         lane = "AGI Development"
     else:
         lane = "Broader AI News"
+        # Broad coverage is intentionally narrow: a generic AI launch, funding
+        # round, chip, acquisition, research result, or safety story is outside
+        # this lane unless the item directly names privacy, security, or a
+        # regulatory/legal enforcement issue.
+        relevant = relevant and bool(broader_matches)
 
     if "open source" in text or "open-source" in text:
         openness = "open source"

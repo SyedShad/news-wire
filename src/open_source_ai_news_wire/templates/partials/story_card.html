@@ -17,9 +17,9 @@
       {% if not story.is_material_update_current %}<span>{{ story.age_label }}</span>{% endif %}
       <span>{{ story.impact_level }}</span>
       <span>{{ story.attention_level }}</span>
-      <span>{{ story.evidence_state }}</span>
-      <span>{{ story.confirmed_origin_count }} confirmed origin{{ '' if story.confirmed_origin_count == 1 else 's' }} · {{ story.discovery_identity_count }} discovery mention{{ '' if story.discovery_identity_count == 1 else 's' }}</span>
+      <span>{{ 'Trusted source' if story.source_trust_state == 'trusted' else 'Research required' }}</span>
+      <span>{{ story.research_status|replace('_',' ')|title }} · {{ story.confirmed_origin_count }} source origin{{ '' if story.confirmed_origin_count == 1 else 's' }}</span>
     </div>
   </div>
-  <a class="arrow-link" href="{{ url_for('story_detail', story_id=story.id) }}" aria-label="Review {{ story.headline }}">→</a>
+  <a class="arrow-link" href="{{ url_for('story_detail', story_id=story.id) }}" aria-label="Open {{ story.headline }}">→</a>
 </article>

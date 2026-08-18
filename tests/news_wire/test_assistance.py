@@ -270,7 +270,7 @@ def test_approved_draft_is_generated_versioned_and_accounted(tmp_path: Path) -> 
     draft = database.one("SELECT body, sources_json, provenance_json FROM draft WHERE id = ?", (draft_id,))
     assert "According to [Demo Runtime Project](<https://example.invalid/runtime/release>)" in draft["body"]
     assert "[[source:" not in draft["body"]
-    assert '"prompt_version":"v3"' in draft["provenance_json"]
+    assert '"prompt_version":"v4-reddit-posts-1.0.1"' in draft["provenance_json"]
 
 
 def test_approval_keeps_editable_shell_even_when_assistance_is_ready(tmp_path: Path) -> None:
@@ -430,8 +430,12 @@ def test_assistance_fails_closed_on_gate_budget_and_foreign_claims(tmp_path: Pat
         VALUES('background', 'triage', 8, 'test', 'accepted', datetime('now'))
         """
     )
-    with pytest.raises(AssistanceDeferred, match="exhausted"):
-        AssistanceService(database, FakeInvoker()).process_next()
+    # v0.4.0 records background usage but does not use the local allowance as
+    # an editorial blocker.
+    AssistanceService(database, FakeInvoker()).process_next()
+    assert database.one(
+        "SELECT status FROM work_item WHERE kind = 'semantic' ORDER BY id DESC LIMIT 1"
+    ) == {"status": "completed"}
 
     packet = {
         "schema_version": 1,
@@ -1609,3 +1613,13 @@ def test_structured_output_schema_types_const_and_enum_fields() -> None:
     assert schema["properties"]["schema_version"]["type"] == "integer"
     assert schema["properties"]["operation"]["type"] == "string"
     assert "uniqueItems" not in schema["properties"]["supported_claim_ids"]
+    assert "allOf" not in schema
+    reddit_schema = json.loads(
+        files("open_source_ai_news_wire")
+        .joinpath("schemas", "assistance-reddit-result.schema.json")
+        .read_text(encoding="utf-8")
+    )
+    assert set(reddit_schema["required"]) == set(reddit_schema["properties"])
+    assert reddit_schema["properties"]["subreddit_reminder"]["const"] == (
+        "Verify rules before posting"
+    )

@@ -68,7 +68,7 @@ def test_unknown_original_date_is_newly_surfaced_not_fresh() -> None:
         now=NOW,
     )
     assert story["freshness"] == "Newly surfaced"
-    assert story["priority"] == "Newly surfaced"
+    assert story["priority"] == "Urgent"
     assert story["age_label"] == "original date unknown"
     assert story["review_score"] == 85
     assert story["is_review_current"] is False

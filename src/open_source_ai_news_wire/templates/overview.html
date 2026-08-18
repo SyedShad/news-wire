@@ -5,7 +5,7 @@
   <div>
     <p class="kicker">Local intelligence desk</p>
     <h1>What changed in AI?</h1>
-    <p class="lede">Verified developments first. High-potential signals stay visibly separate until the evidence catches up.</p>
+    <p class="lede">Stories move straight from discovery to research and content creation, with trust and source provenance always visible.</p>
   </div>
   <div class="header-actions">
     <a class="button button-secondary" href="{{ url_for('inbox') }}">Open review inbox</a>
@@ -22,16 +22,16 @@
     <small>High impact + immediate relevance</small>
   </article>
   <article class="stat-card">
-    <span class="stat-label">Candidates</span><strong>{{ data.counts.candidates }}</strong>
-    <small>Evidence and importance gates passed</small>
+    <span class="stat-label">Ready</span><strong>{{ data.counts.ready }}</strong>
+    <small>Content can be started now</small>
   </article>
   <article class="stat-card">
-    <span class="stat-label">Watch notices</span><strong>{{ data.counts.watches }}</strong>
-    <small>Credible trace, not yet verified</small>
+    <span class="stat-label">Researching</span><strong>{{ data.counts.researching }}</strong>
+    <small>Automatic source research active</small>
   </article>
   <article class="stat-card">
-    <span class="stat-label">Draft ready</span><strong>{{ data.counts.draft_ready }}</strong>
-    <small>Human-approved and versioned</small>
+    <span class="stat-label">Content ready</span><strong>{{ data.counts.content_ready }}</strong>
+    <small>Editable and versioned</small>
   </article>
 </section>
 
@@ -45,7 +45,7 @@
       {% for story in data.top_stories %}
         {% include "partials/story_card.html" %}
       {% else %}
-        <div class="empty-state"><strong>No current review work.</strong><span>The next scout will add new signals here.</span></div>
+        <div class="empty-state"><strong>No current news items.</strong><span>The next scout will add new stories here.</span></div>
       {% endfor %}
     </div>
   </section>

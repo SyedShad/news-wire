@@ -1,32 +1,38 @@
 # Open Source AI News Wire
 
-Open Source AI News Wire is a local application for monitoring and reviewing public AI news. It collects public, no-login sources, groups related reports, ranks current review work, and helps a human turn selected stories into source-linked drafts.
+Open Source AI News Wire is a local application for monitoring public AI news and preparing source-linked Reddit content. It collects public, no-login sources, groups related reports, classifies source trust, runs automatic research when needed, and keeps final review and publication manual.
 
-It covers open-source and open-weight AI, AGI developments, policy, safety, research, and broader AI news. Reporting is neutral by default. A separate open-source lens is available when the reviewer explicitly chooses it.
+It covers open-source and open-weight AI, AGI developments, and broader AI news specifically related to privacy, security, and regulation.
 
 The application never publishes automatically.
+
+The owner-only online dashboard lives in [`hosted-dashboard`](hosted-dashboard/README.md).
+Its interface is hosted on ChatGPT Sites while the SQLite corpus, collection,
+research, drafting, and canonical mutations remain on the laptop. The laptop
+makes only signed outbound HTTPS requests and accepts no inbound internet
+connection.
 
 ![The fictional demo dashboard showing the Priority Wire, source health, schedule, and notices](docs/assets/screenshots/0.3.7/01-overview.png)
 
 ## What the product includes
 
 - **Public-source monitoring:** scheduled and on-demand collection from dated public sources.
-- **Local review dashboard:** fresh stories, evidence state, source roles, priority, and editorial decisions in one interface.
+- **Local review dashboard:** Ready, Researching, and Content-ready stories with trust, provenance, priority, and audit history.
 - **macOS scheduling and recovery:** scans at minute `00` and `30` while the Mac is awake, plus recovery after missed time.
-- **Optional ChatGPT drafting:** human-approved neutral or open-source-lens drafts, with an editable local fallback when assistance is unavailable.
+- **Optional ChatGPT search and drafting:** a fresh secured source search followed by packet-only Reddit writing, with an immediate editable local shell.
 
 The normal workflow is:
 
 ```mermaid
 flowchart LR
-    A[Public sources] --> B[Review Now]
-    B --> C{Human decision}
-    C -->|Review evidence| D[Qualified candidate]
-    C -->|Manual override| E[Human-selected candidate]
-    D --> F[Approve draft mode]
-    E --> F
-    F --> G[Edit and export]
-    G --> H[Manual publication]
+    A["Public sources"] --> B{"Source trust"}
+    B -->|Trusted| C["Ready and Urgent"]
+    B -->|Research required| D["Automatic research"]
+    D --> C
+    C --> E["Create content"]
+    E --> F["Editable shell and fresh search"]
+    F --> G["Edit and export"]
+    G --> H["Manual publication"]
 ```
 
 ## Quick start
@@ -66,12 +72,14 @@ See [Getting started](docs/guide/getting-started.md) for the full setup and firs
 | [Product guide](docs/guide/index.md) | Understand the product, its parts, and its boundaries |
 | [Getting started](docs/guide/getting-started.md) | Install, launch, schedule, and verify the application |
 | [Features and use cases](docs/guide/features-and-use-cases.md) | See every user-visible capability and when to use it |
-| [Everyday workflows](docs/guide/everyday-workflows.md) | Review, verify, approve, draft, revise, and export |
+| [Everyday workflows](docs/guide/everyday-workflows.md) | Review trust and research, create content, revise, and export |
 | [Releases](docs/guide/releases.md) | Check the current version, update, and review release history |
 
 ## Current release
 
-The current application release is [v0.3.8](https://github.com/SyedShad/open-source-ai-news-wire/releases/tag/v0.3.8) with database schema 7. It renews the reviewed ChatGPT-bundled Codex identity while preserving the release-bound local check and deterministic editable draft fallback.
+The current application release is v0.4.1 with database schema 8. It adds the
+verified outbound hosted-dashboard bridge and owner-only remote operations to
+the v0.4 trust-and-status workflow while keeping final publishing manual.
 
 See the [release guide](docs/guide/releases.md) and [changelog](CHANGELOG.md) for details.
 
@@ -80,10 +88,12 @@ See the [release guide](docs/guide/releases.md) and [changelog](CHANGELOG.md) fo
 - Collection runs on a schedule; it is not a guaranteed real-time wire service.
 - Sources must be public and usable without accounts, cookies, payment, or access bypasses.
 - Scheduled work runs while the Mac is awake. A locked screen is fine; sleep pauses work.
-- Popularity and source breadth can raise attention but do not verify a claim.
+- Broader AI News is limited to privacy, security, and regulation; Open Ecosystem and AGI coverage remain separate.
 - ChatGPT assistance is optional and can remain unavailable if its local checks fail.
-- A human must approve every draft and publish it manually.
-- Runtime data stays local and has no built-in backup in V1.
+- A human starts content creation with one button, reviews the editable result, and publishes it manually.
+- Canonical runtime data stays local and has no built-in backup. The hosted
+  dashboard retains a redacted read projection, short-lived requested details,
+  authentication state, and expiring relay queues.
 
 ## Maintainer references
 

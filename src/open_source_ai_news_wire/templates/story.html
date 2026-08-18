@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ story.headline }} · Open Source AI News Wire{% endblock %}
 {% block content %}
-<nav class="breadcrumb" aria-label="Breadcrumb"><a href="{{ url_for('inbox') }}">Review inbox</a><span>›</span><span>{{ story.id }}</span></nav>
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="{{ url_for('inbox') }}">News inbox</a><span>›</span><span>{{ story.id }}</span></nav>
 
 <header class="story-hero">
   <div class="story-hero-copy">
@@ -14,12 +14,9 @@
     <p>{{ story.summary }}</p>
     <div class="story-meta detailed">
       <span>First public <strong>{{ story.first_public_at|wire_time('full') }} · {{ story.age_label }}</strong></span>
-      {% if story.is_material_update_current %}<span>Material update <strong>{{ story.ranking_age_label }}</strong></span>{% endif %}
       <span>Detected <strong>{{ story.detected_at|wire_time('full') }}</strong></span>
-      <span>Access <strong>{{ story.openness_class }}</strong></span>
-      <span>Impact <strong>{{ story.impact_level }}</strong></span>
-      <span>Attention <strong>{{ story.attention_level }}</strong></span>
-      <span>Evidence <strong>{{ story.evidence_state }}</strong></span>
+      <span>Trust <strong>{{ story.trust_label }}</strong></span>
+      <span>Research <strong>{{ story.research_status|replace('_',' ') }}</strong></span>
     </div>
   </div>
   <div class="priority-dial priority-{{ story.priority|lower|replace(' ', '-') }}">
@@ -27,289 +24,65 @@
   </div>
 </header>
 
+{% if story.verification_notice %}
+<section class="watch-callout"><div><span class="watch-signal"></span><strong>{{ story.verification_notice }}</strong></div><p>The originating publisher required automatic background research. This dashboard warning is never included in copied or exported Reddit content.</p></section>
+{% endif %}
+
 <div class="story-layout">
   <div class="story-main">
-    {% if story.status == 'watch' %}
-    <section class="watch-callout">
-      <div><span class="watch-signal"></span><strong>Watch notice · not verified</strong></div>
-      <p>{{ story.watch_status }} until {{ story.watch_expires_at|wire_time('full') }}. Normal qualification requires evidence and importance; an explicit manual drafting override remains a separate human decision.</p>
+    <section class="panel">
+      <div class="panel-heading"><div><p class="section-index">01</p><h2>Ready for content</h2></div><span>{{ story.trust_label }}</span></div>
+      <div class="metric-grid">
+        <div class="metric-card"><small>Organic score</small><strong>{{ story.organic_score }}</strong><p>Calculated from importance, evidence, attention, and freshness.</p></div>
+        <div class="metric-card"><small>Urgent floor</small><strong>{{ 'Applied at 80' if story.priority_floor_applied else 'Researching' }}</strong><p>{{ story.score_floor_explanation }}</p></div>
+      </div>
+      {% if story.content_allowed %}
+      <form action="{{ url_for('create_story_content', story_id=story.id) }}" method="post" class="qualify-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>Optional direction <span>content remains source-bound</span><textarea name="guidance" rows="2" maxlength="2000" placeholder="Anything the draft should emphasize"></textarea></label>
+        <button class="button button-primary" type="submit">Create content</button>
+        <p class="muted">Creates an editable shell immediately, runs a new source search, then prepares one Reddit post. Publishing remains manual.</p>
+      </form>
+      {% else %}<p class="muted">Archived and withdrawn stories keep their audit history but cannot create new content.</p>{% endif %}
+      {% if story.draft_request %}<p><strong>{{ story.draft_request.label }}</strong> — {{ story.draft_request.message }}</p>{% endif %}
     </section>
-    {% endif %}
 
     <section class="panel timeline-panel">
-      <div class="panel-heading"><div><p class="section-index">01</p><h2>Cluster timeline</h2></div><span>{{ 'Material update recorded' if story.material_updated_at else 'No current material update' }}</span></div>
-      <ol class="cluster-timeline">
-        <li><span class="timeline-dot"></span><div><small>First public</small><strong>{{ story.first_public_at|wire_time('full') }}</strong><p>Original source time retained for freshness, including recovered items.</p></div></li>
-        <li><span class="timeline-dot"></span><div><small>Detected locally</small><strong>{{ story.detected_at|wire_time('full') }}</strong><p>The first time this cluster entered the local review corpus.</p></div></li>
-        {% if story.material_updated_at %}
-        <li class="timeline-material"><span class="timeline-dot"></span><div><small>Material update</small><strong>{{ story.material_updated_at|wire_time('full') }}</strong><p>Claims or evidence changed enough to require renewed attention.</p></div></li>
-        {% elif story.material_update %}
-        <li><span class="timeline-dot"></span><div><small>Historical update flag</small><strong>No ranking timestamp migrated</strong><p>The older audit flag is preserved, but it cannot make this story current.</p></div></li>
-        {% else %}
-        <li><span class="timeline-dot"></span><div><small>Last evaluated</small><strong>{{ story.updated_at|wire_time('full') }}</strong><p>No material claim change is recorded after initial grouping.</p></div></li>
-        {% endif %}
-      </ol>
+      <div class="panel-heading"><div><p class="section-index">02</p><h2>Research history</h2></div><span>{{ story.research_attempts|length }} attempt{{ '' if story.research_attempts|length == 1 else 's' }}</span></div>
+      {% if story.research_attempts %}<ol class="cluster-timeline">
+      {% for attempt in story.research_attempts %}
+        <li><span class="timeline-dot"></span><div><small>{{ 'Background research' if attempt.purpose == 'background' else 'Fresh draft search' }}</small><strong>{{ attempt.status|replace('_',' ')|title }} · {{ attempt.result_count }} source{{ '' if attempt.result_count == 1 else 's' }}</strong><p>{{ attempt.detail or 'Attempt queued.' }}{% if attempt.error_class %} ({{ attempt.error_class }}){% endif %}</p></div></li>
+      {% endfor %}
+      </ol>{% else %}<p class="muted">Trusted-source stories do not need a background attempt. Every Create content click still starts a fresh search.</p>{% endif %}
     </section>
 
     <section class="panel evidence-panel">
-      <div class="panel-heading"><div><p class="section-index">02</p><h2>Claim ledger</h2></div><a href="{{ url_for('export_evidence', story_id=story.id) }}">Export evidence JSON</a></div>
-      <div class="claim-list">
-      {% for claim in story.claims %}
-        <article class="claim-row">
-          <span class="claim-status claim-{{ claim.status }}">{{ claim.status }}</span>
-          <div><p>{{ claim.text }}</p><small><b>Citation chain</b> · {{ claim.evidence_relationships or 'No qualifying evidence' }} → {{ claim.evidence_sources or 'Awaiting source' }}</small></div>
-          <span class="volatility">{{ claim.volatility }}</span>
-        </article>
-      {% endfor %}
-      </div>
+      <div class="panel-heading"><div><p class="section-index">03</p><h2>Claims</h2></div><a href="{{ url_for('export_evidence', story_id=story.id) }}">Export audit JSON</a></div>
+      <div class="claim-list">{% for claim in story.claims %}<article class="claim-row"><span class="claim-status claim-{{ claim.status }}">{{ claim.status }}</span><div><p>{{ claim.text }}</p><small>{{ claim.evidence_sources or 'Stored source' }}</small></div><span class="volatility">{{ claim.volatility }}</span></article>{% endfor %}</div>
     </section>
 
     <section class="panel source-panel">
-      <div class="panel-heading"><div><p class="section-index">03</p><h2>Sources by role</h2></div><span>{{ story.direct_source_count }} direct · {{ story.discovery_leads|length }} discovery lead{{ '' if story.discovery_leads|length == 1 else 's' }}</span></div>
+      <div class="panel-heading"><div><p class="section-index">04</p><h2>Source provenance</h2></div><span>{{ story.sources|length + story.evidence_sources|length }} stored</span></div>
       <div class="source-list">
       {% for source in story.sources %}
-        <article class="source-row">
-          <div class="source-role role-{{ source.source_role|lower }}">{{ source.source_role }}</div>
-          <div class="source-copy"><h3><a href="{{ source.url|safe_external_url }}" rel="noreferrer noopener" target="_blank">{{ source.title }}</a></h3><p>{{ source.passage }}</p><small>{{ source.source_name }} · {{ source.published_at|wire_time }} · {{ source.language|upper }}</small></div>
-          <span class="verify-chip">{{ source.verification_status }}</span>
-        </article>
+        <article class="source-row"><div class="source-role role-{{ source.source_role|lower }}">configured</div><div class="source-copy"><h3><a href="{{ source.url|safe_external_url }}" rel="noreferrer noopener" target="_blank">{{ source.title }}</a></h3><p>{{ source.passage }}</p><small>{{ source.source_name }} · {{ source.published_at|wire_time }}</small></div><span class="verify-chip">{{ source.source_role }}</span></article>
       {% endfor %}
-      {% for lead in story.discovery_leads %}
-        <article class="source-row">
-          <div class="source-role role-discovery">Discovery</div>
-          <div class="source-copy"><h3><a href="{{ lead.url|safe_external_url }}" rel="noreferrer noopener" target="_blank">{{ lead.display_name }}</a></h3><p>Public source lead discovered via HuggingNews. It does not count as verification until inspected and confirmed.</p><small>{{ lead.published_at|wire_time }} · discovery lead</small></div>
-          <span class="verify-chip">lead</span>
-        </article>
+      {% for source in story.evidence_sources if source.status == 'confirmed' %}
+        <article class="source-row"><div class="source-role role-reporting">{{ source.source_provenance|replace('_',' ') }}</div><div class="source-copy"><h3><a href="{{ source.final_url|safe_external_url }}" rel="noreferrer noopener" target="_blank">{{ source.title }}</a></h3><p>{{ source.passage }}</p><small>{{ source.hosting_publisher_name }} · {{ source.published_at|wire_time }}</small></div><span class="verify-chip">{{ source.confirmed_role }}</span></article>
       {% endfor %}
       </div>
-      {% set translated_sources = story.sources|rejectattr('language', 'equalto', 'en')|list %}
-      <div class="translation-state">
-        <div><span class="translation-icon" aria-hidden="true">文</span><div><strong>Translation state</strong>
-        {% if translated_sources %}
-          <p>Original-language passages are preserved for {{ translated_sources|length }} source{{ '' if translated_sources|length == 1 else 's' }}. No machine-translated passage is stored in this cluster.</p>
-        {% else %}
-          <p>All stored passages are in English. No translation was required.</p>
-        {% endif %}
-        </div></div>
-        <small>{{ translated_sources|map(attribute='language')|unique|join(', ')|upper if translated_sources else 'EN' }}</small>
-      </div>
     </section>
 
-    <section class="panel qualification-panel">
-      <div class="panel-heading"><div><p class="section-index">04</p><h2>Evidence and qualification</h2></div><span>{{ 'Candidate qualified' if story.qualification.qualified else 'Human review required' }}</span></div>
-      <div class="gate-grid">
-        <div class="gate-card {{ 'gate-pass' if story.qualification.evidence_gate else 'gate-locked' }}">
-          <small>Evidence gate</small><strong>{{ 'Passed' if story.qualification.evidence_gate else 'Locked' }}</strong>
-          <p>{{ story.qualification.event_count }} Event · {{ story.qualification.reporting_count }} confirmed reporting origin{{ '' if story.qualification.reporting_count == 1 else 's' }}{% if not story.qualification.evidence_gate and story.qualification.reporting_count %} · {{ story.qualification.reporting_needed }} more required{% endif %}</p>
-        </div>
-        <div class="gate-card {{ 'gate-pass' if story.qualification.effective_importance else 'gate-locked' }}">
-          <small>Importance gate</small><strong>{{ 'Passed' if story.qualification.effective_importance else 'Needs your decision' }}</strong>
-          <p>{% if story.qualification.automated_importance %}Automated qualification passed{% elif story.qualification.importance_override %}Human override recorded{% else %}Automated qualification did not pass{% endif %}</p>
-        </div>
-      </div>
-
-      <div class="evidence-workbench">
-        <div class="workbench-heading"><div><h3>Investigate evidence</h3><p>Inspect public pages first, then confirm what each source actually proves.</p></div></div>
-        <div class="linked-evidence-list">
-        {% for source in story.sources if source.source_role in ['Discovery', 'Reporting'] %}
-          <form action="{{ url_for('inspect_story_evidence', story_id=story.id) }}" method="post" class="linked-evidence-row">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="url" value="{{ source.canonical_url or source.url }}">
-            <input type="hidden" name="acquisition_method" value="linked">
-            <span><small>{{ 'Linked from' if source.source_role == 'Discovery' else 'Reporting page from' }} {{ source.source_name }}</small><strong>{{ source.canonical_url or source.url }}</strong></span>
-            <button type="submit">Inspect linked source</button>
-          </form>
-        {% endfor %}
-        {% for lead in story.discovery_leads %}
-          <form action="{{ url_for('inspect_story_evidence', story_id=story.id) }}" method="post" class="linked-evidence-row">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="url" value="{{ lead.url }}">
-            <input type="hidden" name="acquisition_method" value="linked">
-            <span><small>Discovery lead via HuggingNews · {{ lead.display_name }}</small><strong>{{ lead.url }}</strong></span>
-            <button type="submit">Inspect discovery lead</button>
-          </form>
-        {% endfor %}
-        </div>
-        <form action="{{ url_for('inspect_story_evidence', story_id=story.id) }}" method="post" class="manual-evidence-form">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="acquisition_method" value="manual">
-          <label>Attach another public source URL<input type="url" name="url" required placeholder="https://publisher.example/story"></label>
-          <button type="submit">Inspect source</button>
-        </form>
-
-        {% if story.evidence_sources %}
-        <div class="evidence-proposals">
-        {% for evidence in story.evidence_sources %}
-          <article class="evidence-proposal status-{{ evidence.status }}">
-            <div class="proposal-heading"><div><small>{{ evidence.acquisition_method }} evidence · {{ evidence.status }}</small><h3>{{ evidence.title or evidence.canonical_url }}</h3><p class="source-provenance-line">Hosted by {{ evidence.hosting_publisher_name }}</p></div><span>{{ evidence.confirmed_role or evidence.proposed_role or 'Pending' }}</span></div>
-            {% if evidence.passage %}<p>{{ evidence.passage }}</p>{% endif %}
-            {% if evidence.status == 'failed' %}<p class="inline-error">Inspection failed safely: {{ evidence.error_class }}. You may retry the URL.</p>{% endif %}
-            {% if evidence.status == 'queued' %}<p class="muted">Queued for bounded public-page inspection.</p>{% endif %}
-            {% if evidence.status == 'fetched' %}
-            <form action="{{ url_for('confirm_story_evidence', story_id=story.id, evidence_id=evidence.id) }}" method="post" class="confirm-evidence-form">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <label>Source role<select name="role" required>
-                <option value="">Choose a role</option>
-                <option value="Event" {{ 'selected' if evidence.proposed_role == 'Event' else '' }}>Event / first-party source</option>
-                <option value="Reporting" {{ 'selected' if evidence.proposed_role == 'Reporting' else '' }}>Independent reporting</option>
-                <option value="Discovery">Discovery only</option>
-              </select></label>
-              <label class="check-label"><input type="checkbox" name="first_party" value="yes"> I confirm this is a first-party source for the event</label>
-              <div class="reporting-provenance-fields">
-                <strong>Original reporting publisher</strong><small>Required for Reporting sources. A suggestion never counts until you confirm it.</small>
-                <label>Publication name<input type="text" name="origin_name" maxlength="120" value="{{ evidence.reporting_origin_name or evidence.proposed_origin_name or evidence.hosting_publisher_name }}" placeholder="Axios"></label>
-                <label>Relationship to the hosted page<select name="provenance_type">
-                  <option value="unknown">Choose provenance</option>
-                  {% set proposed_provenance = evidence.provenance_type if evidence.origin_status == 'confirmed' else evidence.proposed_provenance_type %}
-                  <option value="original" {{ 'selected' if proposed_provenance == 'original' else '' }}>Original reporting</option>
-                  <option value="syndicated" {{ 'selected' if proposed_provenance == 'syndicated' else '' }}>Syndicated or republished</option>
-                  <option value="cites" {{ 'selected' if proposed_provenance == 'cites' else '' }}>Cites another publisher</option>
-                </select></label>
-                <label>Original article URL <span>optional</span><input type="url" name="origin_url" value="{{ evidence.reporting_origin_url or evidence.proposed_origin_url or '' }}" placeholder="https://original-publisher.example/article"></label>
-              </div>
-              <div class="claim-mapping"><strong>Map this source to claims</strong><small>Choose “Reports or attributes” when a page establishes that an announcement or claim was made without independently proving it.</small>
-              {% for claim in story.claims %}
-                <label><span>{{ claim.text }}</span><select name="claim_{{ claim.id }}">
-                  <option value="">No relationship</option>
-                  {% set relationship = evidence.claim_relationships.get(claim.id, '') %}
-                  <option value="attributes" {{ 'selected' if relationship == 'attributes' else '' }}>Reports or attributes the claim</option>
-                  <option value="supports" {{ 'selected' if relationship == 'supports' else '' }}>Directly supports the claim</option>
-                  <option value="contradicts" {{ 'selected' if relationship == 'contradicts' else '' }}>Contradicts the claim</option>
-                  <option value="context" {{ 'selected' if relationship == 'context' else '' }}>Context only</option>
-                </select></label>
-              {% endfor %}
-              </div>
-              <label>Confirmation note <span>optional</span><textarea name="reason" rows="2" placeholder="Why this role and relationship are appropriate"></textarea></label>
-              <button class="button button-primary" type="submit">Confirm evidence</button>
-            </form>
-            {% elif evidence.status == 'confirmed' %}
-              <div class="confirmed-evidence"><strong>Confirmed as {{ evidence.confirmed_role }}</strong><span>Hosted by {{ evidence.hosting_publisher_name }}</span>{% if evidence.confirmed_role == 'Reporting' %}<span>Original reporting: {{ evidence.reporting_origin_name or 'Needs review' }}</span><span>{{ evidence.provenance_type|replace('_', ' ')|title }} · {{ evidence.origin_status|replace('_', ' ') }}</span>{% endif %}</div>
-              {% for link in evidence.claim_links %}<p class="claim-link"><b>{{ link.relationship_label }}</b> · {{ link.text }}</p>{% endfor %}
-              {% if evidence.confirmed_role == 'Reporting' %}
-              <details class="provenance-review" {{ 'open' if evidence.origin_review_required else '' }}>
-                <summary>{{ 'Confirm original publisher' if evidence.origin_review_required else 'Correct publisher provenance or claim mapping' }}</summary>
-                <form action="{{ url_for('confirm_story_evidence', story_id=story.id, evidence_id=evidence.id) }}" method="post" class="confirm-evidence-form">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                  <input type="hidden" name="role" value="Reporting">
-                  <label>Original reporting publication<input type="text" name="origin_name" maxlength="120" required value="{{ evidence.reporting_origin_name or evidence.proposed_origin_name or evidence.hosting_publisher_name }}"></label>
-                  <label>Relationship to the hosted page<select name="provenance_type" required>
-                    {% set active_provenance = evidence.provenance_type if evidence.origin_status == 'confirmed' else evidence.proposed_provenance_type %}
-                    <option value="">Choose provenance</option>
-                    <option value="original" {{ 'selected' if active_provenance == 'original' else '' }}>Original reporting</option>
-                    <option value="syndicated" {{ 'selected' if active_provenance == 'syndicated' else '' }}>Syndicated or republished</option>
-                    <option value="cites" {{ 'selected' if active_provenance == 'cites' else '' }}>Cites another publisher</option>
-                  </select></label>
-                  <label>Original article URL <span>optional</span><input type="url" name="origin_url" value="{{ evidence.reporting_origin_url or evidence.proposed_origin_url or '' }}"></label>
-                  <div class="claim-mapping"><strong>Claim relationships</strong><small>These mappings remain part of the human-confirmed evidence record.</small>
-                  {% for claim in story.claims %}
-                    {% set relationship = evidence.claim_relationships.get(claim.id, '') %}
-                    <label><span>{{ claim.text }}</span><select name="claim_{{ claim.id }}">
-                      <option value="">No relationship</option>
-                      <option value="attributes" {{ 'selected' if relationship == 'attributes' else '' }}>Reports or attributes the claim</option>
-                      <option value="supports" {{ 'selected' if relationship == 'supports' else '' }}>Directly supports the claim</option>
-                      <option value="contradicts" {{ 'selected' if relationship == 'contradicts' else '' }}>Contradicts the claim</option>
-                      <option value="context" {{ 'selected' if relationship == 'context' else '' }}>Context only</option>
-                    </select></label>
-                  {% endfor %}
-                  </div>
-                  <label>Confirmation note <span>optional</span><textarea name="reason" rows="2" placeholder="Why this publisher provenance is appropriate"></textarea></label>
-                  <button class="button button-primary" type="submit">Confirm publisher provenance</button>
-                </form>
-              </details>
-              {% endif %}
-              <form action="{{ url_for('exclude_story_evidence', story_id=story.id, evidence_id=evidence.id) }}" method="post" class="exclude-evidence-form">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <input type="text" name="reason" placeholder="Reason for excluding this evidence">
-                <button type="submit">Exclude evidence</button>
-              </form>
-            {% elif evidence.status == 'excluded' %}
-              <p class="muted">Excluded from qualification. The evidence and decision history remain preserved.</p>
-            {% endif %}
-          </article>
-        {% endfor %}
-        </div>
-        {% endif %}
-      </div>
-
-      {% if story.status in ['signal', 'watch'] %}
-      <form action="{{ url_for('qualify_story', story_id=story.id) }}" method="post" class="qualify-form">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <label>Qualification reason {% if not story.qualification.automated_importance %}<span>required for importance override</span>{% endif %}
-          <textarea name="reason" rows="2" {{ 'required' if not story.qualification.automated_importance else '' }} placeholder="Why this development deserves a brief"></textarea>
-        </label>
-        <button class="button button-primary" type="submit" {{ 'disabled' if not story.qualification.evidence_gate else '' }}>Qualify as candidate</button>
-        {% if not story.qualification.evidence_gate %}<p class="muted">Qualification remains locked until one Event source or two independent original reporting publishers are confirmed.</p>{% endif %}
-      </form>
-      {% else %}
-      <div class="qualified-state">
-        {% if story.manual_override_active and not story.qualification.verified_qualified %}
-        <strong>Manually approved</strong><p>The human override is recorded. Automated evidence and importance results remain unchanged.</p>
-        {% else %}
-        <strong>Candidate qualification recorded</strong><p>Drafting still requires the separate human approval checkpoint.</p>
-        {% endif %}
-      </div>
-      {% endif %}
+    <section class="panel">
+      <div class="panel-heading"><div><p class="section-index">05</p><h2>Decision history</h2></div><span>Audit retained</span></div>
+      <ol class="cluster-timeline">{% for action in story.actions %}<li><span class="timeline-dot"></span><div><small>{{ action.created_at|wire_time('full') }}</small><strong>{{ action.action|replace('_',' ')|title }}</strong><p>{{ action.reason or 'No note.' }}</p></div></li>{% else %}<li><div><p>No manual decisions recorded.</p></div></li>{% endfor %}</ol>
     </section>
-
-    {% if story.relevance_bridge %}
-    <section class="panel lens-panel">
-      <div class="panel-heading"><div><p class="section-index">05</p><h2>Open-source opportunity</h2></div><span class="strength strength-{{ story.opportunity_strength|lower }}">{{ story.opportunity_strength }}</span></div>
-      <div class="lens-grid"><div><h3>Relevance bridge</h3><p>{{ story.relevance_bridge }}</p></div><div><h3>Limitation</h3><p>{{ story.counterargument }}</p></div></div>
-    </section>
-    {% endif %}
   </div>
 
-  <aside class="review-panel panel"{% if story.draft_request %} data-draft-status-url="{{ url_for('story_draft_status', story_id=story.id) }}" data-draft-active="{{ 'true' if story.draft_request.active else 'false' }}" data-draft-auto-open="{{ 'true' if auto_open_draft else 'false' }}"{% endif %}>
-    <p class="section-index">Draft approval</p><h2>Approve a drafting mode</h2>
-    {% if story.manual_override_active %}<p><span class="tag tag-outline">Manually approved</span></p>{% endif %}
-    {% if story.draft_request %}
-    <div class="approval-pending draft-state draft-state-{{ story.draft_request.status }}" role="status" aria-live="polite">
-      <small>Draft generation</small>
-      <strong data-draft-status-label>{{ story.draft_request.label }}</strong>
-      <p data-draft-status-message>{{ story.draft_request.message }}</p>
-      {% if story.draft_request.attempt_count %}<span data-draft-attempts>Attempt {{ story.draft_request.attempt_count }}</span>{% endif %}
-      <a class="button button-primary draft-review-link" data-draft-review href="{{ url_for('draft_detail', draft_id=story.draft_request.draft_id) if story.draft_request.draft_id else '#' }}" {{ 'hidden' if not story.draft_request.draft_id else '' }}>Review draft</a>
-      <form action="{{ url_for('retry_story_draft', story_id=story.id) }}" method="post" class="draft-retry-form" data-draft-retry {{ 'hidden' if not story.draft_request.retryable else '' }}>
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button class="button" type="submit">Retry generation</button>
-      </form>
-    </div>
-    {% endif %}
-    {% if not story.draft_request or story.draft_request.status == 'needs_reapproval' %}
-    {% set neutral_normal_available = story.qualification.qualified and story.status in ['candidate','draft_ready'] and story.draft_request_allowed %}
-    {% set lens_normal_available = neutral_normal_available and story.opportunity_strength in ['Strong','Moderate'] %}
-    <p class="muted">Qualification never creates a draft. Approve one mode explicitly when the story is ready.</p>
-    {% if not neutral_normal_available %}<div class="approval-lock"><strong>Neutral brief locked</strong><p>The normal evidence and importance qualification has not passed.</p></div>{% endif %}
-    {% if not lens_normal_available %}<div class="approval-lock"><strong>Open-source lens locked</strong><p>The normal qualification or Strong/Moderate lens requirement has not passed.</p></div>{% endif %}
-    <form action="{{ url_for('review_story', story_id=story.id) }}" method="post" class="review-form">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input type="hidden" name="confirmation_version" value="" data-manual-confirmation-version>
-      <label>Guidance or reason <span>optional</span><textarea name="reason" rows="3" placeholder="What should the next step preserve or investigate?"></textarea></label>
-      <button class="action-choice choice-neutral" name="action" value="approve_neutral" type="submit" {{ 'disabled' if not neutral_normal_available else '' }}>
-        <span><strong>Approve and create neutral draft</strong><small>Start a facts-first draft immediately</small></span><b>→</b>
-      </button>
-      <button class="action-choice choice-lens" name="action" value="approve_lens" type="submit" {{ 'disabled' if not lens_normal_available else '' }}>
-        <span><strong>Approve and create open-source lens draft</strong><small>Start neutral reporting + labelled analysis immediately</small></span><b>→</b>
-      </button>
-      {% if not neutral_normal_available %}
-      <button class="action-choice choice-neutral" name="action" value="manual_approve_neutral" type="submit" data-manual-override-action {{ 'disabled' if not story.manual_override_allowed else '' }}>
-        <span><strong>Manually approve and create neutral draft</strong><small>Override qualification and start a facts-first draft</small></span><b>→</b>
-      </button>
-      {% endif %}
-      {% if not lens_normal_available %}
-      <button class="action-choice choice-lens" name="action" value="manual_approve_lens" type="submit" data-manual-override-action {{ 'disabled' if not story.manual_override_allowed else '' }}>
-        <span><strong>Manually approve and create open-source lens draft</strong><small>Override qualification and start the labelled lens draft</small></span><b>→</b>
-      </button>
-      {% endif %}
-      {% if not story.manual_override_allowed %}<p class="muted">{{ story.manual_override_lock_reason }}</p>{% endif %}
-      <div class="secondary-actions">
-        <button name="action" value="archive" type="submit">Archive</button>
-      </div>
-    </form>
-    {% endif %}
-    {% if story.actions %}
-    <div class="action-history"><h3>Decision history</h3>{% for action in story.actions[:4] %}<div><span>{{ action.action|replace('_',' ') }}</span><small>{{ action.created_at|wire_time }}</small>{% if action.approval_basis == 'manual_override' %}<small>Manual override · Evidence {{ 'passed' if action.qualification_snapshot.evidence_gate else 'locked' }} · Importance {{ 'passed' if action.qualification_snapshot.effective_importance else 'locked' }} · Lens {{ 'eligible' if action.qualification_snapshot.lens_eligible else 'not eligible' }}</small>{% endif %}</div>{% endfor %}</div>
-    {% endif %}
+  <aside class="story-rail">
+    <section class="panel"><p class="section-index">Status</p><dl class="detail-list"><div><dt>Trust</dt><dd>{{ story.trust_label }}</dd></div><div><dt>Research</dt><dd>{{ story.research_status|replace('_',' ') }}</dd></div><div><dt>Priority floor</dt><dd>{{ 'Applied' if story.priority_floor_applied else 'Pending research' }}</dd></div><div><dt>Publishing</dt><dd>Manual only</dd></div></dl></section>
+    <section class="panel"><p class="section-index">Content history</p><div class="version-list">{% for draft in story.drafts %}<a href="{{ url_for('draft_detail', draft_id=draft.id) }}"><span>v{{ draft.version }} · {{ draft.status }}</span><small>{{ draft.updated_at|wire_time }}</small></a>{% else %}<p>No content yet.</p>{% endfor %}</div></section>
+    {% if story.content_allowed %}<form class="panel" action="{{ url_for('review_story', story_id=story.id) }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label>Audit note<textarea name="reason" rows="2"></textarea></label><div class="header-actions"><button class="button button-secondary" name="action" value="archive">Archive</button><button class="button button-secondary" name="action" value="withdraw">Withdraw</button></div></form>{% endif %}
   </aside>
 </div>
 {% endblock %}

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.open-source-ai-news-wire/schemas/assistance-reddit-result-v1.json",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "operation",
+    "supported_claim_ids",
+    "headline",
+    "factual_brief",
+    "lens",
+    "notes",
+    "suggested_flair",
+    "subreddit_reminder"
+  ],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "operation": {"type": "string", "const": "draft_reddit"},
+    "supported_claim_ids": {"type": "array", "items": {"type": "integer"}},
+    "headline": {"type": "string", "maxLength": 500},
+    "factual_brief": {"type": "string", "maxLength": 12000},
+    "lens": {"type": "string", "maxLength": 6000},
+    "notes": {"type": "string", "maxLength": 4000},
+    "suggested_flair": {"type": "string", "maxLength": 80},
+    "subreddit_reminder": {"type": "string", "const": "Verify rules before posting"}
+  },
+  "additionalProperties": false
+}
