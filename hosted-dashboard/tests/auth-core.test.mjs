@@ -25,19 +25,19 @@ test("allows both exact Workspace domains and rejects all others", () => {
 
 test("verifies a slow salted master-password digest", async () => {
   const salt = Uint8Array.from({ length: 24 }, (_, index) => index + 1);
-  const digest = await derivePbkdf2("a sufficiently long test password", salt, 600_000);
+  const digest = await derivePbkdf2("a sufficiently long test password", salt, 100_000);
   const verifier = [
     "pbkdf2-sha256",
-    "600000",
+    "100000",
     base64UrlEncode(salt),
     base64UrlEncode(digest),
   ].join(":");
 
   assert.equal(await verifyPassword("a sufficiently long test password", verifier), true);
   assert.equal(await verifyPassword("wrong password", verifier), false);
-  assert.equal(parsePasswordVerifier(verifier).iterations, 600_000);
+  assert.equal(parsePasswordVerifier(verifier).iterations, 100_000);
   assert.throws(
-    () => parsePasswordVerifier(verifier.replace("600000", "599999")),
+    () => parsePasswordVerifier(verifier.replace("100000", "99999")),
     /Invalid master password verifier format/,
   );
 });

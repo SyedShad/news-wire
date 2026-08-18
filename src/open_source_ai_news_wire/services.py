@@ -426,7 +426,12 @@ class DashboardService:
             operational_kinds,
         )
 
-    def get_story(self, story_id: str) -> dict[str, Any] | None:
+    def get_story(
+        self,
+        story_id: str,
+        *,
+        ranked_summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         story = self.database.one("SELECT * FROM story_cluster WHERE id = ?", (story_id,))
         if not story:
             return None
@@ -585,9 +590,13 @@ class DashboardService:
             if story["qualification"]["verified_qualified"]
             else ""
         )
-        ranked = next(
-            (item for item in self._story_rows() if item["id"] == story_id),
-            None,
+        ranked = (
+            ranked_summary
+            if ranked_summary is not None and ranked_summary.get("id") == story_id
+            else next(
+                (item for item in self._story_rows() if item["id"] == story_id),
+                None,
+            )
         )
         if ranked:
             for key in (

@@ -38,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an explicit operation allowlist. The laptop accepts no inbound connection.
 - Custom Sites access and application HMAC use separate Keychain-only machine
   credentials, so the owner perimeter also remains enforced on bridge APIs.
+- Owner verification retains the generated 256-bit Keychain password and uses
+  workerd's 100,000-iteration PBKDF2 ceiling, with independent Sites access,
+  throttling, lockout, credential-versioned sessions, and logout controls.
 - Unauthenticated pages, APIs, server-rendered payloads, and exports fail closed;
   remote mutations require both owner authentication and a current heartbeat.
 

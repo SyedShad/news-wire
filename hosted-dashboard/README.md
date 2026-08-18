@@ -13,8 +13,10 @@ The first production release is owner-only:
 
 1. ChatGPT Sites custom access controls who can open the project.
 2. The application owner password is a second data-access gate.
-3. The generated password uses PBKDF2-HMAC-SHA256 with a per-verifier salt and
-   at least 600,000 iterations.
+3. The password is a generated 256-bit value. Its per-verifier salted
+   PBKDF2-HMAC-SHA256 digest uses workerd's enforced maximum of 100,000
+   iterations; the outer Sites gate, login throttling, and lockout provide
+   independent online-attack controls.
 4. Failed logins are throttled and locked out; sessions expire after eight
    hours; credential-version rotation invalidates existing sessions; logout
    removes the server-side token hash.
@@ -90,6 +92,7 @@ For local authentication and bridge development:
 
 ```bash
 npm run auth:provision-local
+npm run auth:refresh-verifier
 npm run auth:provision-bridge -- localhost:3000
 npm run dev
 ```
@@ -97,6 +100,8 @@ npm run dev
 The provisioning helpers store the owner password and bridge secret in macOS
 Keychain and create an ignored, owner-readable `.env.local`. The owner password
 itself is never written to the environment file.
+`auth:refresh-verifier` keeps the existing Keychain password and safely
+regenerates only its ignored local verifier when the hosting runtime changes.
 
 ## Laptop bridge operation
 

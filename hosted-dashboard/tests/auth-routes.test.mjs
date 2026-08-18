@@ -91,9 +91,9 @@ const salt = Buffer.alloc(24, 7);
 const masterPassword = "test-only-master-password-with-enough-entropy";
 const masterVerifier = [
   "pbkdf2-sha256",
-  "600000",
+  "100000",
   salt.toString("base64url"),
-  pbkdf2Sync(masterPassword, salt, 600_000, 32, "sha256").toString("base64url"),
+  pbkdf2Sync(masterPassword, salt, 100_000, 32, "sha256").toString("base64url"),
 ].join(":");
 
 const database = new MemoryD1();

@@ -13,6 +13,7 @@
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
     "auth:provision-local": "node scripts/provision-local-auth.mjs",
+    "auth:refresh-verifier": "node scripts/provision-local-auth.mjs --refresh-verifier",
     "auth:provision-bridge": "node scripts/provision-bridge-secret.mjs"
   },
   "dependencies": {

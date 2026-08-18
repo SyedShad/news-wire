@@ -1,5 +1,10 @@
 const encoder = new TextEncoder();
 
+// workerd, the runtime used by Sites, rejects PBKDF2 requests above 100,000
+// iterations. The owner credential is a generated 256-bit value, while the
+// Sites access gate, login throttling, and lockout protect online verification.
+export const OWNER_PBKDF2_ITERATIONS = 100_000;
+
 export function base64UrlEncode(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -81,7 +86,7 @@ export function parsePasswordVerifier(value: string): ParsedPasswordVerifier {
   if (
     algorithm !== "pbkdf2-sha256" ||
     !Number.isSafeInteger(iterations) ||
-    iterations < 600_000 ||
+    iterations !== OWNER_PBKDF2_ITERATIONS ||
     !saltText ||
     !digestText ||
     extra !== undefined

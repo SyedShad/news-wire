@@ -326,7 +326,10 @@ def build_dashboard_snapshot(
     summaries.sort(key=ranking_sort_key)
     stories: list[dict[str, Any]] = []
     for summary in summaries:
-        detailed = service.get_story(str(summary["id"])) or summary
+        detailed = service.get_story(
+            str(summary["id"]),
+            ranked_summary=summary,
+        ) or summary
         stories.append(_json_safe(detailed))
     drafts = [_json_safe(item) for item in service.list_drafts()[:100]]
     sources = [_json_safe(item) for item in service.sources()["rows"]]
@@ -441,7 +444,12 @@ def build_resource_projection(
     current.sort(key=ranking_sort_key)
     for rank, summary in enumerate(current):
         story_id = str(summary["id"])
-        append("story_detail", story_id, rank, service.get_story(story_id) or summary)
+        append(
+            "story_detail",
+            story_id,
+            rank,
+            service.get_story(story_id, ranked_summary=summary) or summary,
+        )
 
     drafts = service.list_drafts()
     for rank, draft in enumerate(drafts):
@@ -755,7 +763,11 @@ class HostedBridge:
             except OSError:
                 values.append(None)
             else:
-                values.append((status.st_mtime_ns, status.st_size))
+                values.append(
+                    (0, 0)
+                    if path.name.endswith("-wal") and status.st_size == 0
+                    else (status.st_mtime_ns, status.st_size)
+                )
         return tuple(values)
 
     def _projection_bundle(

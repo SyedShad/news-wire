@@ -23,6 +23,10 @@ listener. HMAC signatures bind timestamp, nonce, method, path, and body digest;
 the hosted service rejects replay, stale requests, oversized payloads,
 unsupported schema/runtime versions, and commands outside the fixed allowlist.
 Remote controls are disabled without a current heartbeat.
+The application password is a generated 256-bit value. Its salted
+PBKDF2-HMAC-SHA256 verifier uses the workerd runtime's enforced 100,000-iteration
+maximum; private Sites access, throttling, lockout, credential-versioned
+sessions, and logout are independent controls around that verifier.
 The custom Sites perimeter independently requires a machine-access bearer token
 for bridge requests. That token and the HMAC secret use separate macOS Keychain
 services and never appear in source, local JSON configuration, LaunchAgent
