@@ -100,5 +100,26 @@ test("dashboard snapshots and owner operations reject incomplete or unsupported 
     snapshot,
   });
   assert.equal(state.kind, "state");
+  const delta = parseBridgeSync({
+    schema_version: 2,
+    kind: "stories",
+    sync_id: "0123456789abcdef",
+    mode: "delta",
+    stories: [{ id: "story-2" }],
+    deleted_ids: ["story-1"],
+  });
+  assert.deepEqual(delta.deleted_ids, ["story-1"]);
+  assert.equal(delta.mode, "delta");
+  assert.throws(
+    () => parseBridgeSync({
+      schema_version: 2,
+      kind: "stories",
+      sync_id: "0123456789abcdef",
+      mode: "full",
+      stories: [],
+      deleted_ids: ["story-1"],
+    }),
+    /full story sync cannot delete ids/,
+  );
   assert.throws(() => parseBridgeSync({ schema_version: 1 }), /Unsupported bridge sync schema/);
 });

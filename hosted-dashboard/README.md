@@ -69,6 +69,12 @@ values, marking every credential as secret:
 Do not configure an owner password in plaintext. Do not place credentials in
 source control, deployment descriptions, command output, or chat.
 
+Because custom Sites access also guards machine endpoints, provision the
+project's Sites machine-access token into the laptop's macOS Keychain through
+the local bridge's standard-input setup path. The token is separate from
+`BRIDGE_SECRET`, is never a Sites runtime variable, and is sent only in the
+`OAI-Sites-Authorization` request header.
+
 ## Local validation
 
 Requirements: Node.js 22.13+, Python 3.12+, the News Wire runtime database, and

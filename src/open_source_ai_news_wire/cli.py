@@ -26,6 +26,7 @@ from .hosted_bridge import (
     load_bridge_config,
     save_bridge_config,
     store_bridge_secret,
+    store_sites_access_token,
 )
 from .operations import create_purge_plan, execute_purge_plan, export_diagnostics
 from .pilot import PilotGateError, PilotManager
@@ -77,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hosted_bridge.add_argument("--url", help="Hosted dashboard HTTPS origin")
     hosted_bridge.add_argument("--secret-stdin", action="store_true", help=argparse.SUPPRESS)
+    hosted_bridge.add_argument("--sites-token-stdin", action="store_true", help=argparse.SUPPRESS)
     hosted_bridge.add_argument("--generate-secret", action="store_true", help=argparse.SUPPRESS)
     hosted_bridge.add_argument("--interval-seconds", type=int, default=10)
 
@@ -212,6 +214,11 @@ def main(argv: list[str] | None = None) -> int:
                 store_bridge_secret(arguments.url, secret)
             elif arguments.generate_secret:
                 store_bridge_secret(arguments.url, generate_bridge_secret())
+            if arguments.sites_token_stdin:
+                sites_token = sys.stdin.readline().strip()
+                if not sites_token:
+                    parser.error("no Sites access token was provided on standard input")
+                store_sites_access_token(arguments.url, sites_token)
             print("Hosted dashboard bridge configuration saved; no secret was printed.")
             return 0
         base_url = arguments.url or load_bridge_config(database.paths)

@@ -55,13 +55,17 @@ export type BridgeSyncEnvelope =
       schema_version: 2;
       kind: "stories";
       sync_id: string;
+      mode: "full" | "delta";
       stories: StoryProjection[];
+      deleted_ids: string[];
     }
   | {
       schema_version: 2;
       kind: "resources";
       sync_id: string;
+      mode: "full" | "delta";
       resources: ResourceProjection[];
+      deleted_ids: string[];
     }
   | {
       schema_version: 2;
@@ -70,6 +74,7 @@ export type BridgeSyncEnvelope =
       projection: "stories" | "resources";
       digest: string;
       total: number;
+      mode: "full" | "delta";
     };
 
 export type StoredDashboardSnapshot = {

@@ -76,6 +76,13 @@ export function parseBridgeSync(value: unknown): BridgeSyncEnvelope {
     };
   }
   if (kind === "stories") {
+    const mode = value.mode === undefined ? "full" : value.mode;
+    const deletedIds = value.deleted_ids === undefined ? [] : value.deleted_ids;
+    if (mode !== "full" && mode !== "delta") throw new TypeError("stories mode is invalid");
+    if (!Array.isArray(deletedIds) || deletedIds.length > 100 || deletedIds.some((id) => typeof id !== "string" || !id || id.length > 200)) {
+      throw new TypeError("story deletions are invalid");
+    }
+    if (mode === "full" && deletedIds.length) throw new TypeError("full story sync cannot delete ids");
     if (!Array.isArray(value.stories) || value.stories.length > 100 || !value.stories.every(isRecord)) {
       throw new TypeError("stories chunk is invalid");
     }
@@ -83,9 +90,16 @@ export function parseBridgeSync(value: unknown): BridgeSyncEnvelope {
     if (stories.some((story) => typeof story.id !== "string" || !story.id || story.id.length > 200)) {
       throw new TypeError("story id is invalid");
     }
-    return { schema_version: 2, kind, sync_id: syncId, stories };
+    return { schema_version: 2, kind, sync_id: syncId, mode, stories, deleted_ids: deletedIds };
   }
   if (kind === "resources") {
+    const mode = value.mode === undefined ? "full" : value.mode;
+    const deletedIds = value.deleted_ids === undefined ? [] : value.deleted_ids;
+    if (mode !== "full" && mode !== "delta") throw new TypeError("resources mode is invalid");
+    if (!Array.isArray(deletedIds) || deletedIds.length > 100 || deletedIds.some((id) => typeof id !== "string" || !id || id.length > 500)) {
+      throw new TypeError("resource deletions are invalid");
+    }
+    if (mode === "full" && deletedIds.length) throw new TypeError("full resource sync cannot delete ids");
     if (!Array.isArray(value.resources) || value.resources.length > 100 || !value.resources.every(isRecord)) {
       throw new TypeError("resources chunk is invalid");
     }
@@ -94,9 +108,11 @@ export function parseBridgeSync(value: unknown): BridgeSyncEnvelope {
     if (resources.some((resource) => !supported.has(resource.resource_type) || typeof resource.resource_id !== "string" || !resource.resource_id || resource.resource_id.length > 240 || !Number.isInteger(resource.rank) || !isRecord(resource.payload))) {
       throw new TypeError("resource projection is invalid");
     }
-    return { schema_version: 2, kind, sync_id: syncId, resources };
+    return { schema_version: 2, kind, sync_id: syncId, mode, resources, deleted_ids: deletedIds };
   }
   if (kind === "complete") {
+    const mode = value.mode === undefined ? "full" : value.mode;
+    if (mode !== "full" && mode !== "delta") throw new TypeError("completion mode is invalid");
     const digest = requiredSyncString(value, "digest", 64);
     if (!/^[a-f0-9]{64}$/iu.test(digest)) throw new TypeError("digest is invalid");
     if (value.projection !== "stories" && value.projection !== "resources") {
@@ -112,6 +128,7 @@ export function parseBridgeSync(value: unknown): BridgeSyncEnvelope {
       projection: value.projection,
       digest,
       total: Number(value.total),
+      mode,
     };
   }
   throw new TypeError("Unsupported bridge sync kind");

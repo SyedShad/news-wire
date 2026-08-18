@@ -152,7 +152,12 @@ export async function saveProjectionState(
     snapshot: DashboardSnapshot;
     bridgeVersion: string;
   },
-): Promise<{ storiesRequired: boolean; resourcesRequired: boolean }> {
+): Promise<{
+  storiesRequired: boolean;
+  resourcesRequired: boolean;
+  storyDigest: string;
+  resourceDigest: string;
+}> {
   await ensureDashboardSchema(db);
   const previous = await db.prepare("SELECT story_digest, resource_digest FROM projection_state WHERE id = 1")
     .first<{ story_digest: string; resource_digest: string }>();
@@ -186,7 +191,12 @@ export async function saveProjectionState(
         bridge_version = excluded.bridge_version, runtime_version = excluded.runtime_version,
         last_error = NULL`).bind(now, input.bridgeVersion, input.snapshot.runtime_version),
   ]);
-  return { storiesRequired, resourcesRequired };
+  return {
+    storiesRequired,
+    resourcesRequired,
+    storyDigest: previous?.story_digest || "",
+    resourceDigest: previous?.resource_digest || "",
+  };
 }
 
 function scalarText(value: JsonValue | undefined): string {
@@ -204,11 +214,17 @@ function scalarNumber(value: JsonValue | undefined, fallback: number): number {
 export async function saveStoryChunk(
   db: D1Database,
   syncId: string,
+  mode: "full" | "delta",
   stories: StoryProjection[],
+  deletedIds: string[],
 ): Promise<void> {
   await ensureDashboardSchema(db);
   const now = Date.now();
-  const statements = stories.map((story, index) => db.prepare(`INSERT INTO story_projection
+  const statements = [
+    ...(mode === "delta"
+      ? deletedIds.map((id) => db.prepare("DELETE FROM story_projection WHERE id = ?").bind(id))
+      : []),
+    ...stories.map((story, index) => db.prepare(`INSERT INTO story_projection
     (id, sync_id, status, lane, freshness, research_status, ingestion_context,
      is_review_current, is_correction, priority_rank, newest_rank, summary_json, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -223,7 +239,8 @@ export async function saveStoryChunk(
         scalarText(story.ingestion_context), scalarBoolean(story.is_review_current),
         scalarBoolean(story.is_correction), scalarNumber(story.priority_rank, index),
         scalarNumber(story.newest_rank, index), JSON.stringify(story), now,
-      ));
+      )),
+  ];
   for (let offset = 0; offset < statements.length; offset += 50) {
     await db.batch(statements.slice(offset, offset + 50));
   }
@@ -234,13 +251,18 @@ export async function completeProjectionSync(
   syncId: string,
   storyDigest: string,
   storyTotal: number,
+  mode: "full" | "delta",
 ): Promise<void> {
   await ensureDashboardSchema(db);
-  const count = await db.prepare("SELECT COUNT(*) AS count FROM story_projection WHERE sync_id = ?")
-    .bind(syncId).first<{ count: number }>();
+  const count = mode === "delta"
+    ? await db.prepare("SELECT COUNT(*) AS count FROM story_projection").first<{ count: number }>()
+    : await db.prepare("SELECT COUNT(*) AS count FROM story_projection WHERE sync_id = ?")
+      .bind(syncId).first<{ count: number }>();
   if (Number(count?.count || 0) !== storyTotal) throw new Error("story_projection_incomplete");
   await db.batch([
-    db.prepare("DELETE FROM story_projection WHERE sync_id != ?").bind(syncId),
+    ...(mode === "full"
+      ? [db.prepare("DELETE FROM story_projection WHERE sync_id != ?").bind(syncId)]
+      : []),
     db.prepare("UPDATE projection_state SET story_digest = ?, story_total = ? WHERE id = 1 AND sync_id = ?")
       .bind(storyDigest, storyTotal, syncId),
   ]);
@@ -249,11 +271,17 @@ export async function completeProjectionSync(
 export async function saveResourceChunk(
   db: D1Database,
   syncId: string,
+  mode: "full" | "delta",
   resources: ResourceProjection[],
+  deletedIds: string[],
 ): Promise<void> {
   await ensureDashboardSchema(db);
   const now = Date.now();
-  const statements = resources.map((resource) => db.prepare(`INSERT INTO resource_projection
+  const statements = [
+    ...(mode === "delta"
+      ? deletedIds.map((key) => db.prepare("DELETE FROM resource_projection WHERE resource_key = ?").bind(key))
+      : []),
+    ...resources.map((resource) => db.prepare(`INSERT INTO resource_projection
     (resource_key, resource_type, resource_id, sync_id, rank, payload_json, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(resource_key) DO UPDATE SET resource_type = excluded.resource_type,
@@ -261,7 +289,8 @@ export async function saveResourceChunk(
       payload_json = excluded.payload_json, updated_at = excluded.updated_at`).bind(
         `${resource.resource_type}:${resource.resource_id}`, resource.resource_type,
         resource.resource_id, syncId, resource.rank, JSON.stringify(resource.payload), now,
-      ));
+      )),
+  ];
   for (let offset = 0; offset < statements.length; offset += 50) {
     await db.batch(statements.slice(offset, offset + 50));
   }
@@ -272,13 +301,18 @@ export async function completeResourceSync(
   syncId: string,
   digest: string,
   total: number,
+  mode: "full" | "delta",
 ): Promise<void> {
   await ensureDashboardSchema(db);
-  const count = await db.prepare("SELECT COUNT(*) AS count FROM resource_projection WHERE sync_id = ?")
-    .bind(syncId).first<{ count: number }>();
+  const count = mode === "delta"
+    ? await db.prepare("SELECT COUNT(*) AS count FROM resource_projection").first<{ count: number }>()
+    : await db.prepare("SELECT COUNT(*) AS count FROM resource_projection WHERE sync_id = ?")
+      .bind(syncId).first<{ count: number }>();
   if (Number(count?.count || 0) !== total) throw new Error("resource_projection_incomplete");
   await db.batch([
-    db.prepare("DELETE FROM resource_projection WHERE sync_id != ?").bind(syncId),
+    ...(mode === "full"
+      ? [db.prepare("DELETE FROM resource_projection WHERE sync_id != ?").bind(syncId)]
+      : []),
     db.prepare("UPDATE projection_state SET resource_digest = ?, resource_total = ? WHERE id = 1 AND sync_id = ?")
       .bind(digest, total, syncId),
   ]);

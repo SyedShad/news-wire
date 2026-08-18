@@ -89,6 +89,13 @@ recover, wake the laptop, confirm network access, run `hosted-bridge once`, then
 start or reinstall the LaunchAgent. The local loopback dashboard remains the
 emergency fallback.
 
+Custom Sites access protects bridge APIs as well as browser pages. The laptop
+therefore stores two independent credentials in macOS Keychain: the application
+HMAC bridge secret and the Sites machine-access token. The latter is sent only
+as `OAI-Sites-Authorization` to the configured HTTPS origin. Neither credential
+is written to the bridge configuration or LaunchAgent plist. A production
+`401` means the Sites token must be refreshed in Keychain before retrying.
+
 ## Sources and network safety
 
 ```bash

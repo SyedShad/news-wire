@@ -34,20 +34,50 @@ export async function PUT(request: Request) {
         snapshot: envelope.snapshot,
         bridgeVersion: bridgeVersion.slice(0, 80),
       });
-      return noStore(NextResponse.json({ ok: true, stories_required: result.storiesRequired, resources_required: result.resourcesRequired }));
+      return noStore(NextResponse.json({
+        ok: true,
+        stories_required: result.storiesRequired,
+        resources_required: result.resourcesRequired,
+        story_digest: result.storyDigest,
+        resource_digest: result.resourceDigest,
+      }));
     }
     if (envelope.kind === "stories") {
-      await saveStoryChunk(source.DB, envelope.sync_id, envelope.stories);
+      await saveStoryChunk(
+        source.DB,
+        envelope.sync_id,
+        envelope.mode,
+        envelope.stories,
+        envelope.deleted_ids,
+      );
       return noStore(NextResponse.json({ ok: true, accepted: envelope.stories.length }));
     }
     if (envelope.kind === "resources") {
-      await saveResourceChunk(source.DB, envelope.sync_id, envelope.resources);
+      await saveResourceChunk(
+        source.DB,
+        envelope.sync_id,
+        envelope.mode,
+        envelope.resources,
+        envelope.deleted_ids,
+      );
       return noStore(NextResponse.json({ ok: true, accepted: envelope.resources.length }));
     }
     if (envelope.projection === "stories") {
-      await completeProjectionSync(source.DB, envelope.sync_id, envelope.digest, envelope.total);
+      await completeProjectionSync(
+        source.DB,
+        envelope.sync_id,
+        envelope.digest,
+        envelope.total,
+        envelope.mode,
+      );
     } else {
-      await completeResourceSync(source.DB, envelope.sync_id, envelope.digest, envelope.total);
+      await completeResourceSync(
+        source.DB,
+        envelope.sync_id,
+        envelope.digest,
+        envelope.total,
+        envelope.mode,
+      );
     }
     return noStore(NextResponse.json({ ok: true, synchronized: envelope.total, projection: envelope.projection }));
   } catch (error) {

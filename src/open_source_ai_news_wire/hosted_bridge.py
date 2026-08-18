@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import hmac
 import json
@@ -24,17 +25,20 @@ import httpx
 
 from . import __version__
 from .config import RuntimePaths, ensure_runtime_layout
+from .ranking import ranking_sort_key
 from .runner import Worker
 from .scheduler import LaunchAgentManager
 from .services import DashboardService
 from .storage import Database
 
 
-BRIDGE_VERSION = "2.0.0"
+BRIDGE_VERSION = "2.1.0"
 BRIDGE_LABEL = "com.opensourceainewswire.hostedbridge"
 BRIDGE_KEYCHAIN_SERVICE = "com.opensourceainewswire.hostedbridge.secret"
+SITES_ACCESS_KEYCHAIN_SERVICE = "com.opensourceainewswire.hostedbridge.sites-access"
 BRIDGE_CONFIG_NAME = "hosted-bridge.json"
 BRIDGE_HISTORY_NAME = "hosted-bridge-command-history.json"
+BRIDGE_PROJECTION_MANIFEST_NAME = "hosted-bridge-projection-manifest.json"
 MAX_SNAPSHOT_BYTES = 1_450_000
 STORY_CHUNK_SIZE = 100
 SYNC_CHUNK_TARGET_BYTES = 1_250_000
@@ -191,6 +195,73 @@ def delete_bridge_secret(base_url: str) -> None:
     )
 
 
+def store_sites_access_token(base_url: str, token: str) -> None:
+    """Store the Sites dispatch token in the current macOS user's Keychain."""
+    if len(token) < 32:
+        raise HostedBridgeError("Sites access token must contain at least 32 characters")
+    try:
+        subprocess.run(
+            [
+                "/usr/bin/security",
+                "add-generic-password",
+                "-U",
+                "-a",
+                _keychain_account(base_url),
+                "-s",
+                SITES_ACCESS_KEYCHAIN_SERVICE,
+                "-w",
+                token,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise HostedBridgeError("The Sites access token could not be stored in Keychain") from error
+
+
+def read_sites_access_token(base_url: str) -> str | None:
+    """Read the optional Sites dispatch token without exposing it in configuration."""
+    override = os.environ.get("OPEN_SOURCE_AI_NEWS_WIRE_SITES_ACCESS_TOKEN", "").strip()
+    if override:
+        if len(override) < 32:
+            raise HostedBridgeError("Sites access token environment value is too short")
+        return override
+    try:
+        result = subprocess.run(
+            [
+                "/usr/bin/security",
+                "find-generic-password",
+                "-w",
+                "-a",
+                _keychain_account(base_url),
+                "-s",
+                SITES_ACCESS_KEYCHAIN_SERVICE,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    token = result.stdout.strip()
+    if len(token) < 32:
+        raise HostedBridgeError("Sites access token in Keychain is invalid")
+    return token
+
+
+def _required_sites_access_token(base_url: str) -> str | None:
+    token = read_sites_access_token(base_url)
+    hostname = urlparse(_validated_base_url(base_url)).hostname or ""
+    if hostname.endswith(".chatgpt.site") and token is None:
+        raise HostedBridgeError(
+            "The owner-only Sites access token is not available in Keychain"
+        )
+    return token
+
+
 def _json_safe(value: Any, *, key: str = "") -> Any:
     lowered = key.lower()
     if any(marker in lowered for marker in ("password", "secret", "token", "verifier")):
@@ -227,25 +298,32 @@ def _all_story_summaries(
     sort: str = "priority",
     kind: str | None = None,
 ) -> list[dict[str, Any]]:
-    stories: list[dict[str, Any]] = []
-    cursor = ""
-    while True:
-        page = service.list_story_page(
-            window=window,
-            sort=sort,
-            kind=kind,
-            cursor=cursor,
-            page_size=100,
-        )
-        stories.extend(page["stories"])
-        cursor = str(page.get("next_cursor") or "")
-        if not cursor:
-            return stories
+    page = service.list_story_page(
+        window=window,
+        sort=sort,
+        kind=kind,
+        page_size=None,
+    )
+    return page["stories"]
 
 
-def build_dashboard_snapshot(service: DashboardService) -> dict[str, Any]:
-    overview = service.overview()
-    summaries = _all_story_summaries(service, window="review_now")
+def build_dashboard_snapshot(
+    service: DashboardService,
+    *,
+    story_summaries: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    all_stories = (
+        story_summaries
+        if story_summaries is not None
+        else _all_story_summaries(service, window="all")
+    )
+    overview = service.overview(story_rows=all_stories)
+    summaries = [
+        story for story in all_stories
+        if story["is_review_current"]
+        and story["status"] not in {"archived", "withdrawn"}
+    ]
+    summaries.sort(key=ranking_sort_key)
     stories: list[dict[str, Any]] = []
     for summary in summaries:
         detailed = service.get_story(str(summary["id"])) or summary
@@ -288,13 +366,28 @@ def build_dashboard_snapshot(service: DashboardService) -> dict[str, Any]:
     return snapshot
 
 
-def build_story_projection(service: DashboardService) -> tuple[list[dict[str, Any]], str]:
+def build_story_projection(
+    service: DashboardService,
+    *,
+    story_summaries: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], str]:
     """Build a normalized, redacted index with stable local ordering ranks."""
-    priority_rows = _all_story_summaries(service, window="all", sort="priority")
-    newest_rows = _all_story_summaries(service, window="all", sort="newest")
+    priority_rows = list(
+        story_summaries
+        if story_summaries is not None
+        else _all_story_summaries(service, window="all", sort="priority")
+    )
+    priority_rows.sort(key=ranking_sort_key)
+    newest_rows = sorted(
+        priority_rows,
+        key=lambda story: ranking_sort_key(story, newest=True),
+    )
     correction_ids = {
-        str(item["id"])
-        for item in _all_story_summaries(service, window="all", kind="correction")
+        str(row["story_id"])
+        for row in service.database.query(
+            "SELECT DISTINCT story_id FROM alert WHERE kind = 'correction' "
+            "AND story_id IS NOT NULL"
+        )
     }
     newest_rank = {str(item["id"]): index for index, item in enumerate(newest_rows)}
     stories: list[dict[str, Any]] = []
@@ -316,6 +409,8 @@ def build_story_projection(service: DashboardService) -> tuple[list[dict[str, An
 
 def build_resource_projection(
     service: DashboardService,
+    *,
+    story_summaries: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Build normalized projections for every non-index dashboard surface."""
     resources: list[dict[str, Any]] = []
@@ -333,10 +428,17 @@ def build_resource_projection(
                 "payload": safe,
             })
 
+    all_stories = (
+        story_summaries
+        if story_summaries is not None
+        else _all_story_summaries(service, window="all")
+    )
     current = [
-        item for item in _all_story_summaries(service, window="review_now")
+        item for item in all_stories
+        if item["is_review_current"]
         if item.get("status") not in {"archived", "withdrawn"}
     ]
+    current.sort(key=ranking_sort_key)
     for rank, summary in enumerate(current):
         story_id = str(summary["id"])
         append("story_detail", story_id, rank, service.get_story(story_id) or summary)
@@ -385,6 +487,57 @@ def _projection_chunks(items: list[dict[str, Any]]) -> list[list[dict[str, Any]]
     if current:
         chunks.append(current)
     return chunks
+
+
+def _projection_manifest(
+    items: list[dict[str, Any]],
+    *,
+    key: Callable[[dict[str, Any]], str],
+) -> dict[str, str]:
+    return {
+        key(item): hashlib.sha256(
+            json.dumps(item, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        for item in items
+    }
+
+
+def _manifest_section(
+    manifest: dict[str, Any],
+    name: str,
+) -> tuple[str, dict[str, str]]:
+    section = manifest.get(name)
+    if not isinstance(section, dict):
+        return "", {}
+    digest = section.get("digest")
+    items = section.get("items")
+    if not isinstance(digest, str) or not isinstance(items, dict):
+        return "", {}
+    safe_items = {
+        str(item_key): str(item_digest)
+        for item_key, item_digest in items.items()
+        if isinstance(item_key, str)
+        and isinstance(item_digest, str)
+        and re.fullmatch(r"[a-f0-9]{64}", item_digest)
+    }
+    return digest, safe_items
+
+
+def _load_projection_manifest(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        return {}
+    return payload
+
+
+def _removed_chunks(items: list[str]) -> list[list[str]]:
+    return [
+        items[offset:offset + STORY_CHUNK_SIZE]
+        for offset in range(0, len(items), STORY_CHUNK_SIZE)
+    ]
 
 
 class CommandHistory:
@@ -512,11 +665,21 @@ class LocalCommandExecutor:
 
 
 class SignedHostedClient:
-    def __init__(self, base_url: str, secret: str, *, client: httpx.Client | None = None):
+    def __init__(
+        self,
+        base_url: str,
+        secret: str,
+        *,
+        sites_access_token: str | None = None,
+        client: httpx.Client | None = None,
+    ):
         self.base_url = _validated_base_url(base_url)
         if len(secret) < 32:
             raise HostedBridgeError("Bridge secret must contain at least 32 characters")
+        if sites_access_token is not None and len(sites_access_token) < 32:
+            raise HostedBridgeError("Sites access token must contain at least 32 characters")
         self.secret = secret.encode("utf-8")
+        self.sites_access_token = sites_access_token
         self.client = client or httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0))
 
     def _headers(self, method: str, path: str, body: bytes) -> dict[str, str]:
@@ -525,7 +688,7 @@ class SignedHostedClient:
         body_digest = hashlib.sha256(body).hexdigest()
         canonical = "\n".join(("v1", timestamp, nonce, method.upper(), path, body_digest))
         signature = hmac.new(self.secret, canonical.encode("utf-8"), hashlib.sha256).hexdigest()
-        return {
+        headers = {
             "x-news-wire-timestamp": timestamp,
             "x-news-wire-nonce": nonce,
             "x-news-wire-signature": signature,
@@ -533,6 +696,9 @@ class SignedHostedClient:
             "x-news-wire-runtime-version": __version__,
             "content-type": "application/json",
         }
+        if self.sites_access_token is not None:
+            headers["OAI-Sites-Authorization"] = f"Bearer {self.sites_access_token}"
+        return headers
 
     def request(self, method: str, path: str, payload: Any | None = None) -> dict[str, Any]:
         body = b"" if payload is None else json.dumps(
@@ -544,6 +710,10 @@ class SignedHostedClient:
             content=body,
             headers=self._headers(method, path, body),
         )
+        if response.status_code == 401:
+            raise HostedBridgeError(
+                "Sites rejected the bridge access token; refresh the Keychain token"
+            )
         response.raise_for_status()
         value = response.json()
         if not isinstance(value, dict) or value.get("ok") is not True:
@@ -567,11 +737,100 @@ class HostedBridge:
         self.history = CommandHistory(paths.operations / BRIDGE_HISTORY_NAME)
         self.executor = LocalCommandExecutor(service)
         self.stop_requested = False
+        self._cached_fingerprint: tuple[tuple[int, int] | None, ...] | None = None
+        self._cached_bundle: tuple[
+            dict[str, Any],
+            list[dict[str, Any]],
+            str,
+            list[dict[str, Any]],
+            str,
+        ] | None = None
+
+    def _database_fingerprint(self) -> tuple[tuple[int, int] | None, ...]:
+        database = self.paths.database
+        values: list[tuple[int, int] | None] = []
+        for path in (database, Path(f"{database}-wal")):
+            try:
+                status = path.stat()
+            except OSError:
+                values.append(None)
+            else:
+                values.append((status.st_mtime_ns, status.st_size))
+        return tuple(values)
+
+    def _projection_bundle(
+        self,
+    ) -> tuple[
+        dict[str, Any],
+        list[dict[str, Any]],
+        str,
+        list[dict[str, Any]],
+        str,
+    ]:
+        fingerprint = self._database_fingerprint()
+        if self._cached_bundle is not None and fingerprint == self._cached_fingerprint:
+            snapshot, stories, story_digest, cached_resources, _ = self._cached_bundle
+            snapshot = copy.deepcopy(snapshot)
+            resources = copy.deepcopy(cached_resources)
+            schedule = _json_safe(self.service.schedule_status())
+            snapshot["generated_at"] = _utc_now()
+            snapshot["schedule"] = schedule
+            for resource in resources:
+                if resource["resource_type"] == "schedule":
+                    resource["payload"] = schedule
+                    break
+            encoded = json.dumps(
+                resources,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            return (
+                snapshot,
+                stories,
+                story_digest,
+                resources,
+                hashlib.sha256(encoded).hexdigest(),
+            )
+
+        story_summaries = _all_story_summaries(self.service, window="all")
+        snapshot = build_dashboard_snapshot(
+            self.service,
+            story_summaries=story_summaries,
+        )
+        stories, story_digest = build_story_projection(
+            self.service,
+            story_summaries=story_summaries,
+        )
+        resources, resource_digest = build_resource_projection(
+            self.service,
+            story_summaries=story_summaries,
+        )
+        final_fingerprint = self._database_fingerprint()
+        self._cached_fingerprint = (
+            final_fingerprint if final_fingerprint == fingerprint else None
+        )
+        self._cached_bundle = (
+            copy.deepcopy(snapshot),
+            stories,
+            story_digest,
+            copy.deepcopy(resources),
+            resource_digest,
+        )
+        return snapshot, stories, story_digest, resources, resource_digest
 
     def sync_once(self) -> dict[str, Any]:
-        snapshot = build_dashboard_snapshot(self.service)
-        stories, story_digest = build_story_projection(self.service)
-        resources, resource_digest = build_resource_projection(self.service)
+        snapshot, stories, story_digest, resources, resource_digest = (
+            self._projection_bundle()
+        )
+        manifest_path = self.paths.operations / BRIDGE_PROJECTION_MANIFEST_NAME
+        manifest = _load_projection_manifest(manifest_path)
+        previous_story_digest, previous_stories = _manifest_section(manifest, "stories")
+        previous_resource_digest, previous_resources = _manifest_section(manifest, "resources")
+        story_manifest = _projection_manifest(stories, key=lambda item: str(item["id"]))
+        resource_manifest = _projection_manifest(
+            resources,
+            key=lambda item: f"{item['resource_type']}:{item['resource_id']}",
+        )
         sync_id = secrets.token_urlsafe(24)
         state = self.client.request(
             "PUT",
@@ -587,8 +846,26 @@ class HostedBridge:
                 "snapshot": snapshot,
             },
         )
+        stories_uploaded = 0
+        resources_uploaded = 0
         if state.get("stories_required") is True:
-            for chunk in _projection_chunks(stories):
+            story_delta = bool(
+                previous_story_digest
+                and previous_story_digest == str(state.get("story_digest") or "")
+            )
+            selected_stories = (
+                [
+                    item for item in stories
+                    if previous_stories.get(str(item["id"])) != story_manifest[str(item["id"])]
+                ]
+                if story_delta
+                else stories
+            )
+            stories_uploaded = len(selected_stories)
+            removed_story_ids = (
+                sorted(set(previous_stories) - set(story_manifest)) if story_delta else []
+            )
+            for chunk in _projection_chunks(selected_stories):
                 self.client.request(
                     "PUT",
                     "/api/bridge/sync",
@@ -596,7 +873,22 @@ class HostedBridge:
                         "schema_version": 2,
                         "kind": "stories",
                         "sync_id": sync_id,
+                        "mode": "delta" if story_delta else "full",
                         "stories": chunk,
+                        "deleted_ids": [],
+                    },
+                )
+            for deleted_ids in _removed_chunks(removed_story_ids):
+                self.client.request(
+                    "PUT",
+                    "/api/bridge/sync",
+                    {
+                        "schema_version": 2,
+                        "kind": "stories",
+                        "sync_id": sync_id,
+                        "mode": "delta",
+                        "stories": [],
+                        "deleted_ids": deleted_ids,
                     },
                 )
             self.client.request(
@@ -609,10 +901,29 @@ class HostedBridge:
                     "projection": "stories",
                     "digest": story_digest,
                     "total": len(stories),
+                    "mode": "delta" if story_delta else "full",
                 },
             )
         if state.get("resources_required") is True:
-            for chunk in _projection_chunks(resources):
+            resource_delta = bool(
+                previous_resource_digest
+                and previous_resource_digest == str(state.get("resource_digest") or "")
+            )
+            selected_resources = (
+                [
+                    item for item in resources
+                    if previous_resources.get(
+                        f"{item['resource_type']}:{item['resource_id']}"
+                    ) != resource_manifest[f"{item['resource_type']}:{item['resource_id']}"]
+                ]
+                if resource_delta
+                else resources
+            )
+            resources_uploaded = len(selected_resources)
+            removed_resource_keys = (
+                sorted(set(previous_resources) - set(resource_manifest)) if resource_delta else []
+            )
+            for chunk in _projection_chunks(selected_resources):
                 self.client.request(
                     "PUT",
                     "/api/bridge/sync",
@@ -620,7 +931,22 @@ class HostedBridge:
                         "schema_version": 2,
                         "kind": "resources",
                         "sync_id": sync_id,
+                        "mode": "delta" if resource_delta else "full",
                         "resources": chunk,
+                        "deleted_ids": [],
+                    },
+                )
+            for deleted_ids in _removed_chunks(removed_resource_keys):
+                self.client.request(
+                    "PUT",
+                    "/api/bridge/sync",
+                    {
+                        "schema_version": 2,
+                        "kind": "resources",
+                        "sync_id": sync_id,
+                        "mode": "delta",
+                        "resources": [],
+                        "deleted_ids": deleted_ids,
                     },
                 )
             self.client.request(
@@ -633,8 +959,17 @@ class HostedBridge:
                     "projection": "resources",
                     "digest": resource_digest,
                     "total": len(resources),
+                    "mode": "delta" if resource_delta else "full",
                 },
             )
+        _atomic_private_json(
+            manifest_path,
+            {
+                "schema_version": 1,
+                "stories": {"digest": story_digest, "items": story_manifest},
+                "resources": {"digest": resource_digest, "items": resource_manifest},
+            },
+        )
         command_response = self.client.request("GET", "/api/bridge/commands")
         commands = command_response.get("commands")
         if not isinstance(commands, list):
@@ -686,8 +1021,8 @@ class HostedBridge:
             reads_completed += 1
         return {
             "digest": story_digest,
-            "stories_uploaded": len(stories) if state.get("stories_required") is True else 0,
-            "resources_uploaded": len(resources) if state.get("resources_required") is True else 0,
+            "stories_uploaded": stories_uploaded,
+            "resources_uploaded": resources_uploaded,
             "commands_completed": completed,
             "reads_completed": reads_completed,
         }
@@ -695,6 +1030,7 @@ class HostedBridge:
     def run_forever(self) -> None:
         delay = self.interval_seconds
         while not self.stop_requested:
+            started_at = time.monotonic()
             try:
                 self.sync_once()
                 delay = self.interval_seconds
@@ -706,7 +1042,8 @@ class HostedBridge:
                 )
                 delay = min(300, max(self.interval_seconds, delay * 2))
             if not self.stop_requested:
-                time.sleep(delay)
+                elapsed = time.monotonic() - started_at
+                time.sleep(max(0.1, delay - elapsed))
 
 
 def _background_callbacks(database: Database) -> tuple[Callable[[], None], Callable[[int], None]]:
@@ -755,7 +1092,12 @@ def create_hosted_bridge(
         run_callback=run_scan,
         draft_callback=run_draft,
     )
-    client = SignedHostedClient(base_url, read_bridge_secret(base_url), client=http_client)
+    client = SignedHostedClient(
+        base_url,
+        read_bridge_secret(base_url),
+        sites_access_token=_required_sites_access_token(base_url),
+        client=http_client,
+    )
     return HostedBridge(service, client, database.paths, interval_seconds=interval_seconds)
 
 
@@ -813,6 +1155,7 @@ class HostedBridgeLaunchAgent:
         if not self.launcher.exists():
             raise HostedBridgeError(f"Stable launcher does not exist: {self.launcher}")
         read_bridge_secret(self.base_url)
+        _required_sites_access_token(self.base_url)
         logs = self.database.paths.operations / "logs"
         logs.mkdir(parents=True, exist_ok=True, mode=0o700)
         payload = plistlib.dumps(

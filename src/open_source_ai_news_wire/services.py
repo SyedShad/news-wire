@@ -256,7 +256,11 @@ class DashboardService:
             return None
         return str(payload.get("id") or "") or None
 
-    def overview(self) -> dict[str, Any]:
+    def overview(
+        self,
+        *,
+        story_rows: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         counts = self.database.one(
             """
             SELECT
@@ -279,7 +283,7 @@ class DashboardService:
             """
         ) or {}
         current_rows = [
-            story for story in self._story_rows()
+            story for story in (story_rows if story_rows is not None else self._story_rows())
             if story["is_review_current"]
             and story["status"] not in {"archived", "withdrawn"}
         ]
@@ -327,7 +331,7 @@ class DashboardService:
             lane=lane,
             kind=kind,
             window="all",
-            page_size=10000,
+            page_size=None,
         )["stories"]
 
     def list_story_page(
@@ -339,7 +343,7 @@ class DashboardService:
         window: str = "review_now",
         sort: str = "priority",
         cursor: str = "",
-        page_size: int = 25,
+        page_size: int | None = 25,
     ) -> dict[str, Any]:
         if window not in {"review_now", "older", "all"}:
             window = "review_now"
@@ -398,7 +402,8 @@ class DashboardService:
                 if story["id"] == cursor_id:
                     start = index + 1
                     break
-        page = selected[start:start + max(1, min(100, page_size))]
+        limit = len(selected) if page_size is None else max(1, min(100, page_size))
+        page = selected[start:start + limit]
         next_cursor = ""
         if start + len(page) < total and page:
             next_cursor = self._encode_cursor(page[-1], sort)

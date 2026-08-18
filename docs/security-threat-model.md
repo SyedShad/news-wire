@@ -23,6 +23,10 @@ listener. HMAC signatures bind timestamp, nonce, method, path, and body digest;
 the hosted service rejects replay, stale requests, oversized payloads,
 unsupported schema/runtime versions, and commands outside the fixed allowlist.
 Remote controls are disabled without a current heartbeat.
+The custom Sites perimeter independently requires a machine-access bearer token
+for bridge requests. That token and the HMAC secret use separate macOS Keychain
+services and never appear in source, local JSON configuration, LaunchAgent
+metadata, projection payloads, or redacted logs.
 
 Codex assistance is optional and receives only bounded story and source packets. Release 0.4.1 verifies the ChatGPT-bundled Codex binary's Apple signature, OpenAI team ID, path, version, SHA-256, and CDHash. Fresh source discovery uses a separate invocation that enables only secured web search; final writing keeps the no-tools policy. Both use ignored user configuration, strict JSON output, and an outer macOS sandbox that denies child processes and all network endpoints except one ephemeral loopback broker port.
 

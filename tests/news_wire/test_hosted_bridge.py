@@ -74,12 +74,14 @@ def test_signed_client_covers_method_path_timestamp_nonce_and_body(tmp_path: Pat
         expected = hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
         assert hmac.compare_digest(request.headers["x-news-wire-signature"], expected)
         assert request.headers["x-news-wire-bridge-version"] == BRIDGE_VERSION
+        assert request.headers["oai-sites-authorization"].startswith("Bearer sites-owner-gate-token-")
         return httpx.Response(200, json={"ok": True})
 
     transport = httpx.MockTransport(handler)
     client = SignedHostedClient(
         "https://dashboard.example.test",
         secret,
+        sites_access_token="sites-owner-gate-token-with-at-least-thirty-two-characters",
         client=httpx.Client(transport=transport),
     )
     assert client.request("PUT", "/api/bridge/snapshot", {"value": 1})["ok"] is True
@@ -198,6 +200,58 @@ def test_on_demand_read_request_returns_redacted_detail(tmp_path: Path) -> None:
     assert result["reads_completed"] == 1
     assert read_results and read_results[0]["ok"] is True
     assert str(service.database.paths.root) not in json.dumps(read_results[0])
+
+
+def test_projection_changes_resume_as_small_deltas(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+
+    class DeltaClient:
+        def __init__(self):
+            self.story_digest = ""
+            self.resource_digest = ""
+            self.requests: list[tuple[str, str, object]] = []
+
+        def request(self, method: str, path: str, payload=None):
+            self.requests.append((method, path, payload))
+            if method == "PUT" and isinstance(payload, dict):
+                if payload.get("kind") == "state":
+                    return {
+                        "ok": True,
+                        "stories_required": payload["story_digest"] != self.story_digest,
+                        "resources_required": payload["resource_digest"] != self.resource_digest,
+                        "story_digest": self.story_digest,
+                        "resource_digest": self.resource_digest,
+                    }
+                if payload.get("kind") == "complete":
+                    if payload.get("projection") == "stories":
+                        self.story_digest = str(payload["digest"])
+                    else:
+                        self.resource_digest = str(payload["digest"])
+                return {"ok": True}
+            if method == "GET":
+                return {"ok": True, "commands": [], "read_requests": []}
+            return {"ok": True}
+
+    hosted = DeltaClient()
+    bridge = HostedBridge(service, hosted, service.database.paths)  # type: ignore[arg-type]
+    bridge.sync_once()
+    first_request_count = len(hosted.requests)
+
+    source = service.sources()["rows"][0]
+    service.toggle_source(str(source["id"]))
+    result = bridge.sync_once()
+    delta_requests = hosted.requests[first_request_count:]
+    resource_chunks = [
+        payload for method, _, payload in delta_requests
+        if method == "PUT"
+        and isinstance(payload, dict)
+        and payload.get("kind") == "resources"
+    ]
+
+    assert result["stories_uploaded"] == 0
+    assert 0 < result["resources_uploaded"] < len(build_resource_projection(service)[0])
+    assert resource_chunks
+    assert all(payload["mode"] == "delta" for payload in resource_chunks)
 
 
 def test_start_kickstarts_a_loaded_but_stopped_launch_agent(tmp_path: Path) -> None:

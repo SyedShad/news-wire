@@ -27,12 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Workspace viewer access is deferred to a later release.
 - Hosted bridge lifecycle reporting distinguishes installed, loaded, running,
   stopped, and failed states; starting a loaded service now kick-starts it.
+- Bridge protocol 2.1 caches unchanged local projections, uploads per-record
+  deltas after database changes, and keeps heartbeat timing independent of a
+  large historical corpus.
 
 ### Security
 
 - Signed bridge traffic enforces HMAC timestamps, one-time nonces, replay
   rejection, payload limits, schema validation, version checks, redaction, and
   an explicit operation allowlist. The laptop accepts no inbound connection.
+- Custom Sites access and application HMAC use separate Keychain-only machine
+  credentials, so the owner perimeter also remains enforced on bridge APIs.
 - Unauthenticated pages, APIs, server-rendered payloads, and exports fail closed;
   remote mutations require both owner authentication and a current heartbeat.
 
