@@ -6,7 +6,7 @@ import json
 import shutil
 import sqlite3
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -620,7 +620,7 @@ class Database:
         ensure_runtime_layout(self.paths)
         database_exists = self.paths.database.exists()
         if not database_exists:
-            with self.connect() as connection:
+            with closing(self.connect()) as connection:
                 connection.executescript(SCHEMA_V1)
                 connection.execute(
                     "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', '1')"
@@ -765,7 +765,7 @@ class Database:
     def schema_version(self) -> int:
         if not self.paths.database.exists():
             return 0
-        with self.connect() as connection:
+        with closing(self.connect()) as connection:
             row = connection.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()
@@ -774,7 +774,7 @@ class Database:
     def migrate(self) -> int:
         ensure_runtime_layout(self.paths)
         if not self.paths.database.exists():
-            with self.connect() as connection:
+            with closing(self.connect()) as connection:
                 connection.executescript(SCHEMA_V1)
                 connection.execute(
                     "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', '1')"
@@ -1355,7 +1355,7 @@ class Database:
         return version
 
     def integrity_check(self) -> str:
-        with self.connect() as connection:
+        with closing(self.connect()) as connection:
             row = connection.execute("PRAGMA integrity_check").fetchone()
         return str(row[0]) if row else "unknown"
 
@@ -1391,7 +1391,7 @@ class Database:
             connection.close()
 
     def query(self, sql: str, parameters: Sequence[Any] = ()) -> list[dict[str, Any]]:
-        with self.connect() as connection:
+        with closing(self.connect()) as connection:
             return [dict(row) for row in connection.execute(sql, parameters).fetchall()]
 
     def one(self, sql: str, parameters: Sequence[Any] = ()) -> dict[str, Any] | None:
@@ -1399,7 +1399,7 @@ class Database:
         return rows[0] if rows else None
 
     def execute(self, sql: str, parameters: Sequence[Any] = ()) -> int:
-        with self.connect() as connection:
+        with closing(self.connect()) as connection:
             cursor = connection.execute(sql, parameters)
             connection.commit()
             return int(cursor.lastrowid)

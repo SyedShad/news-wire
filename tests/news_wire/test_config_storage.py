@@ -34,6 +34,33 @@ def test_database_initializes_private_layout(tmp_path: Path) -> None:
     assert database.integrity_check() == "ok"
 
 
+def test_database_helpers_close_every_connection(tmp_path: Path) -> None:
+    class TrackingDatabase(Database):
+        def __init__(self, paths):
+            super().__init__(paths)
+            self.opened_connections: list[sqlite3.Connection] = []
+
+        def connect(self) -> sqlite3.Connection:
+            connection = super().connect()
+            self.opened_connections.append(connection)
+            return connection
+
+    database = TrackingDatabase(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    database.query("SELECT 1 AS value")
+    database.execute(
+        "INSERT INTO app_state(key, value, updated_at) VALUES(?, ?, ?)",
+        ("connection-test", "closed", "2026-08-19T00:00:00Z"),
+    )
+    database.schema_version()
+    database.integrity_check()
+
+    assert database.opened_connections
+    for connection in database.opened_connections:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+
+
 def test_demo_seed_is_explicit_and_idempotent(tmp_path: Path) -> None:
     database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
     database.initialize()
