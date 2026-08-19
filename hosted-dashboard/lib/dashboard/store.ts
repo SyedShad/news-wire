@@ -244,6 +244,8 @@ export async function saveStoryChunk(
   for (let offset = 0; offset < statements.length; offset += 50) {
     await db.batch(statements.slice(offset, offset + 50));
   }
+  await db.prepare("UPDATE bridge_status SET last_seen_at = ?, last_error = NULL WHERE id = 1")
+    .bind(now).run();
 }
 
 export async function completeProjectionSync(
@@ -294,6 +296,8 @@ export async function saveResourceChunk(
   for (let offset = 0; offset < statements.length; offset += 50) {
     await db.batch(statements.slice(offset, offset + 50));
   }
+  await db.prepare("UPDATE bridge_status SET last_seen_at = ?, last_error = NULL WHERE id = 1")
+    .bind(now).run();
 }
 
 export async function completeResourceSync(

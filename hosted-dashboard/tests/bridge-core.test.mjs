@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, createHmac } from "node:crypto";
 import test from "node:test";
 import { verifyBridgeRequest } from "../lib/bridge/auth.ts";
+import { saveResourceChunk, saveStoryChunk } from "../lib/dashboard/store.ts";
 import { parseBridgeSync, parseSnapshot, validateOwnerCommand } from "../lib/dashboard/validation.ts";
 
 class NonceStatement {
@@ -30,6 +31,38 @@ class NonceD1 {
   constructor() { this.nonces = new Set(); }
   prepare(sql) { return new NonceStatement(this, sql); }
   async batch(statements) { return statements.map(() => ({ success: true })); }
+}
+
+class RecordingStatement {
+  constructor(database, sql) {
+    this.database = database;
+    this.sql = sql.replace(/\s+/gu, " ").trim();
+    this.values = [];
+  }
+
+  bind(...values) {
+    this.values = values;
+    return this;
+  }
+
+  async run() {
+    this.database.runs.push(this);
+    return { success: true, meta: { changes: 1 } };
+  }
+}
+
+class RecordingD1 {
+  constructor() {
+    this.runs = [];
+    this.batches = [];
+  }
+
+  prepare(sql) { return new RecordingStatement(this, sql); }
+
+  async batch(statements) {
+    this.batches.push(statements);
+    return statements.map(() => ({ success: true }));
+  }
 }
 
 function signedRequest(secret, body, nonce = "test_nonce_value_1234567890") {
@@ -122,4 +155,20 @@ test("dashboard snapshots and owner operations reject incomplete or unsupported 
     /full story sync cannot delete ids/,
   );
   assert.throws(() => parseBridgeSync({ schema_version: 1 }), /Unsupported bridge sync schema/);
+});
+
+test("projection batches keep the bridge heartbeat current", async () => {
+  const database = new RecordingD1();
+  await saveStoryChunk(database, "0123456789abcdef", "delta", [{ id: "story-1" }], []);
+  await saveResourceChunk(database, "0123456789abcdef", "delta", [{
+    resource_type: "source",
+    resource_id: "source-1",
+    rank: 0,
+    payload: {},
+  }], []);
+
+  const heartbeats = database.runs.filter((statement) =>
+    statement.sql.startsWith("UPDATE bridge_status SET last_seen_at"));
+  assert.equal(heartbeats.length, 2);
+  assert.ok(heartbeats.every((statement) => Number.isInteger(statement.values[0])));
 });
