@@ -22,5 +22,18 @@ export function records(record: RecordValue | undefined, key: string): RecordVal
 export function dateTime(value: JsonValue | undefined): string {
   if (typeof value !== "string" && typeof value !== "number") return "—";
   const parsed = new Date(value);
+  return Number.isNaN(parsed.valueOf())
+    ? String(value)
+    : parsed.toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+}
+
+export function fullDateTime(value: JsonValue | undefined): string {
+  if (typeof value !== "string" && typeof value !== "number") return "—";
+  const parsed = new Date(value);
   return Number.isNaN(parsed.valueOf()) ? String(value) : parsed.toLocaleString();
 }

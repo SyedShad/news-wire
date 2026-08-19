@@ -2,6 +2,8 @@ import { requirePageSession } from "@/lib/auth/session.ts";
 import { runtimeEnv } from "@/lib/auth/config.ts";
 import { listStoryPage, readSnapshot } from "@/lib/dashboard/store.ts";
 import DashboardShell from "../dashboard-shell.tsx";
+import StoryCard from "../story-card.tsx";
+import NoticeActions from "../notice-actions.tsx";
 import { dateTime, text } from "../presentation.ts";
 
 export const dynamic = "force-dynamic";
@@ -20,18 +22,19 @@ export default async function ReviewInbox({ searchParams }: { searchParams: Prom
   const [page, stored] = await Promise.all([listStoryPage(source.DB, options), readSnapshot(source.DB)]);
   const next = new URLSearchParams({ window: options.window, status: options.status, lane: options.lane, kind: options.kind, sort: options.sort });
   if (page.nextCursor) next.set("cursor", page.nextCursor);
-  return <DashboardShell active="inbox" eyebrow="Review workflow" title="Review inbox" intro="Review Now, older context, full history, filters, sorting, notices, and cursor pagination.">
-    <section className="connection-strip"><span className={`status-pill ${stored?.bridgeConnected ? "status-pill-live" : "status-pill-waiting"}`}>{stored?.bridgeConnected ? "Live" : "Cached"}</span><span>Last synchronized {dateTime(stored?.receivedAt)}</span><strong>{page.total.toLocaleString()} matching stories</strong></section>
+  const notices = stored?.snapshot.notices || [];
+  return <DashboardShell active="inbox" eyebrow="Fast content queue" title="News inbox" intro="Trust, research, and provenance are visible. Every active story can create content." actions={<NoticeActions connected={Boolean(stored?.bridgeConnected)} />}>
     <form className="filter-bar" method="get">
-      <label>Window<select name="window" defaultValue={options.window}><option value="review_now">Review Now</option><option value="older">Older Context</option><option value="all">All History</option></select></label>
-      <label>Status<select name="status" defaultValue={options.status}><option value="all">All statuses</option><option value="ready">Ready</option><option value="candidate">Candidate</option><option value="watch">Watch</option><option value="researching">Researching</option><option value="content_ready">Content ready</option><option value="archived">Archived</option><option value="withdrawn">Withdrawn</option></select></label>
-      <label>Lane<select name="lane" defaultValue={options.lane}><option value="all">All lanes</option><option>Models & Research</option><option>Developer Tools</option><option>Infrastructure</option><option>Policy & Governance</option></select></label>
-      <label>Kind<select name="kind" defaultValue={options.kind}><option value="all">All kinds</option><option value="ready">Ready</option><option value="researching">Researching</option><option value="content_ready">Content ready</option><option value="catch_up">Catch-up</option><option value="correction">Corrections</option></select></label>
-      <label>Sort<select name="sort" defaultValue={options.sort}><option value="priority">Priority</option><option value="newest">Newest</option></select></label>
-      <button className="button button-small">Apply</button>
+      <label>Review window<select name="window" defaultValue={options.window}><option value="review_now">Review Now · 24 hours</option><option value="older">Older Context</option><option value="all">All History</option></select></label>
+      <label>Queue type<select name="kind" defaultValue={options.kind}><option value="all">All news</option><option value="ready">Ready</option><option value="researching">Researching</option><option value="content_ready">Content ready</option><option value="correction">Corrections</option><option value="catch_up">Catch-up</option><option value="health">Health notices</option></select></label>
+      <label>Status<select name="status" defaultValue={options.status}><option value="all">All states</option><option value="ready">Ready</option><option value="content_ready">Content ready</option><option value="archived">Archived</option><option value="withdrawn">Withdrawn</option></select></label>
+      <label>Coverage lane<select name="lane" defaultValue={options.lane}><option value="all">All coverage lanes</option><option>Open Ecosystem News</option><option>AGI Development</option><option>Broader AI News</option></select></label>
+      <label>Sort<select name="sort" defaultValue={options.sort}><option value="priority">Priority</option><option value="newest">Newest first</option></select></label>
+      <button className="button button-dark">Apply filters</button>
+      <span className="result-count">{(page.total + notices.length).toLocaleString()} results</span>
     </form>
-    {(stored?.snapshot.notices || []).length ? <section className="notice-list">{(stored?.snapshot.notices || []).slice(0, 12).map((notice, index) => <article key={String(notice.id || index)}><strong>{text(notice, "title", text(notice, "kind", "Notice"))}</strong><span>{text(notice, "body", text(notice, "message", ""))}</span><time>{dateTime(notice.created_at)}</time></article>)}</section> : null}
-    <section className="data-panel"><div className="story-list">{page.stories.map((story, index) => <article className="story-row" key={story.id}><div className="story-rank">{String(index + 1).padStart(2, "0")}</div><div><h3><a href={`/dashboard/stories/${encodeURIComponent(story.id)}`}>{text(story, "headline", "Untitled story")}</a></h3><p>{text(story, "summary", "No summary available.")}</p><div className="story-meta"><span>{text(story, "priority", "Standard")}</span><span>{text(story, "lane", "Unassigned")}</span><span>{text(story, "status", "unknown")}</span><span>{text(story, "freshness", "—")}</span><span>{dateTime(story.detected_at)}</span></div></div></article>)}{!page.stories.length ? <p className="empty-state">No stories match these filters.</p> : null}</div></section>
-    <nav className="pagination" aria-label="Story pages"><a className="button button-small" href="/dashboard/inbox">Reset</a>{page.nextCursor ? <a className="button button-small" href={`/dashboard/inbox?${next.toString()}`}>Next page</a> : <span>End of results</span>}</nav>
+    {notices.length ? <section className="panel inbox-notices"><div className="panel-heading"><div><p className="section-index">Notices</p><h2>Operational review</h2></div><span>{notices.length} items</span></div><div className="notice-grid">{notices.slice(0, 12).map((notice, index) => <article className={`notice notice-${text(notice, "severity", "watch")}`} key={String(notice.id || index)}><span className="notice-kind">{text(notice, "kind", "Notice").replaceAll("_", " ")}</span><h3>{text(notice, "title", "Notice")}</h3><p>{text(notice, "body", text(notice, "message", ""))}</p><small>{dateTime(notice.created_at)}</small>{notice.story_id ? <a href={`/dashboard/stories/${encodeURIComponent(String(notice.story_id))}`}>Open related story →</a> : null}</article>)}</div></section> : null}
+    <section className="panel inbox-panel"><div className="story-list spacious">{page.stories.map((story, index) => <StoryCard story={story} rank={index + 1} key={story.id} />)}{!page.stories.length ? <div className="empty-state"><strong>No stories match these filters.</strong><span>Try a broader status or coverage lane.</span></div> : null}</div></section>
+    <nav className="pagination" aria-label="Review queue pagination"><a className="button button-secondary" href="/dashboard/inbox">Reset</a>{page.nextCursor ? <a className="button button-secondary" href={`/dashboard/inbox?${next.toString()}`}>Next 25 →</a> : null}</nav>
   </DashboardShell>;
 }
