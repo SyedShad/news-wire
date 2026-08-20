@@ -22,7 +22,7 @@ Operate the local, destination-neutral monitoring and content-preparation system
 - Use **Create content** when the user wants a Reddit draft. It always creates an editable shell first and records a distinct fresh-search attempt. Do not add qualification, approval, evidence, research, importance, lens, or manual-override steps.
 - For fresh collection, use `schedule run-now` or `scan --trigger manual`. Overlapping scans coalesce.
 - For missed time, use the default 72-hour recovery. Use explicit catch-up dates only when the user selects an older interval.
-- For assistance, require a current v0.4.1 release-bound isolation/search attestation. A failed check leaves assistance disabled; deterministic monitoring and manual shell editing continue.
+- For assistance, require a current v0.4.3 release-bound isolation/search attestation. A failed check leaves assistance disabled; deterministic monitoring and manual shell editing continue.
 - For deletion, create a purge preview first and execute only the exact returned plan after explicit confirmation. Purge has no undo.
 
 ## Preserve boundaries

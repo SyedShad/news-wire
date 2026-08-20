@@ -1,6 +1,6 @@
 # Features and use cases
 
-Release 0.4.2 adds owner-only review notifications for every new relevant source item while keeping content creation and publication deliberate and manual.
+Release 0.4.3 expands deterministic recognition of AI security advisories. Every new relevant source item still receives an owner-only review notification while content creation and publication remain deliberate and manual.
 
 ## Coverage
 

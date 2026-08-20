@@ -6,15 +6,15 @@ Open Source AI News Wire uses semantic application versions and explicit databas
 
 | Item | Value |
 |---|---|
-| Application | 0.4.2 |
+| Application | 0.4.3 |
 | Database schema | 9 |
 | Release tag | Pending local validation and source release |
 | Validated source commit | Bound by the local validation report at install time |
 | Distribution | Owner source repository; no prebuilt binary attached |
 
-Release 0.4.2 adds owner-only relevance notifications for every new relevant
-source item, independent of quality and priority, while keeping detection on
-the laptop and final publication manual.
+Release 0.4.3 expands deterministic recognition of AI security advisories and
+corrects immutable-install schema provenance. Database schema 9, bridge 2.2,
+and the owner-only relevance notification workflow are unchanged.
 
 Highlights:
 
@@ -83,6 +83,16 @@ It is a release-maintainer workflow, not the everyday installation path. See [Up
 Rollback is allowed only when the selected installed release supports the current database schema. Runtime data is never automatically rolled back or deleted.
 
 ## News Wire release history
+
+### 0.4.3 - Security advisory recognition
+
+- Recognizes AI security advisories that identify RCEs, CVEs, CVSS scores,
+  zero-days, proof-of-concept exploits, malware, ransomware, and prompt
+  injection.
+- Records and verifies the incoming immutable release's own database schema
+  during installation.
+- Keeps database schema 9, bridge 2.2, and the hosted notification interface
+  unchanged.
 
 ### 0.4.2 - Relevance-only notifications
 

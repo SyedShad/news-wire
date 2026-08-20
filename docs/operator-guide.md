@@ -13,7 +13,7 @@ open-source-ai-news-wire dashboard
 
 Use `schedule run-now` for an immediate bounded scan. Overlapping triggers coalesce into the durable queue.
 
-Release 0.4.2 uses schema 9 and a trust-and-status workflow. The Overview and inbox show mutually exclusive Ready, Researching, and Content-ready states. Candidate, Watch, evidence, importance, lens, qualification, approval, and manual-override controls are retired. Archive and withdraw remain available.
+Release 0.4.3 uses schema 9 and expands deterministic recognition of AI security advisories. The Overview and inbox show mutually exclusive Ready, Researching, and Content-ready states. Candidate, Watch, evidence, importance, lens, qualification, approval, and manual-override controls are retired. Archive and withdraw remain available.
 
 ## Relevance notifications
 
@@ -78,7 +78,7 @@ open-source-ai-news-wire assistance status
 open-source-ai-news-wire assistance enable
 ```
 
-Release 0.4.1 pins the currently reviewed Apple-signed `codex-cli 0.146.0-alpha.9.2`. The canary verifies both execution paths: source discovery permits only secured web search, while final writing is packet-only with filesystem, shell, browser, apps, and all other tools disabled. The attestation expires after 24 hours. Failure keeps assistance disabled and records the exact safe error state.
+Release 0.4.3 retains the reviewed Apple-signed `codex-cli 0.146.0-alpha.9.2` pin. The canary verifies both execution paths: source discovery permits only secured web search, while final writing is packet-only with filesystem, shell, browser, apps, and all other tools disabled. The attestation expires after 24 hours. Failure keeps assistance disabled and records the exact safe error state.
 
 ## Hosted owner dashboard
 
@@ -157,7 +157,7 @@ open-source-ai-news-wire app list
 open-source-ai-news-wire app rollback --release-id RELEASE_ID
 ```
 
-Pause the scheduler and snapshot the database before migrating. Each immutable install atomically switches the stable launcher. Rollback is allowed only when the selected release supports the current schema. After installing 0.4.2, run a fresh isolation/search canary before re-enabling assistance and resuming scheduling. Keep relevance notifications in shadow mode until the separate Web Push canary passes. A Sites rollback does not roll back the laptop database; the projection migrations are additive and harmless to the previous hosted shell.
+Pause the scheduler and snapshot the database before migrating. Each immutable install atomically switches the stable launcher. Rollback is allowed only when the selected release supports the current schema. After installing 0.4.3, run a fresh isolation/search canary before re-enabling assistance and resuming scheduling. Keep relevance notifications in shadow mode until the separate Web Push canary passes. A Sites rollback does not roll back the laptop database; the projection migrations are additive and harmless to the previous hosted shell.
 
 ## Private GitHub safeguard
 

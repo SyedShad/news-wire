@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Open Source AI News Wire releases**
 
+## [0.4.3] - 2026-08-20
+
+### Changed
+
+- Expanded deterministic Broader AI relevance recognition for security
+  advisories that identify RCEs, CVEs, CVSS scores, zero-days,
+  proof-of-concept exploits, malware, ransomware, and prompt injection.
+
+### Fixed
+
+- Immutable installs now record and verify the incoming release's own database
+  schema instead of the schema imported by the invoking runtime.
+
 ## [0.4.2] - 2026-08-20
 
 ### Added

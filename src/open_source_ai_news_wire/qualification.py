@@ -13,6 +13,7 @@ AI_TERMS = {
     "ai", "agi", "llm", "llms", "model", "models", "inference", "agent", "agents",
     "multimodal", "neural", "robotics", "benchmark", "transformer", "transformers",
     "machine learning", "artificial intelligence", "language model", "deep learning",
+    "model context protocol", "prompt injection",
 }
 OPEN_TERMS = {
     "open source", "open-source", "open weight", "open-weight", "source available",
@@ -31,6 +32,10 @@ BROADER_TERMS = {
     "misuse", "security incident", "security incidents", "regulation", "regulations",
     "regulator", "regulators", "legislation", "law", "laws", "court", "courts",
     "compliance", "copyright", "policy enforcement", "enforcement", "export control",
+    "rce", "remote code execution", "cvss", "cve", "cves",
+    "zero-day", "zero day", "0-day", "0 day",
+    "proof-of-concept exploit", "proof of concept exploit", "poc exploit",
+    "malware", "ransomware", "prompt injection",
 }
 IMPACT_TERMS = {
     "launch", "release", "regulation", "law", "ban", "acquisition", "funding",

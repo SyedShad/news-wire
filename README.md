@@ -77,9 +77,9 @@ See [Getting started](docs/guide/getting-started.md) for the full setup and firs
 
 ## Current release
 
-The current application release is v0.4.2 with database schema 9. It adds an
-owner-only relevance-notification lane with source-derived Web Push previews
-and research-only actions while keeping collection local and publishing manual.
+The current application release is v0.4.3 with database schema 9. It expands
+deterministic recognition of AI security advisories while retaining the
+owner-only, relevance-only Web Push lane and manual publishing workflow.
 
 See the [release guide](docs/guide/releases.md) and [changelog](CHANGELOG.md) for details.
 

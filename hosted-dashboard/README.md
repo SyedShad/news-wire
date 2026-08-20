@@ -1,6 +1,6 @@
 # Owner-only hosted dashboard
 
-This project is the ChatGPT Sites frontend for Open Source AI News Wire 0.4.2.
+This project is the ChatGPT Sites frontend for Open Source AI News Wire 0.4.3.
 It provides the complete owner workspace while keeping collection, SQLite,
 research, drafting, and every canonical mutation on the laptop.
 
@@ -114,7 +114,7 @@ regenerates only its ignored local verifier when the hosting runtime changes.
 
 ## Laptop bridge operation
 
-Run these from a verified immutable 0.4.2 install, never from a Git worktree:
+Run these from a verified immutable 0.4.3 install, never from a Git worktree:
 
 ```bash
 open-source-ai-news-wire hosted-bridge configure \
@@ -152,6 +152,6 @@ Production must be saved and deployed only from the exact tested source commit:
 7. retain the previous Sites version for rollback.
 
 Assisted drafting is a separate release-bound gate. Run a fresh isolation and
-search-canary check after installing 0.4.2, and enable assistance only if
+search-canary check after installing 0.4.3, and enable assistance only if
 identity, isolation, and canary checks all pass. Dashboard access remains useful
 when assistance is disabled.

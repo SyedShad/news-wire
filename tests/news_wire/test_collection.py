@@ -1352,6 +1352,46 @@ def test_qualification_has_neutral_broader_lane_and_bounded_open_source_lens() -
     assert result.counterargument
 
 
+@pytest.mark.parametrize(
+    ("title", "expected", "expected_reason"),
+    (
+        ("Splunk patches 9.1 CVSS RCE in MCP Server and 9 flaws in AI Toolkit", True, "rce"),
+        ("AI service fixes CVE-2026-1234 remote code execution", True, "cve"),
+        ("Researchers disclose 0-day prompt injection against AI agents", True, "0-day"),
+        (
+            "Prompt injection bypasses tool authorization in a protocol server",
+            True,
+            "prompt injection",
+        ),
+        ("LLM runtime proof-of-concept exploit is published", True, "proof-of-concept exploit"),
+        ("AI extension distributed malware", True, "malware"),
+        ("CVE and CVSS RCE affect an enterprise VPN", False, "cve"),
+        ("Zero-day malware used by ransomware group", False, "malware"),
+        ("AI startup raises funding to expand sales", False, "ai"),
+        ("AI startup actively exploited lower cloud prices", False, "ai"),
+        ("AI model benchmark exploits batched inference for faster serving", False, "ai"),
+    ),
+)
+def test_qualification_recognizes_ai_security_advisories_without_generic_exploit_matches(
+    title: str,
+    expected: bool,
+    expected_reason: str,
+) -> None:
+    result = qualify(
+        Observation(
+            "security-item",
+            title,
+            "https://example.com/security-item",
+            "2026-08-20T10:00:00Z",
+        ),
+        {"family": "Government and law", "monitoring_role": "Reporting"},
+        observed_at="2026-08-20T10:01:00Z",
+    )
+    assert result.lane == "Broader AI News"
+    assert result.relevant is expected
+    assert expected_reason in result.reasons
+
+
 def test_collector_helper_boundaries_and_due_calculation(tmp_path: Path) -> None:
     assert _title_tokens("The AI model and benchmark") == {"model", "benchmark"}
     assert _similarity("AI model security launch", "Model security launch") == 1.0
