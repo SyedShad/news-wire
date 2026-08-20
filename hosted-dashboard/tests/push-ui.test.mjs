@@ -215,3 +215,19 @@ test("live-alert rollout stays manual and separate from subscription and canary 
   assert.match(settings, /sendPushCanary\(endpoint\)/u);
   assert.match(settings, /setPushRuntimeAction\(action\)/u);
 });
+
+test("revoking a subscription does not disable re-enabling the hosted Push service", async () => {
+  const [client, settings] = await Promise.all([
+    readFile(new URL("lib/push/client.ts", root), "utf8"),
+    readFile(new URL("app/dashboard/push-settings.tsx", root), "utf8"),
+  ]);
+  const disableFunction = client.slice(
+    client.indexOf("export async function disablePushNotifications"),
+    client.indexOf("export async function sendPushCanary"),
+  );
+  assert.match(disableFunction, /await readPushSubscriptionStatus\(\)\.catch/u);
+  assert.match(disableFunction, /enabled:\s*refreshed\?\.enabled \?\? true/u);
+  assert.doesNotMatch(disableFunction, /enabled:\s*payload\.enabled/u);
+  assert.match(settings, /setThisDeviceEnabled\(Boolean\(endpoint\) && nextStatus\.deviceCount > 0\)/u);
+  assert.doesNotMatch(settings, /setThisDeviceEnabled\(Boolean\(endpoint\)\);/u);
+});

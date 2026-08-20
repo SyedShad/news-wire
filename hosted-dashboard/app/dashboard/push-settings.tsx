@@ -50,7 +50,9 @@ export default function PushSettings() {
       .then(([nextStatus, endpoint, nextRuntime]) => {
         if (!active) return;
         setStatus(nextStatus);
-        setThisDeviceEnabled(Boolean(endpoint));
+        // A local PushManager entry can outlive a server-side Disable all or
+        // credential rotation. Both sides must still recognize a subscription.
+        setThisDeviceEnabled(Boolean(endpoint) && nextStatus.deviceCount > 0);
         setRuntime(nextRuntime);
       })
       .catch((reason: unknown) => {

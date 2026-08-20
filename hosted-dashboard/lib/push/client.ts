@@ -182,9 +182,12 @@ export async function disablePushNotifications(scope: "device" | "all"): Promise
   });
   const payload = await readJson(response, "Could not disable notifications.");
   await subscription?.unsubscribe();
+  const refreshed = await readPushSubscriptionStatus().catch(() => null);
   return {
-    enabled: payload.enabled === true,
-    vapidPublicKey: "",
+    // DELETE reports the device subscription state, not whether hosted Push
+    // infrastructure remains available for a later re-enable.
+    enabled: refreshed?.enabled ?? true,
+    vapidPublicKey: refreshed?.vapidPublicKey || "",
     deviceCount: typeof payload.deviceCount === "number" ? payload.deviceCount : 0,
   };
 }

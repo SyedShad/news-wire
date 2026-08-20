@@ -122,23 +122,32 @@ def queue_research_attempt(
         if not story:
             raise LookupError("Story not found")
         if purpose in {"background", "operator_review"}:
-            active_only = (
-                "AND ra.status IN ('queued', 'running') "
-                "AND w.status IN ('pending', 'queued', 'running')"
-                if purpose == "operator_review"
-                else ""
-            )
-            existing = connection.execute(
-                f"""
-                SELECT ra.id AS attempt_id, w.id AS work_id
-                FROM research_attempt ra
-                JOIN work_item w ON json_extract(w.payload_json, '$.research_attempt_id') = ra.id
-                WHERE ra.story_id = ? AND ra.purpose = ?
-                  {active_only}
-                ORDER BY ra.id DESC LIMIT 1
-                """,  # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- active_only is a closed constant
-                (story_id, purpose),
-            ).fetchone()
+            if purpose == "operator_review":
+                existing = connection.execute(
+                    """
+                    SELECT ra.id AS attempt_id, w.id AS work_id
+                    FROM research_attempt ra
+                    JOIN work_item w
+                      ON json_extract(w.payload_json, '$.research_attempt_id') = ra.id
+                    WHERE ra.story_id = ? AND ra.purpose = ?
+                      AND ra.status IN ('queued', 'running')
+                      AND w.status IN ('pending', 'queued', 'running')
+                    ORDER BY ra.id DESC LIMIT 1
+                    """,
+                    (story_id, purpose),
+                ).fetchone()
+            else:
+                existing = connection.execute(
+                    """
+                    SELECT ra.id AS attempt_id, w.id AS work_id
+                    FROM research_attempt ra
+                    JOIN work_item w
+                      ON json_extract(w.payload_json, '$.research_attempt_id') = ra.id
+                    WHERE ra.story_id = ? AND ra.purpose = ?
+                    ORDER BY ra.id DESC LIMIT 1
+                    """,
+                    (story_id, purpose),
+                ).fetchone()
             if existing:
                 return int(existing["attempt_id"]), int(existing["work_id"])
         cursor = connection.execute(
