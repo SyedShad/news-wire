@@ -29,4 +29,10 @@ export type AuthRuntimeEnv = {
   MASTER_PASSWORD_VERIFIER?: string;
   MASTER_PASSWORD_VERSION?: string;
   BRIDGE_SECRET?: string;
+  PUSH_VAPID_PUBLIC_KEY?: string;
+  PUSH_VAPID_PRIVATE_KEY?: string;
+  PUSH_VAPID_SUBJECT?: string;
+  PUSH_SUBSCRIPTION_ENCRYPTION_KEY?: string;
+  PUSH_ACTION_SECRET?: string;
+  PUSH_DELIVERY_ENABLED?: string;
 };

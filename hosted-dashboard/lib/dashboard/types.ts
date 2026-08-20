@@ -40,6 +40,28 @@ export type ResourceProjection = {
   payload: Record<string, JsonValue>;
 };
 
+export const NOTIFICATION_SOURCE_TYPES = [
+  "article", "announcement", "paper", "repository", "newsletter", "discovery",
+] as const;
+export const NOTIFICATION_PROVENANCE_TYPES = [
+  "publisher_excerpt", "paper_abstract", "repository_text", "discovery_metadata", "limited_context",
+] as const;
+
+export type NotificationArticleProjection = {
+  event_id: string;
+  article_key: string;
+  story_id: string;
+  canonical_url: string;
+  title: string;
+  publisher: string;
+  category: string;
+  context: string;
+  provenance: (typeof NOTIFICATION_PROVENANCE_TYPES)[number];
+  source_type: (typeof NOTIFICATION_SOURCE_TYPES)[number];
+  published_at: string | null;
+  detected_at: string;
+};
+
 export type BridgeSyncEnvelope =
   | {
       schema_version: 2;
@@ -49,6 +71,8 @@ export type BridgeSyncEnvelope =
       story_total: number;
       resource_digest: string;
       resource_total: number;
+      notification_digest?: string;
+      notification_total?: number;
       snapshot: DashboardSnapshot;
     }
   | {
@@ -69,9 +93,17 @@ export type BridgeSyncEnvelope =
     }
   | {
       schema_version: 2;
+      kind: "notification_articles";
+      sync_id: string;
+      mode: "full" | "delta";
+      notification_articles: NotificationArticleProjection[];
+      deleted_ids: string[];
+    }
+  | {
+      schema_version: 2;
       kind: "complete";
       sync_id: string;
-      projection: "stories" | "resources";
+      projection: "stories" | "resources" | "notification_articles";
       digest: string;
       total: number;
       mode: "full" | "delta";

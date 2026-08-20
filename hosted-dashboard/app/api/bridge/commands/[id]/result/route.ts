@@ -3,9 +3,10 @@ import { runtimeEnv } from "@/lib/auth/config.ts";
 import { noStore } from "@/lib/auth/responses.ts";
 import { verifyBridgeRequest } from "@/lib/bridge/auth.ts";
 import { bridgeError } from "@/lib/bridge/responses.ts";
-import { completeCommand } from "@/lib/dashboard/store.ts";
+import { completeCommand, readCommand } from "@/lib/dashboard/store.ts";
 import { isRecord } from "@/lib/dashboard/validation.ts";
 import type { JsonValue } from "@/lib/dashboard/types.ts";
+import { queueResearchResultFollowup } from "@/lib/push/store.ts";
 
 export async function POST(
   request: Request,
@@ -22,11 +23,16 @@ export async function POST(
     if (!/^[0-9a-f-]{36}$/i.test(id)) {
       return noStore(NextResponse.json({ ok: false, error: "command_id_invalid" }, { status: 400 }));
     }
-    const updated = await completeCommand(source.DB, id, {
+    const command = await readCommand(source.DB, id);
+    const completion = {
       ok: value.ok,
       result: (value.result ?? null) as JsonValue,
       error: typeof value.error === "string" ? value.error : null,
-    });
+    };
+    if (command?.operation === "article_alert.start_research") {
+      await queueResearchResultFollowup(source, command, completion);
+    }
+    const updated = await completeCommand(source.DB, id, completion);
     if (!updated) {
       return noStore(NextResponse.json({ ok: false, error: "command_not_claimed" }, { status: 409 }));
     }

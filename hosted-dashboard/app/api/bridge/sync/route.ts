@@ -11,6 +11,10 @@ import {
   saveStoryChunk,
 } from "@/lib/dashboard/store.ts";
 import { MAX_SYNC_CHUNK_BYTES, parseBridgeSync } from "@/lib/dashboard/validation.ts";
+import {
+  completeNotificationArticleSync,
+  stageNotificationArticles,
+} from "@/lib/push/store.ts";
 
 export async function PUT(request: Request) {
   try {
@@ -31,6 +35,8 @@ export async function PUT(request: Request) {
         storyTotal: envelope.story_total,
         resourceDigest: envelope.resource_digest,
         resourceTotal: envelope.resource_total,
+        notificationDigest: envelope.notification_digest,
+        notificationTotal: envelope.notification_total,
         snapshot: envelope.snapshot,
         bridgeVersion: bridgeVersion.slice(0, 80),
       });
@@ -38,8 +44,10 @@ export async function PUT(request: Request) {
         ok: true,
         stories_required: result.storiesRequired,
         resources_required: result.resourcesRequired,
+        notification_articles_required: result.notificationArticlesRequired,
         story_digest: result.storyDigest,
         resource_digest: result.resourceDigest,
+        notification_digest: result.notificationDigest,
       }));
     }
     if (envelope.kind === "stories") {
@@ -62,6 +70,10 @@ export async function PUT(request: Request) {
       );
       return noStore(NextResponse.json({ ok: true, accepted: envelope.resources.length }));
     }
+    if (envelope.kind === "notification_articles") {
+      await stageNotificationArticles(source.DB, envelope.sync_id, envelope.notification_articles);
+      return noStore(NextResponse.json({ ok: true, accepted: envelope.notification_articles.length }));
+    }
     if (envelope.projection === "stories") {
       await completeProjectionSync(
         source.DB,
@@ -70,7 +82,7 @@ export async function PUT(request: Request) {
         envelope.total,
         envelope.mode,
       );
-    } else {
+    } else if (envelope.projection === "resources") {
       await completeResourceSync(
         source.DB,
         envelope.sync_id,
@@ -78,13 +90,22 @@ export async function PUT(request: Request) {
         envelope.total,
         envelope.mode,
       );
+    } else {
+      await completeNotificationArticleSync(source, {
+        syncId: envelope.sync_id,
+        digest: envelope.digest,
+        total: envelope.total,
+        mode: envelope.mode,
+      });
     }
     return noStore(NextResponse.json({ ok: true, synchronized: envelope.total, projection: envelope.projection }));
   } catch (error) {
     if (error instanceof SyntaxError || error instanceof TypeError) {
       return noStore(NextResponse.json({ ok: false, error: "sync_invalid" }, { status: 400 }));
     }
-    if (error instanceof Error && new Set(["story_projection_incomplete", "resource_projection_incomplete"]).has(error.message)) {
+    if (error instanceof Error && new Set([
+      "story_projection_incomplete", "resource_projection_incomplete", "notification_projection_incomplete",
+    ]).has(error.message)) {
       return noStore(NextResponse.json({ ok: false, error: error.message }, { status: 409 }));
     }
     return bridgeError(error);

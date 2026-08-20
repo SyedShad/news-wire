@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { headers } from "next/headers";
 import "./globals.css";
 
@@ -25,9 +25,17 @@ export async function generateMetadata(): Promise<Metadata> {
   return {
     title,
     description,
+    manifest: "/manifest.webmanifest",
+    applicationName: title,
+    appleWebApp: {
+      capable: true,
+      title: "AI News Wire",
+      statusBarStyle: "black-translucent",
+    },
     icons: {
       icon: "/favicon.svg",
       shortcut: "/favicon.svg",
+      apple: "/icons/news-wire-192.png",
     },
     openGraph: {
       title,
@@ -44,6 +52,10 @@ export async function generateMetadata(): Promise<Metadata> {
     },
   };
 }
+
+export const viewport: Viewport = {
+  themeColor: "#11231e",
+};
 
 export default function RootLayout({
   children,

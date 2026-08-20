@@ -1,10 +1,11 @@
-"""Native macOS notification routing with burst and duplicate suppression."""
+"""Native macOS notification routing for legacy alerts and relevance fallback."""
 
 from __future__ import annotations
 
 import shlex
 import shutil
 import subprocess
+import unicodedata
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -211,3 +212,75 @@ class NativeNotifier:
                     """,
                     (row["id"], group, "delivered" if success else "failed", now if success else None, error_class),
                 )
+
+
+class RelevanceNativeNotifier:
+    """Individual, relevance-only macOS fallback notifications.
+
+    This consumer is deliberately separate from ``NativeNotifier`` so it never
+    inherits severity, priority, freshness, or burst-digest decisions. Browser
+    Web Push remains primary; the independent native switch defaults off.
+    """
+
+    def __init__(
+        self,
+        database: Database,
+        *,
+        launcher: Path | None = None,
+        runner: NotificationRunner = _run,
+        terminal_notifier: Path | None = None,
+    ):
+        self.database = database
+        self.native = NativeNotifier(
+            database,
+            launcher=launcher,
+            runner=runner,
+            terminal_notifier=terminal_notifier,
+        )
+
+    def dispatch_pending(self, *, limit: int = 20) -> int:
+        from .services import DashboardService
+
+        service = DashboardService(self.database)
+        delivered = 0
+        for event in service.list_pending_native_relevance_events(limit=limit):
+            labels = " · ".join(
+                value for value in (
+                    self._plain(event.get("publisher")),
+                    self._plain(event.get("category")),
+                    self._plain(event.get("source_type")).replace("_", " "),
+                ) if value
+            )
+            body = f"{labels}\n{self._plain(event.get('context'))}".strip()[:900]
+            success, error_class = self.native._notify(
+                self._plain(event.get("title"))[:180] or "New relevant item",
+                body,
+                group=f"news-wire-relevance-{int(event['event_id'])}",
+                story_id=self._plain(event.get("story_id")) or None,
+            )
+            if success:
+                service.record_native_relevance_delivery(
+                    int(event["event_id"]), delivered=True
+                )
+                delivered += 1
+                continue
+            attempts = int(event.get("attempt_count") or 0) + 1
+            delay = min(30 * 60, 30 * (2 ** max(0, attempts - 1)))
+            retry_at = (
+                datetime.now(UTC) + timedelta(seconds=delay)
+            ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            service.record_native_relevance_delivery(
+                int(event["event_id"]),
+                delivered=False,
+                error_class=error_class or "NotificationCommandFailed",
+                retry_at=retry_at,
+            )
+        return delivered
+
+    @staticmethod
+    def _plain(value: object) -> str:
+        text = " ".join(str(value or "").split())
+        return "".join(
+            character for character in text
+            if character == "\n" or unicodedata.category(character) not in {"Cc", "Cf"}
+        )

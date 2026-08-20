@@ -11,6 +11,7 @@ import type {
 
 const schemaPromises = new WeakMap<object, Promise<void>>();
 const COMMAND_TTL_MS = 5 * 60_000;
+const ARTICLE_ALERT_COMMAND_TTL_MS = 72 * 60 * 60_000;
 const READ_TTL_MS = 60_000;
 const DETAIL_TTL_MS = 24 * 60 * 60_000;
 const BRIDGE_STALE_MS = 45_000;
@@ -42,6 +43,7 @@ export async function ensureDashboardSchema(db: D1Database): Promise<void> {
       id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1), sync_id TEXT NOT NULL,
       story_digest TEXT NOT NULL, story_total INTEGER NOT NULL, generated_at TEXT NOT NULL,
       resource_digest TEXT NOT NULL, resource_total INTEGER NOT NULL,
+      notification_digest TEXT NOT NULL DEFAULT '', notification_total INTEGER NOT NULL DEFAULT 0,
       received_at INTEGER NOT NULL, runtime_version TEXT NOT NULL,
       bridge_version TEXT NOT NULL, snapshot_json TEXT NOT NULL)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS resource_projection (
@@ -82,6 +84,12 @@ export async function ensureDashboardSchema(db: D1Database): Promise<void> {
     } catch { /* migration already applied */ }
     try {
       await db.prepare("ALTER TABLE projection_state ADD COLUMN resource_total INTEGER NOT NULL DEFAULT 0").run();
+    } catch { /* migration already applied */ }
+    try {
+      await db.prepare("ALTER TABLE projection_state ADD COLUMN notification_digest TEXT NOT NULL DEFAULT ''").run();
+    } catch { /* migration already applied */ }
+    try {
+      await db.prepare("ALTER TABLE projection_state ADD COLUMN notification_total INTEGER NOT NULL DEFAULT 0").run();
     } catch { /* migration already applied */ }
     await db.prepare("UPDATE command_queue SET expires_at = created_at + ? WHERE expires_at = 0")
       .bind(COMMAND_TTL_MS).run();
@@ -149,38 +157,53 @@ export async function saveProjectionState(
     storyTotal: number;
     resourceDigest: string;
     resourceTotal: number;
+    notificationDigest?: string;
+    notificationTotal?: number;
     snapshot: DashboardSnapshot;
     bridgeVersion: string;
   },
 ): Promise<{
   storiesRequired: boolean;
   resourcesRequired: boolean;
+  notificationArticlesRequired: boolean;
   storyDigest: string;
   resourceDigest: string;
+  notificationDigest: string;
 }> {
   await ensureDashboardSchema(db);
-  const previous = await db.prepare("SELECT story_digest, resource_digest FROM projection_state WHERE id = 1")
-    .first<{ story_digest: string; resource_digest: string }>();
+  const previous = await db.prepare(`SELECT story_digest, resource_digest,
+      notification_digest, notification_total FROM projection_state WHERE id = 1`)
+    .first<{
+      story_digest: string; resource_digest: string; notification_digest: string; notification_total: number;
+    }>();
   const storiesRequired = previous?.story_digest !== input.storyDigest;
   const resourcesRequired = previous?.resource_digest !== input.resourceDigest;
+  const hasNotificationProjection = input.notificationDigest !== undefined && input.notificationTotal !== undefined;
+  const notificationArticlesRequired = hasNotificationProjection && previous?.notification_digest !== input.notificationDigest;
   // Do not publish the new digest until the matching story set is complete. If
   // a bridge process dies between chunks, the next poll will resume by sending
   // a fresh complete set instead of mistaking the partial upload for success.
   const storedDigest = storiesRequired ? (previous?.story_digest || "") : input.storyDigest;
   const storedResourceDigest = resourcesRequired ? (previous?.resource_digest || "") : input.resourceDigest;
+  const storedNotificationDigest = notificationArticlesRequired
+    ? (previous?.notification_digest || "")
+    : (input.notificationDigest ?? previous?.notification_digest ?? "");
   const now = Date.now();
   await db.batch([
     db.prepare(`INSERT INTO projection_state
-      (id, sync_id, story_digest, story_total, resource_digest, resource_total, generated_at, received_at,
+      (id, sync_id, story_digest, story_total, resource_digest, resource_total,
+       notification_digest, notification_total, generated_at, received_at,
        runtime_version, bridge_version, snapshot_json)
-      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET sync_id = excluded.sync_id,
         story_digest = excluded.story_digest, story_total = excluded.story_total,
         resource_digest = excluded.resource_digest, resource_total = excluded.resource_total,
+        notification_digest = excluded.notification_digest, notification_total = excluded.notification_total,
         generated_at = excluded.generated_at, received_at = excluded.received_at,
         runtime_version = excluded.runtime_version, bridge_version = excluded.bridge_version,
         snapshot_json = excluded.snapshot_json`).bind(
           input.syncId, storedDigest, input.storyTotal, storedResourceDigest, input.resourceTotal,
+          storedNotificationDigest, input.notificationTotal ?? previous?.notification_total ?? 0,
           input.snapshot.generated_at, now, input.snapshot.runtime_version, input.bridgeVersion,
           JSON.stringify(input.snapshot),
         ),
@@ -194,8 +217,10 @@ export async function saveProjectionState(
   return {
     storiesRequired,
     resourcesRequired,
+    notificationArticlesRequired,
     storyDigest: previous?.story_digest || "",
     resourceDigest: previous?.resource_digest || "",
+    notificationDigest: previous?.notification_digest || "",
   };
 }
 
@@ -488,6 +513,36 @@ export async function enqueueCommand(
     requestedBy: input.requestedBy, createdAt, claimedAt: null, completedAt: null,
     expiresAt, attemptCount: 0, result: null, error: null,
   };
+}
+
+export async function ensureArticleAlertCommand(
+  db: D1Database,
+  input: {
+    commandId: string;
+    operation: "article_alert.start_research" | "article_alert.dismiss";
+    payload: Record<string, JsonValue>;
+    requestedBy: string;
+  },
+): Promise<OwnerCommand> {
+  await ensureDashboardSchema(db);
+  const createdAt = Date.now();
+  const expiresAt = createdAt + ARTICLE_ALERT_COMMAND_TTL_MS;
+  await db.prepare(`INSERT OR IGNORE INTO command_queue
+    (id, operation, payload_json, status, requested_by, requested_role,
+     created_at, expires_at, attempt_count)
+    VALUES (?, ?, ?, 'pending', ?, 'master', ?, ?, 0)`)
+    .bind(input.commandId, input.operation, JSON.stringify(input.payload), input.requestedBy, createdAt, expiresAt).run();
+  const stored = await readCommand(db, input.commandId);
+  if (!stored) throw new Error("article_alert_command_unavailable");
+  return stored;
+}
+
+export async function readCommand(db: D1Database, id: string): Promise<OwnerCommand | null> {
+  await ensureDashboardSchema(db);
+  const row = await db.prepare(`SELECT id, operation, payload_json, status, requested_by,
+      created_at, claimed_at, completed_at, expires_at, attempt_count, result_json, error
+    FROM command_queue WHERE id = ?`).bind(id).first<StoredCommand>();
+  return row ? commandFromRow(row) : null;
 }
 
 export async function listCommands(db: D1Database, limit = 20): Promise<OwnerCommand[]> {

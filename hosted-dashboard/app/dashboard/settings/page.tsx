@@ -3,6 +3,7 @@ import { runtimeEnv } from "@/lib/auth/config.ts";
 import { listCommands, readSnapshot } from "@/lib/dashboard/store.ts";
 import DashboardShell from "../dashboard-shell.tsx";
 import SettingsActions from "../settings-actions.tsx";
+import PushSettings from "../push-settings.tsx";
 import { dateTime, number, text, type RecordValue } from "../presentation.ts";
 
 export const dynamic = "force-dynamic";
@@ -21,6 +22,7 @@ export default async function Settings() {
       <section className="panel setting-card"><div className="panel-heading compact"><div><p className="section-index">03</p><h2>Stored records</h2></div></div><dl className="count-list">{counts ? Object.entries(counts).map(([label, value]) => <div key={label}><dt>{label.replaceAll("_", " ")}</dt><dd>{typeof value === "number" ? value.toLocaleString() : String(value)}</dd></div>) : <div><dt>Stories</dt><dd>{number(counts, "stories")}</dd></div>}</dl></section>
       <section className="panel setting-card span-two"><div className="panel-heading"><div><p className="section-index">04</p><h2>Local diagnostics</h2></div><a href="/api/dashboard/diagnostics/export">Export redacted JSON</a></div><div className="diagnostic-list">{diagnostics.map((item, index) => <div key={String(item.id || index)}><span className={`status-chip status-${text(item, "level", "info")}`}>{text(item, "level", "info")}</span><strong>{text(item, "event_type", "Event")}</strong><p>{text(item, "message", "")}</p><small>{dateTime(item.created_at)}</small></div>)}{!diagnostics.length ? <div className="empty-state"><span>No diagnostic events stored.</span></div> : null}</div></section>
       <section className="panel setting-card span-two"><div className="panel-heading"><div><p className="section-index">05</p><h2>Recent owner commands</h2></div><span>Relay activity</span></div><div className="command-list">{commands.map((command) => <div key={command.id}><strong>{command.operation}</strong><span className={`command-${command.status}`}>{command.status}</span><small>{command.error || `${new Date(command.createdAt).toLocaleString()} · expires ${new Date(command.expiresAt).toLocaleTimeString()}`}</small></div>)}{!commands.length ? <p className="empty-state">No commands have been queued.</p> : null}</div></section>
+      <PushSettings />
     </div>
     <SettingsActions connected={Boolean(stored?.bridgeConnected)} />
   </DashboardShell>;

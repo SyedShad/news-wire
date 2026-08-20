@@ -32,7 +32,7 @@ from .services import DashboardService
 from .storage import Database
 
 
-BRIDGE_VERSION = "2.1.0"
+BRIDGE_VERSION = "2.2.0"
 BRIDGE_LABEL = "com.opensourceainewswire.hostedbridge"
 BRIDGE_KEYCHAIN_SERVICE = "com.opensourceainewswire.hostedbridge.secret"
 SITES_ACCESS_KEYCHAIN_SERVICE = "com.opensourceainewswire.hostedbridge.sites-access"
@@ -56,6 +56,8 @@ ALLOWED_OPERATIONS = frozenset(
         "schedule.catch_up",
         "diagnostics.purge",
         "alerts.mark_read",
+        "article_alert.start_research",
+        "article_alert.dismiss",
         "bridge.healthcheck",
     }
 )
@@ -478,6 +480,31 @@ def build_resource_projection(
     return resources, hashlib.sha256(encoded).hexdigest()
 
 
+def build_notification_projection(
+    service: DashboardService,
+) -> tuple[list[dict[str, Any]], str]:
+    """Build the relevance-only article stream with no ranking metadata."""
+    articles = [
+        {
+            "event_id": int(item["event_id"]),
+            "article_key": str(item["article_key"]),
+            "story_id": str(item["story_id"]),
+            "canonical_url": str(item["canonical_url"]),
+            "title": str(item["title"]),
+            "publisher": str(item["publisher"]),
+            "category": str(item["category"]),
+            "context": str(item["context"]),
+            "provenance": str(item["provenance"]),
+            "source_type": str(item["source_type"]),
+            "published_at": item.get("published_at"),
+            "detected_at": str(item["detected_at"]),
+        }
+        for item in service.list_relevance_notification_events()
+    ]
+    encoded = json.dumps(articles, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return articles, hashlib.sha256(encoded).hexdigest()
+
+
 def _projection_chunks(items: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     chunks: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
@@ -589,6 +616,21 @@ class LocalCommandExecutor:
             raise ValueError(f"{key} is required")
         return value
 
+    @staticmethod
+    def _positive_identifier(payload: dict[str, Any], key: str) -> int:
+        value = payload.get(key)
+        if isinstance(value, bool):
+            raise ValueError(f"{key} is required")
+        if isinstance(value, int):
+            identifier = value
+        elif isinstance(value, str) and value.isdigit():
+            identifier = int(value)
+        else:
+            raise ValueError(f"{key} is required")
+        if identifier < 1:
+            raise ValueError(f"{key} is required")
+        return identifier
+
     def execute(self, operation: str, payload: dict[str, Any]) -> tuple[Any, bool]:
         if operation not in ALLOWED_OPERATIONS:
             raise ValueError("Unsupported owner operation")
@@ -665,6 +707,18 @@ class LocalCommandExecutor:
             }
         elif operation == "alerts.mark_read":
             result = {"updated": self.service.mark_alerts_read()}
+        elif operation == "article_alert.start_research":
+            result = self.service.start_notification_research(
+                self._positive_identifier(payload, "event_id"),
+                self._string(payload, "article_key"),
+                self._string(payload, "story_id"),
+            )
+        elif operation == "article_alert.dismiss":
+            result = self.service.dismiss_notification_article(
+                self._positive_identifier(payload, "event_id"),
+                self._string(payload, "article_key"),
+                self._string(payload, "story_id"),
+            )
         elif operation == "bridge.healthcheck":
             result = {"status": "ok", "runtime_version": __version__}
         else:
@@ -752,6 +806,8 @@ class HostedBridge:
             str,
             list[dict[str, Any]],
             str,
+            list[dict[str, Any]],
+            str,
         ] | None = None
 
     def _database_fingerprint(self) -> tuple[tuple[int, int] | None, ...]:
@@ -778,10 +834,15 @@ class HostedBridge:
         str,
         list[dict[str, Any]],
         str,
+        list[dict[str, Any]],
+        str,
     ]:
         fingerprint = self._database_fingerprint()
         if self._cached_bundle is not None and fingerprint == self._cached_fingerprint:
-            snapshot, stories, story_digest, cached_resources, _ = self._cached_bundle
+            (
+                snapshot, stories, story_digest, cached_resources, _,
+                notification_articles, notification_digest,
+            ) = self._cached_bundle
             snapshot = copy.deepcopy(snapshot)
             resources = copy.deepcopy(cached_resources)
             schedule = _json_safe(self.service.schedule_status())
@@ -802,6 +863,8 @@ class HostedBridge:
                 story_digest,
                 resources,
                 hashlib.sha256(encoded).hexdigest(),
+                notification_articles,
+                notification_digest,
             )
 
         story_summaries = _all_story_summaries(self.service, window="all")
@@ -817,6 +880,9 @@ class HostedBridge:
             self.service,
             story_summaries=story_summaries,
         )
+        notification_articles, notification_digest = build_notification_projection(
+            self.service
+        )
         final_fingerprint = self._database_fingerprint()
         self._cached_fingerprint = (
             final_fingerprint if final_fingerprint == fingerprint else None
@@ -827,39 +893,65 @@ class HostedBridge:
             story_digest,
             copy.deepcopy(resources),
             resource_digest,
+            notification_articles,
+            notification_digest,
         )
-        return snapshot, stories, story_digest, resources, resource_digest
+        return (
+            snapshot, stories, story_digest, resources, resource_digest,
+            notification_articles, notification_digest,
+        )
 
     def sync_once(self) -> dict[str, Any]:
-        snapshot, stories, story_digest, resources, resource_digest = (
+        (
+            snapshot, stories, story_digest, resources, resource_digest,
+            notification_articles, notification_digest,
+        ) = (
             self._projection_bundle()
         )
         manifest_path = self.paths.operations / BRIDGE_PROJECTION_MANIFEST_NAME
         manifest = _load_projection_manifest(manifest_path)
         previous_story_digest, previous_stories = _manifest_section(manifest, "stories")
         previous_resource_digest, previous_resources = _manifest_section(manifest, "resources")
+        previous_notification_digest, previous_notifications = _manifest_section(
+            manifest, "notification_articles"
+        )
         story_manifest = _projection_manifest(stories, key=lambda item: str(item["id"]))
         resource_manifest = _projection_manifest(
             resources,
             key=lambda item: f"{item['resource_type']}:{item['resource_id']}",
         )
-        sync_id = secrets.token_urlsafe(24)
-        state = self.client.request(
-            "PUT",
-            "/api/bridge/sync",
-            {
-                "schema_version": 2,
-                "kind": "state",
-                "sync_id": sync_id,
-                "story_digest": story_digest,
-                "story_total": len(stories),
-                "resource_digest": resource_digest,
-                "resource_total": len(resources),
-                "snapshot": snapshot,
-            },
+        notification_manifest = _projection_manifest(
+            notification_articles,
+            key=lambda item: str(item["article_key"]),
         )
+        sync_id = secrets.token_urlsafe(24)
+        state_payload = {
+            "schema_version": 2,
+            "kind": "state",
+            "sync_id": sync_id,
+            "story_digest": story_digest,
+            "story_total": len(stories),
+            "resource_digest": resource_digest,
+            "resource_total": len(resources),
+            "notification_digest": notification_digest,
+            "notification_total": len(notification_articles),
+            "snapshot": snapshot,
+        }
+        try:
+            state = self.client.request("PUT", "/api/bridge/sync", state_payload)
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code not in {400, 422}:
+                raise
+            # Protocol 2.1 state validators do not know the additive
+            # notification digest pair. Continue the established projections
+            # until the hosted endpoint is upgraded.
+            legacy_payload = dict(state_payload)
+            legacy_payload.pop("notification_digest")
+            legacy_payload.pop("notification_total")
+            state = self.client.request("PUT", "/api/bridge/sync", legacy_payload)
         stories_uploaded = 0
         resources_uploaded = 0
+        notification_articles_uploaded = 0
         if state.get("stories_required") is True:
             story_delta = bool(
                 previous_story_digest
@@ -974,12 +1066,62 @@ class HostedBridge:
                     "mode": "delta" if resource_delta else "full",
                 },
             )
+        notifications_required = (
+            state.get("notification_articles_required") is True
+            or state.get("notifications_required") is True
+        )
+        if notifications_required:
+            notification_delta = bool(
+                previous_notification_digest
+                and previous_notification_digest
+                == str(state.get("notification_digest") or "")
+            )
+            selected_notifications = (
+                [
+                    item for item in notification_articles
+                    if previous_notifications.get(str(item["article_key"]))
+                    != notification_manifest[str(item["article_key"])]
+                ]
+                if notification_delta
+                else notification_articles
+            )
+            notification_articles_uploaded = len(selected_notifications)
+            for chunk in _projection_chunks(selected_notifications):
+                self.client.request(
+                    "PUT",
+                    "/api/bridge/sync",
+                    {
+                        "schema_version": 2,
+                        "kind": "notification_articles",
+                        "sync_id": sync_id,
+                        "mode": "delta" if notification_delta else "full",
+                        "notification_articles": chunk,
+                        "deleted_ids": [],
+                    },
+                )
+            self.client.request(
+                "PUT",
+                "/api/bridge/sync",
+                {
+                    "schema_version": 2,
+                    "kind": "complete",
+                    "sync_id": sync_id,
+                    "projection": "notification_articles",
+                    "digest": notification_digest,
+                    "total": len(notification_articles),
+                    "mode": "delta" if notification_delta else "full",
+                },
+            )
         _atomic_private_json(
             manifest_path,
             {
                 "schema_version": 1,
                 "stories": {"digest": story_digest, "items": story_manifest},
                 "resources": {"digest": resource_digest, "items": resource_manifest},
+                "notification_articles": {
+                    "digest": notification_digest,
+                    "items": notification_manifest,
+                },
             },
         )
         command_response = self.client.request("GET", "/api/bridge/commands")
@@ -1035,6 +1177,7 @@ class HostedBridge:
             "digest": story_digest,
             "stories_uploaded": stories_uploaded,
             "resources_uploaded": resources_uploaded,
+            "notification_articles_uploaded": notification_articles_uploaded,
             "commands_completed": completed,
             "reads_completed": reads_completed,
         }
@@ -1058,7 +1201,9 @@ class HostedBridge:
                 time.sleep(max(0.1, delay - elapsed))
 
 
-def _background_callbacks(database: Database) -> tuple[Callable[[], None], Callable[[int], None]]:
+def _background_callbacks(
+    database: Database,
+) -> tuple[Callable[[], None], Callable[[int], None], Callable[[int], None]]:
     def run_scan() -> None:
         threading.Thread(
             target=lambda: Worker(database).run(trigger="manual"),
@@ -1086,7 +1231,12 @@ def _background_callbacks(database: Database) -> tuple[Callable[[], None], Calla
             daemon=True,
         ).start()
 
-    return run_scan, run_draft
+    def run_research(work_item_id: int) -> None:
+        from .research import run_source_research
+
+        run_source_research(database, work_item_id)
+
+    return run_scan, run_draft, run_research
 
 
 def create_hosted_bridge(
@@ -1096,13 +1246,14 @@ def create_hosted_bridge(
     interval_seconds: int = 10,
     http_client: httpx.Client | None = None,
 ) -> HostedBridge:
-    run_scan, run_draft = _background_callbacks(database)
+    run_scan, run_draft, run_research = _background_callbacks(database)
     scheduler = LaunchAgentManager(database, launcher=Path.home() / ".local/bin/open-source-ai-news-wire")
     service = DashboardService(
         database,
         scheduler=scheduler,
         run_callback=run_scan,
         draft_callback=run_draft,
+        research_callback=run_research,
     )
     client = SignedHostedClient(
         base_url,

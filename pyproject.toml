@@ -1,6 +1,6 @@
 [project]
 name = "open-source-ai-news-wire"
-version = "0.4.1"
+version = "0.4.2"
 description = "Local-first AI news monitoring and editorial review dashboard"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -18,7 +18,10 @@ import httpx
 from .adapters import (
     AdapterError,
     Observation,
+    canonical_url,
     enrich_huggingnews_detail,
+    notification_context,
+    notification_source_type,
     parse_huggingnews_momentum,
     parse_source,
 )
@@ -32,7 +35,7 @@ from .network import (
     resolve_known_short_url,
 )
 from .qualification import Qualification, qualify
-from .evidence import normalize_public_https_url, publisher_key
+from .evidence import extract_page, normalize_public_https_url, publisher_key
 from .settings import load_settings
 from .source_registry import synchronize_sources
 from .storage import Database
@@ -201,6 +204,9 @@ class Collector:
                         observations = self._huggingnews_details(
                             client, source, observations, deadline=deadline
                         )
+                    observations = self._hydrate_notification_context(
+                        client, source, observations, deadline=deadline
+                    )
                 new_count = self._record_success(
                     source, transaction_id, fetched, observations, trigger=trigger
                 )
@@ -297,6 +303,66 @@ class Collector:
             self.database.set_state("network_offline_active", "false", finished)
             self.database.set_state("network_offline_alerted", "false", finished)
         return ScanSummary(scan_id, result, successes, failures, discovered, offline)
+
+    def _hydrate_notification_context(
+        self,
+        client: SafeHttpClient,
+        source: dict[str, Any],
+        observations: list[Observation],
+        *,
+        deadline: datetime | None,
+    ) -> list[Observation]:
+        """Perform at most one safe page fetch for each thin source excerpt."""
+        hydrated: list[Observation] = []
+        for item in observations:
+            relevant = qualify(
+                item,
+                source,
+                observed_at=self.now(),
+                novelty=0,
+            ).relevant
+            if not relevant or len(" ".join(item.summary.split())) >= 160:
+                hydrated.append(item)
+                continue
+            metadata = dict(item.metadata)
+            if deadline is not None:
+                normalized = deadline if deadline.tzinfo else deadline.replace(tzinfo=UTC)
+                if datetime.now(UTC) >= normalized.astimezone(UTC):
+                    metadata["notification_provenance"] = "limited_context"
+                    hydrated.append(
+                        Observation(
+                            item.external_id, item.title, item.url, item.published_at,
+                            item.summary, item.language, metadata,
+                        )
+                    )
+                    continue
+            try:
+                fetched = client.fetch(item.url, deadline=deadline)
+                content_type = fetched.headers.get("content-type", "text/html").split(";", 1)[0]
+                page = extract_page(fetched.body, content_type)
+                passage = " ".join(page.passage.split())
+                if passage:
+                    metadata["notification_context"] = passage[:4000]
+                    metadata["notification_publisher"] = (
+                        page.hosting_publisher_name or urlsplit(fetched.url).hostname or ""
+                    )[:120]
+                    fetched_type = notification_source_type(source, item.url)
+                    metadata["notification_provenance"] = (
+                        "paper_abstract" if fetched_type == "paper" else
+                        "repository_text" if fetched_type == "repository" else
+                        "publisher_excerpt"
+                    )
+            except Exception:
+                # Notification context is best-effort. Collection remains
+                # available with an explicit limited-context fallback.
+                metadata["notification_provenance"] = "limited_context"
+            hydrated.append(
+                Observation(
+                    item.external_id, item.title, item.url, item.published_at,
+                    item.summary, item.language, metadata,
+                )
+            )
+        return hydrated
 
     @staticmethod
     def _contextualize_discovery_timestamps(
@@ -1480,6 +1546,96 @@ class Collector:
                 (known, observed_at, story_id),
             )
 
+    @staticmethod
+    def _record_relevance_notification(
+        connection: Any,
+        *,
+        source_item_id: int,
+        story_id: str,
+        source: dict[str, Any],
+        observation: Observation,
+        qualification: Qualification,
+        observed_at: str,
+        ingestion_context: str,
+    ) -> int | None:
+        """Append one relevance-only event for a newly inserted source item."""
+        if not qualification.relevant:
+            return None
+        capture = connection.execute(
+            "SELECT value FROM app_state WHERE key = 'relevance_notification_capture_enabled'"
+        ).fetchone()
+        if not capture or str(capture["value"]).casefold() != "true":
+            return None
+        watermark = connection.execute(
+            "SELECT value FROM app_state WHERE key = 'relevance_notification_watermark'"
+        ).fetchone()
+        if watermark and observed_at <= str(watermark["value"]):
+            return None
+        if ingestion_context in {"recovery", "extended"} and not _unknown_original_time(
+            observation.timestamp_status
+        ):
+            try:
+                detected = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+                published = datetime.fromisoformat(
+                    observation.effective_published_at.replace("Z", "+00:00")
+                )
+            except ValueError:
+                return None
+            if detected - published > timedelta(hours=72):
+                return None
+
+        context, provenance, source_type = notification_context(observation, source)
+        canonical = canonical_url(observation.url, observation.url)
+        article_key = observation.fingerprint
+        publisher = " ".join(
+            str(
+                observation.metadata.get("notification_publisher")
+                or source.get("name")
+                or "Publisher"
+            ).split()
+        )[:120]
+        published_at = (
+            None
+            if _unknown_original_time(observation.timestamp_status)
+            else observation.effective_published_at
+        )
+        cursor = connection.execute(
+            """
+            INSERT INTO relevance_notification_event(
+                article_key, source_item_id, story_id, canonical_url, title,
+                publisher, category, context, provenance, source_type,
+                published_at, detected_at, created_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(article_key) DO NOTHING
+            """,
+            (
+                article_key,
+                source_item_id,
+                story_id,
+                canonical,
+                observation.title[:500],
+                publisher,
+                qualification.lane[:120],
+                context,
+                provenance,
+                source_type,
+                published_at,
+                observed_at,
+                observed_at,
+            ),
+        )
+        if cursor.rowcount != 1:
+            return None
+        event_id = int(cursor.lastrowid)
+        connection.execute(
+            """
+            INSERT INTO relevance_notification_outbox(event_id, updated_at)
+            VALUES(?, ?)
+            """,
+            (event_id, observed_at),
+        )
+        return event_id
+
     def _persist_story(
         self,
         connection: Any,
@@ -1647,6 +1803,16 @@ class Collector:
         connection.execute(
             "INSERT INTO story_membership(story_id, source_item_id, relationship, language) VALUES(?, ?, 'same-development', ?)",
             (story_id, source_item_id, observation.language),
+        )
+        self._record_relevance_notification(
+            connection,
+            source_item_id=source_item_id,
+            story_id=story_id,
+            source=source,
+            observation=observation,
+            qualification=qualification,
+            observed_at=observed_at,
+            ingestion_context=ingestion_context,
         )
         first_public = connection.execute(
             """

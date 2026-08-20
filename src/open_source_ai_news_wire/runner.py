@@ -17,7 +17,7 @@ from .assistance import (
     run_isolation_canary,
 )
 from .evidence import EvidenceEnricher
-from .notifications import NativeNotifier
+from .notifications import NativeNotifier, RelevanceNativeNotifier
 from .pilot import PilotManager
 from .research import SourceResearchService
 from .scheduler import next_scheduled_run
@@ -125,6 +125,7 @@ class Worker:
                 self._process_assistance()
             PilotManager(self.database).try_auto_activate()
             NativeNotifier(self.database).dispatch_pending()
+            RelevanceNativeNotifier(self.database).dispatch_pending()
             return WorkerResult(summary.result, summary)
         finally:
             self.lock.release()

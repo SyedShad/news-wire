@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Open Source AI News Wire releases**
 
+## [0.4.2] - 2026-08-20
+
+### Added
+
+- Owner-only relevance notifications for every newly ingested relevant source
+  item, with source-derived context, provenance, and individual Web Push
+  delivery independent of the existing quality-gated alert lane.
+- Durable, idempotent Start research and Dismiss actions. Start research runs a
+  fresh bounded operator review search and reports its outcome without creating
+  a draft or content shell.
+- An installable notification web app with an inline-action capability where
+  supported and a two-control alert-card fallback where browser or operating
+  system notification actions are unavailable.
+
+### Changed
+
+- Canonical URL identity now controls source-item notification deduplication;
+  title similarity remains only a story-clustering signal.
+- The outbound bridge protocol is extended to 2.2 with a dedicated signed
+  notification-item projection and 72-hour durable action handling.
+
+### Security
+
+- Web Push subscriptions are encrypted at rest, push action capabilities are
+  single-use and HMAC-bound to one delivery, device, event, story, and action,
+  and provider endpoints never appear in projections, logs, or exports.
+- Notification registration and revocation retain current owner-session and
+  same-origin enforcement. Full contextual previews include an explicit
+  lock-screen privacy warning.
+
 ## [0.4.1] - 2026-08-18
 
 ### Added

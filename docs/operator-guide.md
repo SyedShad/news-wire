@@ -13,7 +13,23 @@ open-source-ai-news-wire dashboard
 
 Use `schedule run-now` for an immediate bounded scan. Overlapping triggers coalesce into the durable queue.
 
-Release 0.4.1 uses schema 8 and a trust-and-status workflow. The Overview and inbox show mutually exclusive Ready, Researching, and Content-ready states. Candidate, Watch, evidence, importance, lens, qualification, approval, and manual-override controls are retired. Archive and withdraw remain available.
+Release 0.4.2 uses schema 9 and a trust-and-status workflow. The Overview and inbox show mutually exclusive Ready, Researching, and Content-ready states. Candidate, Watch, evidence, importance, lens, qualification, approval, and manual-override controls are retired. Archive and withdraw remain available.
+
+## Relevance notifications
+
+The dedicated notification lane captures each newly ingested source item only
+when `qualification.relevant` is true. It does not consult quality, evidence,
+importance, priority, popularity, or momentum. Normalized canonical URL is the
+notification identity, so tracking variants and rescans notify once while
+different URLs notify separately even when their titles or stories match.
+
+Web Push is primary and is disabled by default. Start a 72-hour shadow review,
+run the private production canary, and activate deliberately. An intentional
+resume establishes a fresh watermark; ordinary laptop or bridge recovery keeps
+eligible items for up to 72 hours. Full headlines and source context may appear
+on the lock screen. Start working queues only `operator_review` source research
+and sends a terminal follow-up; it never creates content or a draft. Dismiss
+resolves only that notification.
 
 ## Trust, automatic research, and priority
 
@@ -135,12 +151,13 @@ Diagnostics redact local paths, tokens, and passages. Purge remains preview-firs
 ## Updates and rollback
 
 ```bash
-open-source-ai-news-wire app install --source-root /path/to/open-source-ai-news-wire
+open-source-ai-news-wire app install --source-root /path/to/open-source-ai-news-wire \
+  --validation-report /path/to/commit-bound-validation.json
 open-source-ai-news-wire app list
 open-source-ai-news-wire app rollback --release-id RELEASE_ID
 ```
 
-Pause the scheduler and snapshot the database before migrating. Each immutable install atomically switches the stable launcher. Rollback is allowed only when the selected release supports the current schema. After installing 0.4.1, run a fresh isolation/search canary before re-enabling assistance and resuming scheduling. A Sites rollback does not roll back the laptop database; the projection migrations are additive and harmless to the previous hosted shell.
+Pause the scheduler and snapshot the database before migrating. Each immutable install atomically switches the stable launcher. Rollback is allowed only when the selected release supports the current schema. After installing 0.4.2, run a fresh isolation/search canary before re-enabling assistance and resuming scheduling. Keep relevance notifications in shadow mode until the separate Web Push canary passes. A Sites rollback does not roll back the laptop database; the projection migrations are additive and harmless to the previous hosted shell.
 
 ## Private GitHub safeguard
 

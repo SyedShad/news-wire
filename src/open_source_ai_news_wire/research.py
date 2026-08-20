@@ -112,7 +112,7 @@ def queue_research_attempt(
     Draft refreshes are intentionally never idempotent across completed clicks;
     callers prevent only duplicate active content work.
     """
-    if purpose not in {"background", "draft_refresh"}:
+    if purpose not in {"background", "draft_refresh", "operator_review"}:
         raise ValueError("Unknown research purpose")
     now = _now()
     with database.transaction() as connection:
@@ -121,16 +121,23 @@ def queue_research_attempt(
         ).fetchone()
         if not story:
             raise LookupError("Story not found")
-        if purpose == "background":
+        if purpose in {"background", "operator_review"}:
+            active_only = (
+                "AND ra.status IN ('queued', 'running') "
+                "AND w.status IN ('pending', 'queued', 'running')"
+                if purpose == "operator_review"
+                else ""
+            )
             existing = connection.execute(
-                """
+                f"""
                 SELECT ra.id AS attempt_id, w.id AS work_id
                 FROM research_attempt ra
                 JOIN work_item w ON json_extract(w.payload_json, '$.research_attempt_id') = ra.id
-                WHERE ra.story_id = ? AND ra.purpose = 'background'
+                WHERE ra.story_id = ? AND ra.purpose = ?
+                  {active_only}
                 ORDER BY ra.id DESC LIMIT 1
-                """,
-                (story_id,),
+                """,  # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- active_only is a closed constant
+                (story_id, purpose),
             ).fetchone()
             if existing:
                 return int(existing["attempt_id"]), int(existing["work_id"])
@@ -160,7 +167,11 @@ def queue_research_attempt(
                 }),
                 now,
                 now,
-                f"source-research:{purpose}:{story_id}:{attempt_id}",
+                (
+                    f"source-research:operator_review:{story_id}:{attempt_id}"
+                    if purpose == "operator_review"
+                    else f"source-research:{purpose}:{story_id}:{attempt_id}"
+                ),
                 now,
             ),
         )
@@ -358,7 +369,11 @@ class SourceResearchService:
                     rejected.append("stale")
                     continue
                 now = self.now()
-                provenance = "background_search" if purpose == "background" else "draft_search"
+                provenance = (
+                    "background_search" if purpose == "background" else
+                    "operator_review_search" if purpose == "operator_review" else
+                    "draft_search"
+                )
                 publisher_name = page.hosting_publisher_name or str(item.get("publisher") or "") or publisher_display_name(final)
                 with self.database.transaction() as connection:
                     cursor = connection.execute(
@@ -485,6 +500,49 @@ class SourceResearchService:
                     """,
                     (now, now, work["story_id"], attempt_id),
                 )
+            elif purpose == "operator_review" and attempt_id:
+                outboxes = connection.execute(
+                    """
+                    SELECT event_id FROM relevance_notification_outbox
+                    WHERE research_attempt_id = ?
+                    """,
+                    (attempt_id,),
+                ).fetchall()
+                if outboxes:
+                    publishers = sorted({
+                        str(row["name"])
+                        for row in connection.execute(
+                            """
+                            SELECT COALESCE(NULLIF(hosting_publisher_name, ''), publisher_key) AS name
+                            FROM evidence_source
+                            WHERE research_attempt_id = ? AND status = 'confirmed'
+                            """,
+                            (attempt_id,),
+                        ).fetchall()
+                        if str(row["name"] or "").strip()
+                    })
+                    for outbox in outboxes:
+                        event_id = int(outbox["event_id"])
+                        connection.execute(
+                            """
+                            INSERT INTO relevance_notification_followup(
+                                event_id, research_attempt_id, status, result_count,
+                                publishers_json, detail, completed_at
+                            ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(event_id) DO NOTHING
+                            """,
+                            (
+                                event_id, attempt_id, status, result_count,
+                                Database.json(publishers), detail, now,
+                            ),
+                        )
+                        connection.execute(
+                            """
+                            UPDATE relevance_notification_outbox SET updated_at = ?
+                            WHERE event_id = ?
+                            """,
+                            (now, event_id),
+                        )
 
 
 def run_source_research(

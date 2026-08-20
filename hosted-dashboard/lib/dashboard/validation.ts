@@ -1,8 +1,18 @@
-import type { BridgeSyncEnvelope, DashboardSnapshot, JsonValue, ResourceProjection, StoryProjection } from "./types.ts";
+import {
+  NOTIFICATION_PROVENANCE_TYPES,
+  NOTIFICATION_SOURCE_TYPES,
+  type BridgeSyncEnvelope,
+  type DashboardSnapshot,
+  type JsonValue,
+  type NotificationArticleProjection,
+  type ResourceProjection,
+  type StoryProjection,
+} from "./types.ts";
 
 export const MAX_SNAPSHOT_BYTES = 1_500_000;
 export const MAX_COMMAND_PAYLOAD_BYTES = 32_000;
 export const MAX_SYNC_CHUNK_BYTES = 1_500_000;
+export const MAX_PUSH_ACTION_BYTES = 4_000;
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -64,6 +74,19 @@ export function parseBridgeSync(value: unknown): BridgeSyncEnvelope {
     if (!Number.isInteger(value.resource_total) || Number(value.resource_total) < 0) {
       throw new TypeError("resource_total is invalid");
     }
+    const hasNotificationDigest = value.notification_digest !== undefined;
+    const hasNotificationTotal = value.notification_total !== undefined;
+    if (hasNotificationDigest !== hasNotificationTotal) {
+      throw new TypeError("notification projection state is incomplete");
+    }
+    if (hasNotificationDigest) {
+      if (typeof value.notification_digest !== "string" || !/^[a-f0-9]{64}$/iu.test(value.notification_digest)) {
+        throw new TypeError("notification_digest is invalid");
+      }
+      if (!Number.isInteger(value.notification_total) || Number(value.notification_total) < 0) {
+        throw new TypeError("notification_total is invalid");
+      }
+    }
     return {
       schema_version: 2,
       kind,
@@ -72,6 +95,12 @@ export function parseBridgeSync(value: unknown): BridgeSyncEnvelope {
       story_total: Number(value.story_total),
       resource_digest: resourceDigest,
       resource_total: Number(value.resource_total),
+      ...(hasNotificationDigest
+        ? {
+            notification_digest: String(value.notification_digest),
+            notification_total: Number(value.notification_total),
+          }
+        : {}),
       snapshot: parseSnapshot(value.snapshot),
     };
   }
@@ -110,12 +139,76 @@ export function parseBridgeSync(value: unknown): BridgeSyncEnvelope {
     }
     return { schema_version: 2, kind, sync_id: syncId, mode, resources, deleted_ids: deletedIds };
   }
+  if (kind === "notification_articles") {
+    const mode = value.mode === undefined ? "full" : value.mode;
+    const deletedIds = value.deleted_ids === undefined ? [] : value.deleted_ids;
+    if (mode !== "full" && mode !== "delta") throw new TypeError("notification mode is invalid");
+    if (!Array.isArray(deletedIds) || deletedIds.length > 0) {
+      throw new TypeError("notification events are immutable");
+    }
+    if (!Array.isArray(value.notification_articles) || value.notification_articles.length > 100) {
+      throw new TypeError("notification articles chunk is invalid");
+    }
+    const allowedKeys = new Set([
+      "event_id", "article_key", "story_id", "canonical_url", "title", "publisher", "category",
+      "context", "provenance", "source_type", "published_at", "detected_at",
+    ]);
+    const sourceTypes = new Set<string>(NOTIFICATION_SOURCE_TYPES);
+    const provenanceTypes = new Set<string>(NOTIFICATION_PROVENANCE_TYPES);
+    const articles = value.notification_articles.map((candidate) => {
+      if (!isRecord(candidate) || Object.keys(candidate).some((key) => !allowedKeys.has(key))) {
+        throw new TypeError("notification article fields are invalid");
+      }
+      const rawEventId = candidate.event_id;
+      const eventId = typeof rawEventId === "number" && Number.isSafeInteger(rawEventId) && rawEventId > 0
+        ? String(rawEventId)
+        : typeof rawEventId === "string" && /^[A-Za-z0-9_-]{1,100}$/u.test(rawEventId)
+          ? rawEventId
+          : "";
+      const canonicalUrl = typeof candidate.canonical_url === "string" ? candidate.canonical_url : "";
+      let parsedUrl: URL;
+      try { parsedUrl = new URL(canonicalUrl); } catch { throw new TypeError("notification canonical_url is invalid"); }
+      const publishedAt = candidate.published_at;
+      const detectedAt = candidate.detected_at;
+      if (
+        !eventId ||
+        typeof candidate.article_key !== "string" || !/^[a-f0-9]{64}$/u.test(candidate.article_key) ||
+        typeof candidate.story_id !== "string" || !candidate.story_id || candidate.story_id.length > 200 ||
+        parsedUrl.protocol !== "https:" || canonicalUrl.length > 2_048 ||
+        typeof candidate.title !== "string" || !candidate.title.trim() || candidate.title.length > 500 ||
+        typeof candidate.publisher !== "string" || !candidate.publisher.trim() || candidate.publisher.length > 200 ||
+        typeof candidate.category !== "string" || !candidate.category.trim() || candidate.category.length > 100 ||
+        typeof candidate.context !== "string" || !candidate.context.trim() || candidate.context.length > 700 ||
+        typeof candidate.provenance !== "string" || !provenanceTypes.has(candidate.provenance) ||
+        typeof candidate.source_type !== "string" || !sourceTypes.has(candidate.source_type) ||
+        (publishedAt !== null && (typeof publishedAt !== "string" || !isIsoTimestamp(publishedAt))) ||
+        typeof detectedAt !== "string" || !isIsoTimestamp(detectedAt)
+      ) {
+        throw new TypeError("notification article is invalid");
+      }
+      return {
+        event_id: eventId,
+        article_key: candidate.article_key,
+        story_id: candidate.story_id,
+        canonical_url: canonicalUrl,
+        title: candidate.title.trim(),
+        publisher: candidate.publisher.trim(),
+        category: candidate.category.trim(),
+        context: candidate.context.trim(),
+        provenance: candidate.provenance,
+        source_type: candidate.source_type,
+        published_at: publishedAt,
+        detected_at: detectedAt,
+      } as NotificationArticleProjection;
+    });
+    return { schema_version: 2, kind, sync_id: syncId, mode, notification_articles: articles, deleted_ids: [] };
+  }
   if (kind === "complete") {
     const mode = value.mode === undefined ? "full" : value.mode;
     if (mode !== "full" && mode !== "delta") throw new TypeError("completion mode is invalid");
     const digest = requiredSyncString(value, "digest", 64);
     if (!/^[a-f0-9]{64}$/iu.test(digest)) throw new TypeError("digest is invalid");
-    if (value.projection !== "stories" && value.projection !== "resources") {
+    if (value.projection !== "stories" && value.projection !== "resources" && value.projection !== "notification_articles") {
       throw new TypeError("projection is invalid");
     }
     if (!Number.isInteger(value.total) || Number(value.total) < 0) {
@@ -132,6 +225,10 @@ export function parseBridgeSync(value: unknown): BridgeSyncEnvelope {
     };
   }
   throw new TypeError("Unsupported bridge sync kind");
+}
+
+function isIsoTimestamp(value: string): boolean {
+  return value.length <= 40 && /^\d{4}-\d{2}-\d{2}T/u.test(value) && Number.isFinite(Date.parse(value));
 }
 
 const OPERATIONS = new Set([

@@ -15,7 +15,7 @@ from typing import Any
 from .config import RuntimePaths, ensure_runtime_layout
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 def _exact_signature_records(value: object, *, source: bool) -> bool:
@@ -601,6 +601,130 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "CREATE INDEX idx_research_attempt_status ON research_attempt(status, purpose, created_at)",
         "CREATE INDEX idx_evidence_source_attempt ON evidence_source(research_attempt_id)",
     ),
+    9: (
+        # SQLite cannot alter the purpose CHECK constraint in place. Schema 9
+        # replaces only this parent table while foreign-key enforcement is
+        # temporarily disabled by Database.migrate(), then verifies the full
+        # graph before committing.
+        """
+        CREATE TABLE research_attempt_v9 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            story_id TEXT NOT NULL REFERENCES story_cluster(id) ON DELETE CASCADE,
+            purpose TEXT NOT NULL CHECK(purpose IN ('background', 'draft_refresh', 'operator_review')),
+            status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'complete', 'partial', 'failed', 'unavailable')),
+            query TEXT NOT NULL DEFAULT '',
+            result_count INTEGER NOT NULL DEFAULT 0 CHECK(result_count BETWEEN 0 AND 3),
+            error_class TEXT,
+            detail TEXT NOT NULL DEFAULT '',
+            started_at TEXT,
+            completed_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        INSERT INTO research_attempt_v9(
+            id, story_id, purpose, status, query, result_count, error_class,
+            detail, started_at, completed_at, created_at, updated_at
+        )
+        SELECT id, story_id, purpose, status, query, result_count, error_class,
+               detail, started_at, completed_at, created_at, updated_at
+        FROM research_attempt
+        """,
+        "DROP TABLE research_attempt",
+        "ALTER TABLE research_attempt_v9 RENAME TO research_attempt",
+        "CREATE INDEX idx_research_attempt_story ON research_attempt(story_id, purpose, created_at DESC)",
+        "CREATE INDEX idx_research_attempt_status ON research_attempt(status, purpose, created_at)",
+        """
+        CREATE TABLE relevance_notification_event (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            article_key TEXT NOT NULL UNIQUE CHECK(length(article_key) = 64),
+            source_item_id INTEGER REFERENCES source_item(id) ON DELETE SET NULL,
+            story_id TEXT NOT NULL,
+            canonical_url TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            publisher TEXT NOT NULL,
+            category TEXT NOT NULL,
+            context TEXT NOT NULL,
+            provenance TEXT NOT NULL CHECK(provenance IN (
+                'publisher_excerpt', 'paper_abstract', 'repository_text',
+                'discovery_metadata', 'limited_context'
+            )),
+            source_type TEXT NOT NULL CHECK(source_type IN (
+                'article', 'announcement', 'paper', 'repository',
+                'newsletter', 'discovery'
+            )),
+            published_at TEXT,
+            detected_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE relevance_notification_outbox (
+            event_id INTEGER PRIMARY KEY REFERENCES relevance_notification_event(id) ON DELETE CASCADE,
+            delivery_state TEXT NOT NULL DEFAULT 'pending'
+                CHECK(delivery_state IN ('pending', 'dismissed')),
+            dismissed_at TEXT,
+            research_attempt_id INTEGER REFERENCES research_attempt(id) ON DELETE SET NULL,
+            research_requested_at TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE relevance_notification_followup (
+            event_id INTEGER PRIMARY KEY REFERENCES relevance_notification_event(id) ON DELETE CASCADE,
+            research_attempt_id INTEGER NOT NULL REFERENCES research_attempt(id) ON DELETE CASCADE,
+            status TEXT NOT NULL CHECK(status IN ('complete', 'partial', 'failed', 'unavailable')),
+            result_count INTEGER NOT NULL DEFAULT 0 CHECK(result_count BETWEEN 0 AND 3),
+            publishers_json TEXT NOT NULL DEFAULT '[]',
+            detail TEXT NOT NULL DEFAULT '',
+            completed_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE relevance_native_delivery (
+            event_id INTEGER PRIMARY KEY REFERENCES relevance_notification_event(id) ON DELETE CASCADE,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'delivered', 'failed')),
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+            delivered_at TEXT,
+            next_attempt_at TEXT,
+            error_class TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX idx_relevance_notification_detected ON relevance_notification_event(detected_at, id)",
+        "CREATE INDEX idx_relevance_notification_outbox_state ON relevance_notification_outbox(delivery_state, updated_at)",
+        """
+        INSERT INTO app_state(key, value, updated_at)
+        VALUES(
+            'relevance_notification_watermark',
+            strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+            strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+        )
+        ON CONFLICT(key) DO NOTHING
+        """,
+        """
+        INSERT INTO app_state(key, value, updated_at)
+        VALUES('relevance_notification_capture_enabled', 'true', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        ON CONFLICT(key) DO NOTHING
+        """,
+        """
+        INSERT INTO app_state(key, value, updated_at)
+        VALUES('relevance_notifications_enabled', 'false', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        ON CONFLICT(key) DO NOTHING
+        """,
+        """
+        INSERT INTO app_state(key, value, updated_at)
+        VALUES('relevance_notifications_shadow_mode', 'true', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        ON CONFLICT(key) DO NOTHING
+        """,
+        """
+        INSERT INTO app_state(key, value, updated_at)
+        VALUES('relevance_native_notifications_enabled', 'false', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        ON CONFLICT(key) DO NOTHING
+        """,
+    ),
 }
 
 
@@ -792,6 +916,8 @@ class Database:
                 raise RuntimeError(f"Missing migration for schema {target}")
             connection = self.connect()
             try:
+                if target == 9:
+                    connection.execute("PRAGMA foreign_keys = OFF")
                 connection.execute("BEGIN IMMEDIATE")
                 for statement in statements:
                     connection.execute(statement)
@@ -1344,6 +1470,10 @@ class Database:
                     "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                     (str(target),),
                 )
+                if target == 9:
+                    violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+                    if violations:
+                        raise RuntimeError("Schema 9 migration produced invalid foreign keys")
                 connection.commit()
             except Exception:
                 connection.rollback()

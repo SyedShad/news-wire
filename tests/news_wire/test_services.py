@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from open_source_ai_news_wire import __version__
 from open_source_ai_news_wire.config import resolve_runtime_paths
 from open_source_ai_news_wire.demo import seed_demo_data
 from open_source_ai_news_wire.evidence import qualification_state, recalculate_story_qualification
@@ -1090,7 +1091,7 @@ def test_settings_alerts_and_evidence_failure_paths(service: DashboardService) -
     assert settings["counts"]["stories"] == 5
     assert settings["counts"]["registered sources"] == 12
     assert settings["counts"]["source items"] == 9
-    assert settings["app_version"] == "0.4.1"
+    assert settings["app_version"] == __version__
     assert settings["purge_preview"]["operations_count"] == 1
     assert settings["demo_mode"] is True
     assert service.mark_alerts_read() == 6

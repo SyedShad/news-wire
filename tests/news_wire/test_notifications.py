@@ -6,7 +6,7 @@ from pathlib import Path
 
 from open_source_ai_news_wire.config import resolve_runtime_paths
 from open_source_ai_news_wire.demo import seed_demo_data
-from open_source_ai_news_wire.notifications import NativeNotifier
+from open_source_ai_news_wire.notifications import NativeNotifier, RelevanceNativeNotifier
 from open_source_ai_news_wire.storage import Database
 from open_source_ai_news_wire.web import create_app
 
@@ -157,3 +157,86 @@ def test_dashboard_auth_link_can_open_a_specific_story(tmp_path: Path) -> None:
     )
     assert response.status_code == 303
     assert response.headers["Location"] == "/stories/story-demo-runtime-001"
+
+
+def _relevance_event(database: Database, detected_at: str) -> int:
+    with database.transaction() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO relevance_notification_event(
+                article_key, story_id, canonical_url, title, publisher, category,
+                context, provenance, source_type, detected_at, created_at
+            ) VALUES(
+                printf('%064d', 1), 'story-native', 'https://example.com/native',
+                'Open model weights released', 'Example Lab', 'Open Ecosystem News',
+                'Example Lab reports: The project released model weights. This context comes from the monitored publisher excerpt.',
+                'publisher_excerpt', 'announcement', ?, ?
+            )
+            """,
+            (detected_at, detected_at),
+        )
+        event_id = int(cursor.lastrowid)
+        connection.execute(
+            "INSERT INTO relevance_notification_outbox(event_id, updated_at) VALUES(?, ?)",
+            (event_id, detected_at),
+        )
+    return event_id
+
+
+def test_relevance_native_fallback_is_individual_neutral_and_deduplicated(tmp_path: Path) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    event_id = _relevance_event(database, "2026-08-20T09:01:00Z")
+    database.set_state("relevance_notifications_enabled", "true", "2026-08-20T09:02:00Z")
+    database.set_state("relevance_native_notifications_enabled", "true", "2026-08-20T09:02:00Z")
+    database.set_state("relevance_notification_watermark", "2026-08-20T09:00:00Z", "2026-08-20T09:02:00Z")
+    commands: list[list[str]] = []
+
+    def runner(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(arguments)
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    notifier = RelevanceNativeNotifier(
+        database, runner=runner, terminal_notifier=tmp_path / "missing"
+    )
+    assert notifier.dispatch_pending() == 1
+    assert notifier.dispatch_pending() == 0
+    assert len(commands) == 1
+    assert commands[0][-2] == "Open model weights released"
+    assert "Example Lab · Open Ecosystem News · announcement" in commands[0][-1]
+    assert "Urgent" not in commands[0][-1]
+    assert database.one(
+        "SELECT status, attempt_count FROM relevance_native_delivery WHERE event_id = ?",
+        (event_id,),
+    ) == {"status": "delivered", "attempt_count": 1}
+
+
+def test_relevance_native_fallback_respects_dismiss_and_retries_failures(tmp_path: Path) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    event_id = _relevance_event(database, "2026-08-20T09:01:00Z")
+    for key in ("relevance_notifications_enabled", "relevance_native_notifications_enabled"):
+        database.set_state(key, "true", "2026-08-20T09:02:00Z")
+    database.set_state("relevance_notification_watermark", "2026-08-20T09:00:00Z", "2026-08-20T09:02:00Z")
+    runner = lambda args: subprocess.CompletedProcess(args, 1, "", "failed")
+
+    assert RelevanceNativeNotifier(
+        database, runner=runner, terminal_notifier=tmp_path / "missing"
+    ).dispatch_pending() == 0
+    failed = database.one(
+        "SELECT status, attempt_count, next_attempt_at FROM relevance_native_delivery WHERE event_id = ?",
+        (event_id,),
+    )
+    assert failed and failed["status"] == "failed" and failed["attempt_count"] == 1
+    assert failed["next_attempt_at"]
+    database.execute(
+        "UPDATE relevance_notification_outbox SET delivery_state = 'dismissed' WHERE event_id = ?",
+        (event_id,),
+    )
+    database.execute(
+        "UPDATE relevance_native_delivery SET next_attempt_at = '2026-08-20T09:00:00Z' WHERE event_id = ?",
+        (event_id,),
+    )
+    assert RelevanceNativeNotifier(
+        database, runner=runner, terminal_notifier=tmp_path / "missing"
+    ).dispatch_pending() == 0

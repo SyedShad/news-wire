@@ -77,9 +77,9 @@ See [Getting started](docs/guide/getting-started.md) for the full setup and firs
 
 ## Current release
 
-The current application release is v0.4.1 with database schema 8. It adds the
-verified outbound hosted-dashboard bridge and owner-only remote operations to
-the v0.4 trust-and-status workflow while keeping final publishing manual.
+The current application release is v0.4.2 with database schema 9. It adds an
+owner-only relevance-notification lane with source-derived Web Push previews
+and research-only actions while keeping collection local and publishing manual.
 
 See the [release guide](docs/guide/releases.md) and [changelog](CHANGELOG.md) for details.
 
@@ -88,6 +88,7 @@ See the [release guide](docs/guide/releases.md) and [changelog](CHANGELOG.md) fo
 - Collection runs on a schedule; it is not a guaranteed real-time wire service.
 - Sources must be public and usable without accounts, cookies, payment, or access bypasses.
 - Scheduled work runs while the Mac is awake. A locked screen is fine; sleep pauses work.
+- Notifications can arrive immediately after bridge ingestion, but they cannot detect new items while the Mac is asleep or offline.
 - Broader AI News is limited to privacy, security, and regulation; Open Ecosystem and AGI coverage remain separate.
 - ChatGPT assistance is optional and can remain unavailable if its local checks fail.
 - A human starts content creation with one button, reviews the editable result, and publishes it manually.

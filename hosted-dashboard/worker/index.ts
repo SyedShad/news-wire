@@ -1,8 +1,10 @@
 /** Cloudflare Worker entry point for the hosted News Wire dashboard. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
+import type { AuthRuntimeEnv } from "../lib/auth/types.ts";
+import { dispatchPendingNotifications } from "../lib/push/dispatch.ts";
 
-interface Env {
+interface Env extends AuthRuntimeEnv {
   ASSETS: Fetcher;
   DB: D1Database;
   CONTENT: R2Bucket;
@@ -42,6 +44,7 @@ const worker = {
       }, allowedWidths);
     } else {
       response = await handler.fetch(request, env, ctx);
+      ctx.waitUntil(dispatchPendingNotifications(env).catch(() => undefined));
     }
 
     const secured = new Response(response.body, response);
@@ -54,8 +57,16 @@ const worker = {
     );
     secured.headers.set(
       "content-security-policy",
-      "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+      "default-src 'self'; base-uri 'none'; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; worker-src 'self'",
     );
+    if (url.pathname === "/sw.js") {
+      secured.headers.set("cache-control", "no-cache, no-store, must-revalidate");
+      secured.headers.set("content-type", "application/javascript; charset=utf-8");
+      secured.headers.set("service-worker-allowed", "/");
+    } else if (url.pathname === "/manifest.webmanifest") {
+      secured.headers.set("cache-control", "public, max-age=300, must-revalidate");
+      secured.headers.set("content-type", "application/manifest+json; charset=utf-8");
+    }
     return secured;
   },
 };

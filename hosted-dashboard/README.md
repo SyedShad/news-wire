@@ -1,6 +1,6 @@
 # Owner-only hosted dashboard
 
-This project is the ChatGPT Sites frontend for Open Source AI News Wire 0.4.1.
+This project is the ChatGPT Sites frontend for Open Source AI News Wire 0.4.2.
 It provides the complete owner workspace while keeping collection, SQLite,
 research, drafting, and every canonical mutation on the laptop.
 
@@ -29,7 +29,7 @@ current bridge heartbeat.
 
 ## Data architecture
 
-Bridge protocol v2 polls outbound every ten seconds. HMAC-SHA256 signs the
+Bridge protocol v2.2 polls outbound every ten seconds. HMAC-SHA256 signs the
 protocol version, timestamp, random nonce, method, path, and request-body
 digest. Sites rejects stale timestamps, replayed nonces, oversized payloads,
 invalid schemas, unsupported bridge versions, and operations outside the fixed
@@ -45,6 +45,9 @@ D1 stores only the minimum hosted service state:
 - five-minute idempotent owner commands with claimed/completed/failed results;
 - one-minute on-demand historical read requests and bounded short-lived detail
   cache entries.
+- encrypted owner-device Web Push subscriptions, immutable relevance events,
+  per-device FIFO deliveries, and expiring action capabilities. Subscription
+  endpoints and keys are never projected, logged, or exported.
 
 The story index supports Review Now, Older Context, All History, status/lane/kind
 filters, priority/newest sorting, and cursor pagination. Historical details not
@@ -67,6 +70,12 @@ values, marking every credential as secret:
 | `MASTER_PASSWORD_VERIFIER` | Yes | Slow salted owner-password verifier |
 | `MASTER_PASSWORD_VERSION` | No | Credential-rotation version |
 | `BRIDGE_SECRET` | Yes | Laptop-to-Sites HMAC key |
+| `PUSH_VAPID_PUBLIC_KEY` | No | Browser Web Push application-server key |
+| `PUSH_VAPID_PRIVATE_KEY` | Yes | Web Push signing key |
+| `PUSH_VAPID_SUBJECT` | No | Owner contact URI for Web Push providers |
+| `PUSH_SUBSCRIPTION_ENCRYPTION_KEY` | Yes | Encrypts subscription material at rest |
+| `PUSH_ACTION_SECRET` | Yes | HMAC key for one-use notification actions |
+| `PUSH_DELIVERY_ENABLED` | No | Independent hosted delivery kill switch; defaults false |
 
 Do not configure an owner password in plaintext. Do not place credentials in
 source control, deployment descriptions, command output, or chat.
@@ -105,7 +114,7 @@ regenerates only its ignored local verifier when the hosting runtime changes.
 
 ## Laptop bridge operation
 
-Run these from a verified immutable 0.4.1 install, never from a Git worktree:
+Run these from a verified immutable 0.4.2 install, never from a Git worktree:
 
 ```bash
 open-source-ai-news-wire hosted-bridge configure \
@@ -143,6 +152,6 @@ Production must be saved and deployed only from the exact tested source commit:
 7. retain the previous Sites version for rollback.
 
 Assisted drafting is a separate release-bound gate. Run a fresh isolation and
-search-canary check after installing 0.4.1, and enable assistance only if
+search-canary check after installing 0.4.2, and enable assistance only if
 identity, isolation, and canary checks all pass. Dashboard access remains useful
 when assistance is disabled.

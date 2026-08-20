@@ -32,7 +32,10 @@ class Observation:
 
     @property
     def fingerprint(self) -> str:
-        normalized = re.sub(r"[^a-z0-9]+", " ", self.title.lower()).strip()
+        # Article identity follows the normalized canonical URL. Headline
+        # similarity remains a story-clustering concern in Collector and must
+        # not collapse distinct publications into one source item.
+        normalized = canonical_url(self.url, self.url)
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
     @property
@@ -82,15 +85,116 @@ def canonical_url(value: str, base_url: str) -> str:
     parsed = urlsplit(absolute)
     if parsed.scheme not in {"https", "http"} or not parsed.hostname:
         raise AdapterError("Item URL is not a valid web URL")
-    filtered = [
+    filtered = sorted(
         (key, item)
         for key, item in parse_qsl(parsed.query, keep_blank_values=True)
         if not key.lower().startswith("utm_") and key.lower() not in {"ref", "source", "fbclid", "gclid"}
-    ]
+    )
     host = parsed.hostname.lower().rstrip(".")
-    port = f":{parsed.port}" if parsed.port else ""
+    port = (
+        ""
+        if parsed.port in {None, 80 if parsed.scheme.lower() == "http" else 443}
+        else f":{parsed.port}"
+    )
     path = re.sub(r"/{2,}", "/", parsed.path or "/")
     return urlunsplit((parsed.scheme.lower(), f"{host}{port}", path, urlencode(filtered), ""))
+
+
+_NOTIFICATION_PROVENANCE = {
+    "publisher_excerpt",
+    "paper_abstract",
+    "repository_text",
+    "discovery_metadata",
+    "limited_context",
+}
+
+
+def notification_source_type(source: dict[str, object], url: str) -> str:
+    """Return a descriptive source type without scoring or editorial judgment."""
+    family = str(source.get("family") or "")
+    role = str(source.get("monitoring_role") or "")
+    host = (urlsplit(url).hostname or "").casefold()
+    if family == "Research":
+        return "paper"
+    if host == "github.com" or host.endswith(".github.com"):
+        return "repository"
+    if family == "Public newsletters":
+        return "newsletter"
+    if role == "Discovery":
+        return "discovery"
+    if family in {
+        "Corporate filings",
+        "Government and law",
+        "Official AI organizations",
+        "Open development ecosystems",
+        "Safety and security",
+    }:
+        return "announcement"
+    return "article"
+
+
+def notification_provenance(
+    observation: Observation,
+    source: dict[str, object],
+) -> str:
+    explicit = str(observation.metadata.get("notification_provenance") or "")
+    if explicit in _NOTIFICATION_PROVENANCE:
+        return explicit
+    source_type = notification_source_type(source, observation.url)
+    if source_type == "paper":
+        return "paper_abstract"
+    if source_type == "repository":
+        return "repository_text"
+    if source_type == "discovery":
+        return "discovery_metadata"
+    if observation.summary.strip():
+        return "publisher_excerpt"
+    return "limited_context"
+
+
+def notification_context(
+    observation: Observation,
+    source: dict[str, object],
+) -> tuple[str, str, str]:
+    """Build a neutral source-derived preview capped for push delivery."""
+    publisher = " ".join(
+        str(
+            observation.metadata.get("notification_publisher")
+            or source.get("name")
+            or "Publisher"
+        ).split()
+    )[:120]
+    source_type = notification_source_type(source, observation.url)
+    provenance = notification_provenance(observation, source)
+    raw = str(
+        observation.metadata.get("notification_context")
+        or observation.summary
+        or ""
+    )
+    plain = " ".join(
+        html.unescape(re.sub(r"<[^>]+>", " ", raw)).split()
+    )
+    if plain:
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", plain)
+            if sentence.strip()
+        ][:3]
+        excerpt = " ".join(sentences) if sentences else plain
+        if excerpt[-1:] not in ".!?":
+            excerpt += "."
+        context = f"{publisher} reports: {excerpt}"
+        source_label = provenance.replace("_", " ")
+        context += f" This context comes from the monitored {source_label}."
+    else:
+        context = (
+            f"{publisher} published “{' '.join(observation.title.split())[:300]}.” "
+            "Only limited context was available from the monitored item."
+        )
+        provenance = "limited_context"
+    if len(context) > 700:
+        context = context[:697].rstrip(" ,;:-") + "..."
+    return context, provenance, source_type
 
 
 def parse_public_time(value: str | None, fallback: str) -> str:

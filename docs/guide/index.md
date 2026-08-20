@@ -1,6 +1,6 @@
 # Product guide
 
-Open Source AI News Wire is a local-first monitoring and content-preparation application for public AI news. Release 0.4.1 adds owner-only access from any device while keeping the canonical corpus and operational backend on the laptop and publication in human hands.
+Open Source AI News Wire is a local-first monitoring and content-preparation application for public AI news. Release 0.4.2 adds owner-only relevance notifications with source context while keeping the canonical corpus and operational backend on the laptop and publication in human hands.
 
 ## Public-source monitoring
 

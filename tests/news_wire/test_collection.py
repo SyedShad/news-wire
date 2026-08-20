@@ -1556,7 +1556,7 @@ def test_collector_persists_and_deduplicates_future_timestamp_fallback(
     ) == {"count": 1}
 
 
-def test_collector_collapses_republished_fingerprint_and_advances_cursor(tmp_path: Path) -> None:
+def test_collector_keeps_same_title_at_distinct_urls_and_advances_cursor(tmp_path: Path) -> None:
     database = _database_with_one_source(tmp_path)
     title = "Open-source AI model release improves inference security"
     payload = {
@@ -1591,8 +1591,8 @@ def test_collector_collapses_republished_fingerprint_and_advances_cursor(tmp_pat
 
     assert first.result == "success"
     assert second.result == "success"
-    assert second.discovered_count == 0
-    assert database.one("SELECT COUNT(*) AS count FROM raw_observation") == {"count": 1}
+    assert second.discovered_count == 1
+    assert database.one("SELECT COUNT(*) AS count FROM raw_observation") == {"count": 2}
     assert database.one("SELECT COUNT(*) AS count FROM story_cluster") == {"count": 1}
     assert json.loads(
         database.one("SELECT cursor FROM source_state WHERE source_id = 'openai-news'")["cursor"]

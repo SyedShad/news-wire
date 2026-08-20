@@ -4,6 +4,21 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
+        source: "/sw.js",
+        headers: [
+          { key: "Cache-Control", value: "no-cache, no-store, must-revalidate" },
+          { key: "Content-Type", value: "application/javascript; charset=utf-8" },
+          { key: "Service-Worker-Allowed", value: "/" },
+        ],
+      },
+      {
+        source: "/manifest.webmanifest",
+        headers: [
+          { key: "Cache-Control", value: "public, max-age=300, must-revalidate" },
+          { key: "Content-Type", value: "application/manifest+json; charset=utf-8" },
+        ],
+      },
+      {
         source: "/:path*",
         headers: [
           { key: "Referrer-Policy", value: "no-referrer" },
@@ -13,7 +28,7 @@ const nextConfig: NextConfig = {
           {
             key: "Content-Security-Policy",
             value:
-              "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+              "default-src 'self'; base-uri 'none'; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; worker-src 'self'",
           },
         ],
       },

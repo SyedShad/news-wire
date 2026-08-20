@@ -191,6 +191,8 @@ test("unauthenticated dashboard and session API do not return protected data", a
     "/api/dashboard/schedule",
     "/api/dashboard/settings",
     "/api/dashboard/diagnostics/export",
+    "/api/push/subscriptions",
+    "/api/push/status",
   ]) {
     const response = await fetchApp(path);
     assert.equal(response.status, 401, path);

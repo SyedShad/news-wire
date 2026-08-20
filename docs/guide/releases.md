@@ -6,15 +6,15 @@ Open Source AI News Wire uses semantic application versions and explicit databas
 
 | Item | Value |
 |---|---|
-| Application | 0.4.1 |
-| Database schema | 8 |
+| Application | 0.4.2 |
+| Database schema | 9 |
 | Release tag | Pending local validation and source release |
 | Validated source commit | Bound by the local validation report at install time |
 | Distribution | Owner source repository; no prebuilt binary attached |
 
-Release 0.4.1 adds the owner-only online dashboard and verified outbound laptop
-bridge to the v0.4 trust-and-status workflow while keeping security checks and
-final publication manual.
+Release 0.4.2 adds owner-only relevance notifications for every new relevant
+source item, independent of quality and priority, while keeping detection on
+the laptop and final publication manual.
 
 Highlights:
 
@@ -25,6 +25,9 @@ Highlights:
 - The reviewed identity pin is `codex-cli 0.146.0-alpha.9.2`; source discovery permits only web search, and final writing permits no tools.
 - The ChatGPT Sites frontend uses a redacted hosted read projection and expiring
   relay queues; SQLite and every canonical mutation remain on the laptop.
+- Browser notifications show source-derived context. Start working runs only a
+  fresh source search; it never creates a draft, and Dismiss changes only the
+  notification.
 
 See the complete [changelog](../../CHANGELOG.md) for the file-level release record.
 
@@ -67,7 +70,7 @@ uv run open-source-ai-news-wire sources health
 uv run open-source-ai-news-wire dashboard
 ```
 
-The migration operates on the configured local data root. The application does not create a backup before migration. Pause scheduling and snapshot the database before moving to schema 8, then run a fresh isolation/search canary before resuming assistance.
+The migration operates on the configured local data root. The application does not create a backup before migration. Pause scheduling and snapshot the database before moving to schema 9, then run a fresh isolation/search canary before resuming assistance.
 
 If the schedule was installed with the checkout's `.venv/bin/open-source-ai-news-wire` launcher, `uv sync --locked` updates that same environment and no schedule reinstall is normally required.
 
@@ -80,6 +83,18 @@ It is a release-maintainer workflow, not the everyday installation path. See [Up
 Rollback is allowed only when the selected installed release supports the current database schema. Runtime data is never automatically rolled back or deleted.
 
 ## News Wire release history
+
+### 0.4.2 - Relevance-only notifications
+
+- Added immutable schema-9 notification events keyed by normalized canonical
+  URL, with no historical backfill and no quality, importance, or priority gate.
+- Added bridge protocol 2.2, encrypted owner-device Web Push subscriptions,
+  individual FIFO delivery, durable 72-hour actions, and research-result
+  follow-ups.
+- Added a notification web app and two-control alert card. Full headlines and
+  context can appear on the lock screen.
+- Kept notifications in shadow mode until a private production canary and
+  deliberate owner activation succeed.
 
 ### 0.4.1 - Owner-only online dashboard
 

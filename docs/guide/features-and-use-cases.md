@@ -1,6 +1,6 @@
 # Features and use cases
 
-Release 0.4.1 is optimized for getting a detected story to an editable Reddit draft quickly while keeping publication manual, with owner-only access from any device through the hosted dashboard.
+Release 0.4.2 adds owner-only review notifications for every new relevant source item while keeping content creation and publication deliberate and manual.
 
 ## Coverage
 

@@ -62,12 +62,14 @@ class DashboardService:
         scheduler: Any | None = None,
         run_callback: Callable[[], None] | None = None,
         draft_callback: Callable[[int], None] | None = None,
+        research_callback: Callable[[int], None] | None = None,
         clock: Callable[[], datetime] | None = None,
     ):
         self.database = database
         self.scheduler = scheduler
         self.run_callback = run_callback
         self.draft_callback = draft_callback
+        self.research_callback = research_callback
         self.clock = clock or (lambda: datetime.now(UTC))
 
     def _current_time(self) -> datetime:
@@ -1796,6 +1798,297 @@ class DashboardService:
             self._create_editable_draft_shell(work_item_id, work_payload)
             self._dispatch_draft(work_item_id)
         return new_status
+
+    def relevance_notification_state(self) -> dict[str, Any]:
+        return {
+            "capture_enabled": self.database.get_state(
+                "relevance_notification_capture_enabled", "false"
+            ) == "true",
+            "delivery_enabled": self.database.get_state(
+                "relevance_notifications_enabled", "false"
+            ) == "true",
+            "shadow_mode": self.database.get_state(
+                "relevance_notifications_shadow_mode", "true"
+            ) == "true",
+            "native_enabled": self.database.get_state(
+                "relevance_native_notifications_enabled", "false"
+            ) == "true",
+            "watermark": self.database.get_state(
+                "relevance_notification_watermark", ""
+            ),
+        }
+
+    def begin_relevance_notification_shadow(self) -> dict[str, Any]:
+        """Start a new non-delivering validation window without backfill."""
+        now = utc_now()
+        with self.database.transaction() as connection:
+            for key, value in (
+                ("relevance_notification_capture_enabled", "true"),
+                ("relevance_notifications_enabled", "false"),
+                ("relevance_notifications_shadow_mode", "true"),
+                ("relevance_notification_watermark", now),
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO app_state(key, value, updated_at) VALUES(?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+                    """,
+                    (key, value, now),
+                )
+        return self.relevance_notification_state()
+
+    def set_relevance_notification_delivery(self, enabled: bool) -> dict[str, Any]:
+        """Enable or pause delivery; every intentional resume gets a fresh watermark."""
+        now = utc_now()
+        with self.database.transaction() as connection:
+            current = connection.execute(
+                "SELECT value FROM app_state WHERE key = 'relevance_notifications_enabled'"
+            ).fetchone()
+            was_enabled = bool(current and str(current["value"]) == "true")
+            values = [
+                ("relevance_notification_capture_enabled", "true"),
+                ("relevance_notifications_enabled", "true" if enabled else "false"),
+                ("relevance_notifications_shadow_mode", "false"),
+            ]
+            if enabled and not was_enabled:
+                values.append(("relevance_notification_watermark", now))
+            for key, value in values:
+                connection.execute(
+                    """
+                    INSERT INTO app_state(key, value, updated_at) VALUES(?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+                    """,
+                    (key, value, now),
+                )
+        return self.relevance_notification_state()
+
+    def set_relevance_notification_capture(self, enabled: bool) -> dict[str, Any]:
+        """Independent local kill switch; resuming capture never backfills."""
+        now = utc_now()
+        with self.database.transaction() as connection:
+            values = [("relevance_notification_capture_enabled", "true" if enabled else "false")]
+            if enabled:
+                values.append(("relevance_notification_watermark", now))
+            for key, value in values:
+                connection.execute(
+                    """
+                    INSERT INTO app_state(key, value, updated_at) VALUES(?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+                    """,
+                    (key, value, now),
+                )
+        return self.relevance_notification_state()
+
+    def list_relevance_notification_events(self) -> list[dict[str, Any]]:
+        """Return immutable relevance events in FIFO order for bridge/native consumers."""
+        return self.database.query(
+            """
+            SELECT id AS event_id, article_key, story_id, canonical_url, title,
+                   publisher, category, context, provenance, source_type,
+                   published_at, detected_at
+            FROM relevance_notification_event
+            ORDER BY detected_at, id
+            """
+        )
+
+    def list_pending_native_relevance_events(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Return a separate FIFO native queue without consuming hosted state."""
+        state = self.relevance_notification_state()
+        if not state["delivery_enabled"] or not state["native_enabled"]:
+            return []
+        now = utc_now()
+        return self.database.query(
+            """
+            SELECT e.id AS event_id, e.article_key, e.story_id, e.canonical_url,
+                   e.title, e.publisher, e.category, e.context, e.provenance,
+                   e.source_type, e.published_at, e.detected_at,
+                   COALESCE(d.attempt_count, 0) AS attempt_count
+            FROM relevance_notification_event e
+            JOIN relevance_notification_outbox o ON o.event_id = e.id
+            LEFT JOIN relevance_native_delivery d ON d.event_id = e.id
+            WHERE e.detected_at > ?
+              AND o.delivery_state = 'pending'
+              AND (d.event_id IS NULL OR (
+                    d.status IN ('pending', 'failed')
+                    AND (d.next_attempt_at IS NULL OR d.next_attempt_at <= ?)
+              ))
+            ORDER BY e.detected_at, e.id
+            LIMIT ?
+            """,
+            (str(state["watermark"]), now, max(1, min(100, int(limit)))),
+        )
+
+    def record_native_relevance_delivery(
+        self,
+        event_id: int,
+        *,
+        delivered: bool,
+        error_class: str = "",
+        retry_at: str | None = None,
+    ) -> dict[str, Any]:
+        if not self.database.one(
+            "SELECT 1 FROM relevance_notification_event WHERE id = ?", (event_id,)
+        ):
+            raise LookupError("Notification article not found")
+        now = utc_now()
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO relevance_native_delivery(
+                    event_id, status, attempt_count, delivered_at,
+                    next_attempt_at, error_class, updated_at
+                ) VALUES(?, ?, 1, ?, ?, ?, ?)
+                ON CONFLICT(event_id) DO UPDATE SET
+                    status=CASE WHEN relevance_native_delivery.status = 'delivered'
+                                THEN 'delivered' ELSE excluded.status END,
+                    attempt_count=relevance_native_delivery.attempt_count +
+                        CASE WHEN relevance_native_delivery.status = 'delivered' THEN 0 ELSE 1 END,
+                    delivered_at=COALESCE(relevance_native_delivery.delivered_at, excluded.delivered_at),
+                    next_attempt_at=CASE WHEN relevance_native_delivery.status = 'delivered'
+                                         THEN NULL ELSE excluded.next_attempt_at END,
+                    error_class=CASE WHEN relevance_native_delivery.status = 'delivered'
+                                     THEN NULL ELSE excluded.error_class END,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    event_id,
+                    "delivered" if delivered else "failed",
+                    now if delivered else None,
+                    None if delivered else retry_at,
+                    None if delivered else error_class[:120],
+                    now,
+                ),
+            )
+        return self.database.one(
+            "SELECT * FROM relevance_native_delivery WHERE event_id = ?", (event_id,)
+        ) or {}
+
+    def _notification_event(
+        self,
+        event_id: int,
+        article_key: str,
+        story_id: str,
+    ) -> dict[str, Any]:
+        event = self.database.one(
+            """
+            SELECT * FROM relevance_notification_event
+            WHERE id = ? AND article_key = ? AND story_id = ?
+            """,
+            (event_id, article_key, story_id),
+        )
+        if not event:
+            raise LookupError("Notification article not found")
+        return event
+
+    def _notification_research_result(self, event_id: int) -> dict[str, Any]:
+        row = self.database.one(
+            """
+            SELECT ra.status, ra.result_count, ra.detail, f.publishers_json
+            FROM relevance_notification_outbox o
+            LEFT JOIN research_attempt ra ON ra.id = o.research_attempt_id
+            LEFT JOIN relevance_notification_followup f ON f.event_id = o.event_id
+            WHERE o.event_id = ?
+            """,
+            (event_id,),
+        ) or {}
+        try:
+            publishers = json.loads(str(row.get("publishers_json") or "[]"))
+        except json.JSONDecodeError:
+            publishers = []
+        return {
+            "status": str(row.get("status") or "queued"),
+            "result_count": int(row.get("result_count") or 0),
+            "publishers": [str(value) for value in publishers if str(value).strip()],
+            "detail": str(row.get("detail") or ""),
+        }
+
+    def start_notification_research(
+        self,
+        event_id: int,
+        article_key: str,
+        story_id: str,
+    ) -> dict[str, Any]:
+        """Idempotently run one fresh operator-requested search, never a draft."""
+        self._notification_event(event_id, article_key, story_id)
+        outbox = self.database.one(
+            "SELECT research_attempt_id FROM relevance_notification_outbox WHERE event_id = ?",
+            (event_id,),
+        )
+        attempt_id = int((outbox or {}).get("research_attempt_id") or 0)
+        work_id = 0
+        if attempt_id:
+            work = self.database.one(
+                """
+                SELECT id FROM work_item
+                WHERE kind = 'source_research'
+                  AND json_extract(payload_json, '$.research_attempt_id') = ?
+                ORDER BY id DESC LIMIT 1
+                """,
+                (attempt_id,),
+            )
+            work_id = int((work or {}).get("id") or 0)
+        else:
+            from .research import queue_research_attempt
+
+            attempt_id, work_id = queue_research_attempt(
+                self.database, story_id, purpose="operator_review", priority=100
+            )
+            now = utc_now()
+            with self.database.transaction() as connection:
+                connection.execute(
+                    """
+                    UPDATE relevance_notification_outbox
+                    SET research_attempt_id = COALESCE(research_attempt_id, ?),
+                        research_requested_at = COALESCE(research_requested_at, ?),
+                        updated_at = ?
+                    WHERE event_id = ?
+                    """,
+                    (attempt_id, now, now, event_id),
+                )
+                linked = connection.execute(
+                    "SELECT research_attempt_id FROM relevance_notification_outbox WHERE event_id = ?",
+                    (event_id,),
+                ).fetchone()
+                attempt_id = int(linked["research_attempt_id"])
+        result = self._notification_research_result(event_id)
+        if result["status"] in {"complete", "partial", "failed", "unavailable"}:
+            return result
+        if not work_id:
+            raise RuntimeError("Operator review research work is unavailable")
+        if self.research_callback is not None:
+            self.research_callback(work_id)
+            result = self._notification_research_result(event_id)
+            if result["status"] not in {"complete", "partial", "failed", "unavailable"}:
+                raise RuntimeError("Operator review research did not reach a terminal state")
+        return result
+
+    def dismiss_notification_article(
+        self,
+        event_id: int,
+        article_key: str,
+        story_id: str,
+    ) -> dict[str, Any]:
+        """Dismiss only this global notification; never archive its story."""
+        self._notification_event(event_id, article_key, story_id)
+        now = utc_now()
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE relevance_notification_outbox
+                SET delivery_state = 'dismissed',
+                    dismissed_at = COALESCE(dismissed_at, ?), updated_at = ?
+                WHERE event_id = ?
+                """,
+                (now, now, event_id),
+            )
+        row = self.database.one(
+            "SELECT delivery_state, dismissed_at FROM relevance_notification_outbox WHERE event_id = ?",
+            (event_id,),
+        ) or {}
+        return {
+            "status": str(row.get("delivery_state") or "dismissed"),
+            "dismissed_at": row.get("dismissed_at"),
+        }
 
 
     def create_content(self, story_id: str, guidance: str = "") -> tuple[int, int]:
