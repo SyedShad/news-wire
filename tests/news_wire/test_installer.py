@@ -16,6 +16,16 @@ from open_source_ai_news_wire.storage import SCHEMA_VERSION, Database
 DUMMY_COMMIT_SHA = "c" * 40
 
 
+def _schema_probe_result(
+    arguments: list[str], schema_version: int = SCHEMA_VERSION
+) -> subprocess.CompletedProcess[str] | None:
+    if len(arguments) >= 4 and arguments[1:3] == ["-I", "-c"]:
+        return subprocess.CompletedProcess(
+            arguments, 0, json.dumps({"schema_version": schema_version}), ""
+        )
+    return None
+
+
 def _dummy_provenance_runner(
     arguments: list[str], _cwd: Path
 ) -> subprocess.CompletedProcess[str]:
@@ -85,6 +95,8 @@ def test_local_installer_switches_atomically_and_preserves_runtime_data(tmp_path
     marker.write_text("local corpus", encoding="utf-8")
 
     def fake_runner(arguments: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        if schema_probe := _schema_probe_result(arguments):
+            return schema_probe
         if "build" in arguments:
             output = Path(arguments[arguments.index("--out-dir") + 1])
             (output / "wire.whl").write_bytes(b"wheel")
@@ -200,12 +212,95 @@ def test_installer_labels_release_from_incoming_source_not_running_package(
     assert installer._source_version() == "9.8.7"
 
 
+def test_older_installer_records_schema_from_incoming_wheel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = Path(__file__).parents[2]
+    database = Database(resolve_runtime_paths(tmp_path / "runtime"))
+    database.initialize()
+    incoming_schema_version = SCHEMA_VERSION
+    invoking_schema_version = incoming_schema_version - 1
+    schema_probes = 0
+
+    def fake_runner(arguments: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        nonlocal schema_probes
+        if schema_probe := _schema_probe_result(arguments, incoming_schema_version):
+            schema_probes += 1
+            return schema_probe
+        if "build" in arguments:
+            output = Path(arguments[arguments.index("--out-dir") + 1])
+            (output / "wire.whl").write_bytes(b"newer reviewed wheel")
+        elif "venv" in arguments:
+            environment = Path(arguments[-1])
+            (environment / "bin").mkdir(parents=True)
+            python = environment / "bin" / "python"
+            python.write_text("python", encoding="utf-8")
+            python.chmod(0o700)
+        elif "pip" in arguments:
+            python = Path(arguments[arguments.index("--python") + 1])
+            executable = python.parent / "open-source-ai-news-wire"
+            executable.write_text("#!/bin/sh\n", encoding="utf-8")
+            executable.chmod(0o700)
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    monkeypatch.setattr(installer_module, "SCHEMA_VERSION", invoking_schema_version)
+    installer = LocalInstaller(
+        source,
+        database.paths,
+        application_root=tmp_path / "app",
+        binary_root=tmp_path / "bin",
+        runner=fake_runner,
+        provenance_runner=_dummy_provenance_runner,
+        allow_unverified_source=True,
+        validation_report=_validation_report(source),
+    )
+
+    release = installer.install()
+    manifest = json.loads((release.path / "release.json").read_text(encoding="utf-8"))
+
+    assert schema_probes == 2
+    assert invoking_schema_version != incoming_schema_version
+    assert manifest["schema_version"] == incoming_schema_version
+    assert release.schema_version == incoming_schema_version
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout"),
+    (
+        (1, ""),
+        (0, "not-json"),
+        (0, json.dumps({"schema_version": True})),
+        (0, json.dumps({"schema_version": SCHEMA_VERSION, "extra": "field"})),
+    ),
+)
+def test_installed_schema_probe_fails_closed(
+    tmp_path: Path, returncode: int, stdout: str
+) -> None:
+    source = Path(__file__).parents[2]
+    database = Database(resolve_runtime_paths(tmp_path / "runtime"))
+    python = tmp_path / "release-python"
+    python.write_text("python", encoding="utf-8")
+    python.chmod(0o700)
+    installer = LocalInstaller(
+        source,
+        database.paths,
+        runner=lambda arguments, _cwd: subprocess.CompletedProcess(
+            arguments, returncode, stdout, "controlled probe failure"
+        ),
+    )
+
+    with pytest.raises(InstallationError, match="schema probe (failed|was invalid)"):
+        installer._installed_schema_version(python)
+
+
 def test_installer_rebuilds_incomplete_content_addressed_release(tmp_path: Path) -> None:
     source = Path(__file__).parents[2]
     database = Database(resolve_runtime_paths(tmp_path / "runtime"))
     database.initialize()
 
     def fake_runner(arguments: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        if schema_probe := _schema_probe_result(arguments):
+            return schema_probe
         if "build" in arguments:
             output = Path(arguments[arguments.index("--out-dir") + 1])
             (output / "wire.whl").write_bytes(b"wheel")
@@ -247,6 +342,8 @@ def test_release_provenance_uses_full_hashes_and_rejects_tampered_wheel(
     database.initialize()
 
     def fake_runner(arguments: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        if schema_probe := _schema_probe_result(arguments):
+            return schema_probe
         if "build" in arguments:
             output = Path(arguments[arguments.index("--out-dir") + 1])
             (output / "wire.whl").write_bytes(b"reviewed wheel bytes")
@@ -302,6 +399,8 @@ def test_install_materializes_uv_python_symlink_inside_release(tmp_path: Path) -
     uv_python.chmod(0o700)
 
     def fake_runner(arguments: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        if schema_probe := _schema_probe_result(arguments):
+            return schema_probe
         if "build" in arguments:
             output = Path(arguments[arguments.index("--out-dir") + 1])
             (output / "wire.whl").write_bytes(b"reviewed wheel bytes")
@@ -342,6 +441,8 @@ def test_install_removes_new_destination_when_artifact_verification_fails(
     database.initialize()
 
     def fake_runner(arguments: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        if schema_probe := _schema_probe_result(arguments):
+            return schema_probe
         if "build" in arguments:
             output = Path(arguments[arguments.index("--out-dir") + 1])
             (output / "wire.whl").write_bytes(b"reviewed wheel bytes")
@@ -389,6 +490,8 @@ def test_install_removes_new_destination_when_migration_command_fails(
     database.initialize()
 
     def fake_runner(arguments: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        if schema_probe := _schema_probe_result(arguments):
+            return schema_probe
         if "build" in arguments:
             output = Path(arguments[arguments.index("--out-dir") + 1])
             (output / "wire.whl").write_bytes(b"reviewed wheel bytes")

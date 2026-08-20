@@ -255,6 +255,7 @@ class LocalInstaller:
             or manifest.get("runtime_root") != str(self.runtime_paths.root)
             or isinstance(manifest.get("schema_version"), bool)
             or not isinstance(manifest.get("schema_version"), int)
+            or int(manifest["schema_version"]) < 1
             or not isinstance(commit_sha, str)
             or re.fullmatch(r"[0-9a-f]{40}", commit_sha) is None
             or (expected_commit_sha is not None and commit_sha != expected_commit_sha)
@@ -323,6 +324,34 @@ class LocalInstaller:
             )
         return version.strip()
 
+    def _installed_schema_version(self, python: Path) -> int:
+        """Read the schema contract from an isolated, installed release."""
+        if python.is_symlink() or not python.is_file() or not os.access(python, os.X_OK):
+            raise InstallationError("Installed release Python is missing or unsafe")
+        probe = (
+            "import json\n"
+            "from open_source_ai_news_wire.storage import SCHEMA_VERSION\n"
+            "print(json.dumps({'schema_version': SCHEMA_VERSION}, separators=(',', ':')))\n"
+        )
+        result = self.runner([str(python), "-I", "-c", probe], self.source_root)
+        if result.returncode != 0:
+            raise InstallationError("Installed release schema probe failed")
+        try:
+            payload = json.loads(result.stdout)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise InstallationError("Installed release schema probe was invalid") from error
+        schema_version = payload.get("schema_version") if isinstance(payload, dict) else None
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"schema_version"}
+            or isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version < 1
+            or schema_version > 1_000_000
+        ):
+            raise InstallationError("Installed release schema probe was invalid")
+        return schema_version
+
     def install(self) -> InstalledRelease:
         uv = shutil.which("uv")
         if not uv:
@@ -364,11 +393,12 @@ class LocalInstaller:
                 executable = environment / "bin" / "open-source-ai-news-wire"
                 if not executable.exists():
                     raise InstallationError("Installed release did not create its CLI launcher")
+                incoming_schema_version = self._installed_schema_version(pinned_python)
                 manifest = {
                     "manifest_version": 2,
                     "release_id": release_id,
                     "version": source_version,
-                    "schema_version": SCHEMA_VERSION,
+                    "schema_version": incoming_schema_version,
                     "python": "3.12.13",
                     "runtime_root": str(self.runtime_paths.root),
                     "source_sha256": source_sha256,
@@ -396,12 +426,19 @@ class LocalInstaller:
                 raise
         installed_cli = destination / "launcher"
         try:
-            self._verified_manifest(
+            manifest = self._verified_manifest(
                 destination,
                 expected_release_id=release_id,
                 expected_source_sha256=source_sha256,
                 expected_commit_sha=str(provenance["commit_sha"]),
             )
+            installed_schema_version = self._installed_schema_version(
+                destination / "venv" / "bin" / "python"
+            )
+            if int(manifest["schema_version"]) != installed_schema_version:
+                raise InstallationError(
+                    "Installed release schema does not match its verified manifest"
+                )
             self._checked(
                 [str(installed_cli), "--data-root", str(self.runtime_paths.root), "migrate"],
                 self.source_root,
@@ -421,7 +458,7 @@ class LocalInstaller:
             destination,
             True,
             source_version,
-            SCHEMA_VERSION,
+            installed_schema_version,
             trusted,
             "verified" if trusted else "audited_override",
         )
