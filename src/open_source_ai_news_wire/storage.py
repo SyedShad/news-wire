@@ -15,7 +15,7 @@ from typing import Any
 from .config import RuntimePaths, ensure_runtime_layout
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 def _exact_signature_records(value: object, *, source: bool) -> bool:
@@ -722,6 +722,49 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         """
         INSERT INTO app_state(key, value, updated_at)
         VALUES('relevance_native_notifications_enabled', 'false', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        ON CONFLICT(key) DO NOTHING
+        """,
+    ),
+    10: (
+        "ALTER TABLE relevance_notification_event ADD COLUMN source_reported_at TEXT",
+        "ALTER TABLE relevance_notification_event ADD COLUMN timestamp_status TEXT NOT NULL DEFAULT 'unknown'",
+        """
+        CREATE TABLE relevance_telegram_delivery (
+            event_id INTEGER PRIMARY KEY REFERENCES relevance_notification_event(id) ON DELETE CASCADE,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'delivered', 'failed', 'skipped', 'expired', 'dead_lettered')),
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+            delivered_at TEXT,
+            next_attempt_at TEXT,
+            error_class TEXT,
+            provider_message_id INTEGER,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX idx_relevance_telegram_delivery_state ON relevance_telegram_delivery(status, next_attempt_at, event_id)",
+        """
+        INSERT INTO app_state(key, value, updated_at)
+        VALUES('telegram_enabled', 'false', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        ON CONFLICT(key) DO NOTHING
+        """,
+        """
+        INSERT INTO app_state(key, value, updated_at)
+        VALUES('telegram_test_passed', 'false', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        ON CONFLICT(key) DO NOTHING
+        """,
+        """
+        INSERT INTO app_state(key, value, updated_at)
+        VALUES('telegram_activation_event_id', '0', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        ON CONFLICT(key) DO NOTHING
+        """,
+        """
+        INSERT INTO app_state(key, value, updated_at)
+        VALUES('telegram_activation_at', '', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        ON CONFLICT(key) DO NOTHING
+        """,
+        """
+        INSERT INTO app_state(key, value, updated_at)
+        VALUES('telegram_cooldown_until', '', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         ON CONFLICT(key) DO NOTHING
         """,
     ),

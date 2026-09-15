@@ -5,6 +5,7 @@ import sqlite3
 import stat
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -559,10 +560,14 @@ def test_v7_migration_versions_revisions_disables_assistance_and_repairs_only_ex
     assert json.loads(action["source_signatures_json"]) == exact_payload["source_signatures"]
 
 
-def test_storage_pressure_levels_can_be_forced(tmp_path: Path) -> None:
+def test_storage_pressure_levels_can_be_forced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
     database.initialize()
-    free = database.storage_pressure().free_bytes
+    free = 1_000_000
+    monkeypatch.setattr(
+        "open_source_ai_news_wire.storage.shutil.disk_usage",
+        lambda _path: SimpleNamespace(free=free),
+    )
 
     assert database.storage_pressure(warning_bytes=free + 2, critical_bytes=free + 1).level == "critical"
     assert database.storage_pressure(warning_bytes=free + 1, critical_bytes=0).level == "warning"

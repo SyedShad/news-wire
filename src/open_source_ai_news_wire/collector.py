@@ -1569,7 +1569,18 @@ class Collector:
         watermark = connection.execute(
             "SELECT value FROM app_state WHERE key = 'relevance_notification_watermark'"
         ).fetchone()
-        if watermark and observed_at <= str(watermark["value"]):
+        legacy_allowed = not watermark or observed_at > str(watermark["value"])
+        telegram = connection.execute(
+            """
+            SELECT value FROM app_state
+            WHERE key = 'telegram_enabled'
+              AND value = 'true'
+            """
+        ).fetchone()
+        # The activation event-ID cursor is authoritative. Browser watermarks
+        # and scan timestamps must not suppress a later committed Telegram event.
+        telegram_allowed = bool(telegram)
+        if not legacy_allowed and not telegram_allowed:
             return None
         if ingestion_context in {"recovery", "extended"} and not _unknown_original_time(
             observation.timestamp_status
@@ -1604,8 +1615,9 @@ class Collector:
             INSERT INTO relevance_notification_event(
                 article_key, source_item_id, story_id, canonical_url, title,
                 publisher, category, context, provenance, source_type,
-                published_at, detected_at, created_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                published_at, source_reported_at, timestamp_status,
+                detected_at, created_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(article_key) DO NOTHING
             """,
             (
@@ -1620,6 +1632,8 @@ class Collector:
                 provenance,
                 source_type,
                 published_at,
+                observation.source_reported_at,
+                observation.timestamp_status,
                 observed_at,
                 observed_at,
             ),

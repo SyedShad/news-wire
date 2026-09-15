@@ -6,6 +6,7 @@
 - The user's Codex authentication and other home-directory credentials.
 - The Mac's private network, local services, filesystem, and notification surface.
 - Web Push subscription endpoints and keys, action capabilities, and full preview text.
+- The Telegram bot token, paired private-group destination, and delivery ledger.
 - Editorial integrity: no unsupported claim, leaked internal warning, stale content packet, or automatic publication.
 
 ## Trust boundaries
@@ -51,6 +52,15 @@ Dismiss and are idempotent.
 
 Codex assistance is optional and receives only bounded story and source packets. Release 0.4.1 verifies the ChatGPT-bundled Codex binary's Apple signature, OpenAI team ID, path, version, SHA-256, and CDHash. Fresh source discovery uses a separate invocation that enables only secured web search; final writing keeps the no-tools policy. Both use ignored user configuration, strict JSON output, and an outer macOS sandbox that denies child processes and all network endpoints except one ephemeral loopback broker port.
 
+Telegram is a separate, explicitly configured local outbound boundary. The
+sender may call only the Bot API over HTTPS, using the token read transiently
+from the native macOS Keychain, and only for the one paired private group. The
+chat ID is stored as non-secret local configuration and is checked against the
+pairing record on every send. No Telegram credential or destination is included
+in Codex packets, hosted projections, LaunchAgent metadata, diagnostics, or
+source-controlled files. The sender has no hosted-dashboard dependency and
+cannot receive remote commands.
+
 The broker accepts strict CONNECT requests only for an explicit, reviewed set of ChatGPT/OpenAI hostnames on port 443. The set contains no wildcard or parent-domain grants; the regional `oaiusercontent.com` service names required by the signed bundled client are listed individually. Analytics and feedback are disabled, and `ab.chatgpt.com` remains blocked. The broker rejects credentials, IP literals, unsafe or special DNS answers, peer mismatches, malformed requests, and every unreviewed host. It connects by validated numeric address while tunnelling TLS unchanged, so Codex still verifies the destination hostname and certificate. The broker and copied ChatGPT login are destroyed after each invocation.
 
 ## Fail-closed controls
@@ -63,6 +73,16 @@ The broker accepts strict CONNECT requests only for an explicit, reviewed set of
 - Critical disk pressure blocks collection before partial writes.
 - Failed isolation keeps assistance disabled while deterministic monitoring continues.
 - Relevance notifications default to shadow mode with independent local and hosted kill switches and fresh activation watermarks.
+- Telegram delivery defaults off, requires a local pairing and receipt-verified
+  test, and has an independent disable/unpair path. Enable/resume starts from a
+  fresh watermark and never backfills older events.
+- Telegram requests use ordinary free delivery only; paid broadcast, payment,
+  and Stars parameters or endpoints are rejected. The dispatcher enforces a
+  bounded 50-second/12-item cycle and four-second pacing.
+- Unknown, future, aggregator/discovery fallback, or detection-fallback
+  publication times cannot enter the Telegram queue. A request with an ambiguous outcome is
+  retried under the bounded at-least-once policy; a rare duplicate is retained
+  in the ledger for reconciliation.
 - A 24-hour release-, schema-, OS-, binary-, and policy-bound attestation is required by the worker, CLI, dashboard, pilot readiness, and notification activation.
 - A failed child-credential, Unix-socket, private-network, broker, or tool-event canary invalidates assistance and cannot be bypassed by manual enablement.
 - Runtime data cannot be placed inside a Git worktree; repository scans exclude and detect runtime artifacts and secrets.
@@ -79,3 +99,11 @@ screen previews. The owner must accept this device-level privacy tradeoff when
 enabling notifications. ChatGPT Sites private-wrapper support for service
 workers, background push, and sessionless same-origin actions remains a
 production-canary requirement rather than an assumed platform guarantee.
+
+Telegram delivery has an external ambiguity risk: Telegram may accept a
+non-idempotent request while the Mac loses the response or exits before the
+ledger commit. The durable ledger retries under the bounded at-least-once
+policy, so a rare duplicate is possible and remains visible for reconciliation;
+the design does not claim mathematical exactly-once transport. Group permission
+changes, bot removal, and group migration can also stop delivery and require a
+new explicit pairing. Sleep, logout, and offline periods pause the sender.

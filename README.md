@@ -4,7 +4,10 @@ Open Source AI News Wire is a local application for monitoring public AI news an
 
 It covers open-source and open-weight AI, AGI developments, and broader AI news specifically related to privacy, security, and regulation.
 
-The application never publishes automatically.
+The application never publishes editorial content automatically. It can send
+informational alerts to one explicitly paired private Telegram team group when
+the owner enables that local notification lane; Telegram is not a publishing
+destination and does not receive drafts or hosted-dashboard controls.
 
 The owner-only online dashboard lives in [`hosted-dashboard`](hosted-dashboard/README.md).
 Its interface is hosted on ChatGPT Sites while the SQLite corpus, collection,
@@ -19,6 +22,7 @@ connection.
 - **Public-source monitoring:** scheduled and on-demand collection from dated public sources.
 - **Local review dashboard:** Ready, Researching, and Content-ready stories with trust, provenance, priority, and audit history.
 - **macOS scheduling and recovery:** scans at minute `00` and `30` while the Mac is awake, plus recovery after missed time.
+- **Optional private Telegram alerts:** a Mac-only, Keychain-backed sender can deliver one informational alert per eligible article to one paired private team group.
 - **Optional ChatGPT search and drafting:** a fresh secured source search followed by packet-only Reddit writing, with an immediate editable local shell.
 
 The normal workflow is:
@@ -73,11 +77,12 @@ See [Getting started](docs/guide/getting-started.md) for the full setup and firs
 | [Getting started](docs/guide/getting-started.md) | Install, launch, schedule, and verify the application |
 | [Features and use cases](docs/guide/features-and-use-cases.md) | See every user-visible capability and when to use it |
 | [Everyday workflows](docs/guide/everyday-workflows.md) | Review trust and research, create content, revise, and export |
+| [Telegram alerts](docs/guide/telegram-alerts.md) | Pair one private team group and operate local informational alerts |
 | [Releases](docs/guide/releases.md) | Check the current version, update, and review release history |
 
 ## Current release
 
-The current application release is v0.4.3 with database schema 9. It expands
+The current application release is v0.5.0 with database schema 10. It expands
 deterministic recognition of AI security advisories while retaining the
 owner-only, relevance-only Web Push lane and manual publishing workflow.
 
@@ -88,7 +93,8 @@ See the [release guide](docs/guide/releases.md) and [changelog](CHANGELOG.md) fo
 - Collection runs on a schedule; it is not a guaranteed real-time wire service.
 - Sources must be public and usable without accounts, cookies, payment, or access bypasses.
 - Scheduled work runs while the Mac is awake. A locked screen is fine; sleep pauses work.
-- Notifications can arrive immediately after bridge ingestion, but they cannot detect new items while the Mac is asleep or offline.
+- Notifications can arrive after local ingestion, but they cannot detect or send new items while the Mac is asleep, logged out, or offline.
+- Telegram alerts are optional, Mac-only, and independent of the hosted dashboard. They include only an eligible headline, publisher/source context, publication time, and public source link.
 - Broader AI News is limited to privacy, security, and regulation; Open Ecosystem and AGI coverage remain separate.
 - ChatGPT assistance is optional and can remain unavailable if its local checks fail.
 - A human starts content creation with one button, reviews the editable result, and publishes it manually.

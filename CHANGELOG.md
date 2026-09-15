@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Open Source AI News Wire releases**
 
+## [0.5.0] - 2026-09-15
+
+### Added
+
+- MacBook-hosted Telegram alerts for one explicitly paired private group, with
+  source-linked messages for newly detected relevant articles reliably published
+  within the preceding 24 hours.
+- Native macOS Keychain credential storage, finite group pairing, a test-and-enable
+  setup flow, and an independent per-user delivery LaunchAgent.
+- Schema 10 publication-time snapshots and a separate durable Telegram delivery
+  ledger, including activation cursors, retries, pacing, and freshness expiry.
+
+### Changed
+
+- Telegram delivery operates independently of browser notification activation,
+  hosted dashboard availability, and the scanner's research work.
+- Invalid or unavailable publication times never become fresh Telegram news by
+  falling back to detection or aggregator timestamps. Editorial publication
+  remains manual.
+
 ## [0.4.3] - 2026-08-20
 
 ### Changed

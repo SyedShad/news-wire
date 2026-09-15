@@ -6,15 +6,16 @@ Open Source AI News Wire uses semantic application versions and explicit databas
 
 | Item | Value |
 |---|---|
-| Application | 0.4.3 |
-| Database schema | 9 |
+| Application | 0.5.0 |
+| Database schema | 10 |
 | Release tag | Pending local validation and source release |
 | Validated source commit | Bound by the local validation report at install time |
 | Distribution | Owner source repository; no prebuilt binary attached |
 
-Release 0.4.3 expands deterministic recognition of AI security advisories and
-corrects immutable-install schema provenance. Database schema 9, bridge 2.2,
-and the owner-only relevance notification workflow are unchanged.
+Release 0.5.0 adds optional Telegram alerts hosted on the owner's Mac. Schema 10
+adds publication-time snapshots and independent delivery records. Telegram stays
+disabled until private-group pairing, a successful test, and deliberate activation.
+See [Telegram alerts](telegram-alerts.md) for setup and operating commands.
 
 Highlights:
 
@@ -70,7 +71,7 @@ uv run open-source-ai-news-wire sources health
 uv run open-source-ai-news-wire dashboard
 ```
 
-The migration operates on the configured local data root. The application does not create a backup before migration. Pause scheduling and snapshot the database before moving to schema 9, then run a fresh isolation/search canary before resuming assistance.
+The migration operates on the configured local data root. The application does not create a backup before migration. Pause the scanner and any active bridge or Telegram sender, stop local dashboards, and take a consistent SQLite backup before moving to schema 10. Restore the previously active jobs after installation. Any assisted drafting still requires a current release-bound isolation check.
 
 If the schedule was installed with the checkout's `.venv/bin/open-source-ai-news-wire` launcher, `uv sync --locked` updates that same environment and no schedule reinstall is normally required.
 
@@ -78,11 +79,27 @@ If the schedule was installed with the checkout's `.venv/bin/open-source-ai-news
 
 The application also supports immutable local releases with an atomic current-version switch. That path requires a clean commit reachable from owner `main` and a validation report bound to the exact commit.
 
+For an explicitly requested local development install, the existing installer
+API also supports an audited source override. The manifest records that the
+commit is not yet on owner main; the exact-commit validation report remains
+required. This does not publish, tag, or merge the source.
+
 It is a release-maintainer workflow, not the everyday installation path. See [Updates and rollback](../operator-guide.md#updates-and-rollback) for the commands and release safeguards.
 
 Rollback is allowed only when the selected installed release supports the current database schema. Runtime data is never automatically rolled back or deleted.
 
 ## News Wire release history
+
+### 0.5.0 - Local Telegram alerts
+
+- Sends informational alerts to one paired private group using the existing
+  relevance filter and a strict 24-hour source-publication cutoff.
+- Keeps credentials in macOS Keychain and queue processing in a separate local
+  LaunchAgent. No hosted dashboard or paid AI service is required.
+- Uses independent activation and delivery state, without replaying historical
+  articles when enabled or re-enabled.
+- Requires schema 10. Older schema-9 releases cannot run against the upgraded
+  database; disabling Telegram does not downgrade the database.
 
 ### 0.4.3 - Security advisory recognition
 
@@ -200,4 +217,4 @@ Rollback is allowed only when the selected installed release supports the curren
 - Automatic notification activation.
 - Automatic publication.
 
-Inherited Last30Days release history remains preserved in the repository changelog for attribution. The News Wire application follows its separate 0.3.x line.
+Inherited Last30Days release history remains preserved in the repository changelog for attribution. The News Wire application follows its separate 0.x release line.

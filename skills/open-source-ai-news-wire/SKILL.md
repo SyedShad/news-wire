@@ -22,7 +22,8 @@ Operate the local, destination-neutral monitoring and content-preparation system
 - Use **Create content** when the user wants a Reddit draft. It always creates an editable shell first and records a distinct fresh-search attempt. Do not add qualification, approval, evidence, research, importance, lens, or manual-override steps.
 - For fresh collection, use `schedule run-now` or `scan --trigger manual`. Overlapping scans coalesce.
 - For missed time, use the default 72-hour recovery. Use explicit catch-up dates only when the user selects an older interval.
-- For assistance, require a current v0.4.3 release-bound isolation/search attestation. A failed check leaves assistance disabled; deterministic monitoring and manual shell editing continue.
+- For assistance, require a current v0.5.0 release-bound isolation/search attestation. A failed check leaves assistance disabled; deterministic monitoring and manual shell editing continue.
+- For Telegram alerts, read [references/telegram-alerts.md](references/telegram-alerts.md). This is an optional Mac-only informational lane for one explicitly paired private team group; it is independent of the hosted dashboard.
 - For deletion, create a purge preview first and execute only the exact returned plan after explicit confirmation. Purge has no undo.
 
 ## Preserve boundaries
@@ -31,7 +32,7 @@ Operate the local, destination-neutral monitoring and content-preparation system
 - Leave Open Ecosystem News and AGI Development coverage unchanged.
 - Exclude generic funding, acquisitions, chips, launches, research, and safety from Broader AI News unless the development directly intersects an allowed area.
 - Keep unsafe URL rejection, duplicate active-work prevention, archived/withdrawn state, CSRF, loopback access, and manual publishing.
-- Never add an OpenAI API key, paid fallback, publishing credential, browser cookie, proxy, hosted corpus, or destination integration.
+- Never add an OpenAI API key, paid fallback, publishing credential, browser cookie, proxy, hosted corpus, or unapproved destination integration. The only permitted destination lane is the explicitly configured local Telegram notification group described in [references/telegram-alerts.md](references/telegram-alerts.md); editorial publication remains manual.
 - Treat `Verify this yourself` as dashboard-only. Never place it or other internal trust/research labels into copied or exported content.
 - Preserve First-Public Time during catch-up and distinguish source revisions from material claim updates.
 
