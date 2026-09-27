@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Open Source AI News Wire releases**
 
+## [0.5.1] - 2026-09-27
+
+### Fixed
+
+- Telegram no longer treats a discovery-only social post timestamp as evidence
+  of the original article publication date. The automatic sender skips these
+  items even when the social timestamp itself is valid.
+
 ## [0.5.0] - 2026-09-15
 
 ### Added

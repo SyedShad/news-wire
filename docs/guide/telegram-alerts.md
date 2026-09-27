@@ -41,6 +41,8 @@ identity prevents tracking variants and rescans from producing a second alert.
 An alert is eligible only when its source publication time is reliable and no
 older than 24 hours at send time. The sender skips unknown or future times,
 aggregator/discovery timestamps used as fallbacks, and detection-time fallbacks.
+Discovery-only social posts are also skipped: the post date does not establish
+the original linked article's publication date.
 Enabling or resuming does not backfill older events.
 
 ## Scheduling, limits, and recovery

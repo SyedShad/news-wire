@@ -27,7 +27,14 @@ def _time(value: datetime) -> str:
     return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _event(database: Database, published_at: str, *, status: str = "valid") -> int:
+def _event(
+    database: Database,
+    published_at: str,
+    *,
+    status: str = "valid",
+    source_type: str = "article",
+    provenance: str = "publisher_excerpt",
+) -> int:
     now = _time(datetime.now(UTC))
     with database.transaction() as connection:
         cursor = connection.execute(
@@ -40,13 +47,13 @@ def _event(database: Database, published_at: str, *, status: str = "valid") -> i
             """,
             (
                 "story-telegram",
-                f"https://example.com/{published_at.replace(':', '').replace('-', '')}",
+                f"https://example.com/{source_type}/{published_at.replace(':', '').replace('-', '')}",
                 "Open model release",
                 "Example Publisher",
                 "Open Ecosystem News",
                 "Example Publisher reports: public model weights were released.",
-                "publisher_excerpt",
-                "article",
+                provenance,
+                source_type,
                 published_at,
                 published_at,
                 status,
@@ -138,6 +145,38 @@ def test_dispatch_skips_undated_invalid_future_and_expired_items(
         "SELECT status FROM relevance_telegram_delivery WHERE event_id = ?", (event_id,)
     ) == {"status": expected}
     assert client.calls == []
+
+
+def test_dispatch_skips_discovery_post_date_but_sends_direct_article(tmp_path: Path) -> None:
+    database = _database(tmp_path)
+    _enabled(database, now=datetime.now(UTC))
+    published_at = _time(datetime.now(UTC) - timedelta(minutes=5))
+    discovery_id = _event(
+        database,
+        published_at,
+        source_type="discovery",
+        provenance="discovery_metadata",
+    )
+    article_id = _event(database, published_at)
+    client = FakeClient()
+    result = TelegramDispatcher(
+        database,
+        token_provider=lambda: "123:secret-token",
+        client_factory=lambda _token: client,
+        now=lambda: datetime.now(UTC),
+        monotonic_clock=lambda: 0.0,
+        sleep=lambda _seconds: None,
+    ).dispatch()
+
+    assert result["skipped"] == 1
+    assert result["delivered"] == 1
+    assert database.one(
+        "SELECT status, error_class FROM relevance_telegram_delivery WHERE event_id = ?",
+        (discovery_id,),
+    ) == {"status": "skipped", "error_class": "publication_time_unreliable"}
+    assert database.one(
+        "SELECT status FROM relevance_telegram_delivery WHERE event_id = ?", (article_id,)
+    ) == {"status": "delivered"}
 
 
 def test_429_persists_cooldown_and_retries_later(tmp_path: Path) -> None:

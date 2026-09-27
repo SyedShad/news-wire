@@ -427,8 +427,9 @@ class TelegramService:
         return self.database.query(
             """
             SELECT e.id AS event_id, e.article_key, e.canonical_url, e.title,
-                   e.publisher, e.context, e.published_at, e.source_reported_at,
-                   e.timestamp_status, e.detected_at,
+                   e.publisher, e.context, e.source_type, e.provenance,
+                   e.published_at, e.source_reported_at, e.timestamp_status,
+                   e.detected_at,
                    COALESCE(d.attempt_count, 0) AS attempt_count
             FROM relevance_notification_event e
             LEFT JOIN relevance_telegram_delivery d ON d.event_id = e.id
@@ -714,6 +715,8 @@ class TelegramDispatcher:
         return self.now().astimezone(UTC) < cooldown.astimezone(UTC)
 
     def _freshness(self, event: dict[str, object]) -> tuple[str, str] | None:
+        if str(event.get("source_type") or "") == "discovery":
+            return "skipped", "publication_time_unreliable"
         if str(event.get("timestamp_status") or "") not in {
             "valid",
             "future_aggregator_ignored",

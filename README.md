@@ -82,7 +82,7 @@ See [Getting started](docs/guide/getting-started.md) for the full setup and firs
 
 ## Current release
 
-The current application release is v0.5.0 with database schema 10. It expands
+The current application release is v0.5.1 with database schema 10. It expands
 deterministic recognition of AI security advisories while retaining the
 owner-only, relevance-only Web Push lane and manual publishing workflow.
 
