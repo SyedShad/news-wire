@@ -43,6 +43,7 @@ items with unknown, invalid, future, or older publication dates. Publication
 dates do not block sending or retries. Messages label fetch time separately;
 unreliable original publication dates are marked as not verified. A social-post
 or aggregator date is never presented as the original article's publication date.
+New relevant items collected during recovery or an explicit catch-up also qualify.
 Enabling or re-enabling starts with new events and does not backfill older events.
 
 ## Scheduling, limits, and recovery

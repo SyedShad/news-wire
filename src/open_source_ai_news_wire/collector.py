@@ -1582,6 +1582,7 @@ class Collector:
         telegram_allowed = bool(telegram)
         if not legacy_allowed and not telegram_allowed:
             return None
+        telegram_only_recovery = False
         if ingestion_context in {"recovery", "extended"} and not _unknown_original_time(
             observation.timestamp_status
         ):
@@ -1590,10 +1591,15 @@ class Collector:
                 published = datetime.fromisoformat(
                     observation.effective_published_at.replace("Z", "+00:00")
                 )
-            except ValueError:
-                return None
-            if detected - published > timedelta(hours=72):
-                return None
+                too_old = detected - published > timedelta(hours=72)
+            except (ValueError, TypeError, OverflowError):
+                too_old = True
+            if too_old:
+                if not telegram_allowed:
+                    return None
+                # Capture this for Telegram, but do not put it into the shared
+                # browser/native notification stream.
+                telegram_only_recovery = True
 
         context, provenance, source_type = notification_context(observation, source)
         canonical = canonical_url(observation.url, observation.url)
@@ -1641,13 +1647,14 @@ class Collector:
         if cursor.rowcount != 1:
             return None
         event_id = int(cursor.lastrowid)
-        connection.execute(
-            """
-            INSERT INTO relevance_notification_outbox(event_id, updated_at)
-            VALUES(?, ?)
-            """,
-            (event_id, observed_at),
-        )
+        if not telegram_only_recovery:
+            connection.execute(
+                """
+                INSERT INTO relevance_notification_outbox(event_id, updated_at)
+                VALUES(?, ?)
+                """,
+                (event_id, observed_at),
+            )
         return event_id
 
     def _persist_story(

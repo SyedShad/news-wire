@@ -6,10 +6,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
+import pytest
 
+from open_source_ai_news_wire.adapters import Observation
 from open_source_ai_news_wire.collector import Collector
 from open_source_ai_news_wire.config import ensure_runtime_layout, resolve_runtime_paths
+from open_source_ai_news_wire.hosted_bridge import build_notification_projection
 from open_source_ai_news_wire.network import SafeHttpClient
+from open_source_ai_news_wire.qualification import qualify
+from open_source_ai_news_wire.services import DashboardService
 from open_source_ai_news_wire.storage import MIGRATIONS, SCHEMA_V1, SCHEMA_VERSION, Database
 from open_source_ai_news_wire.telegram import TelegramDispatcher, TelegramService
 from open_source_ai_news_wire.source_registry import synchronize_sources
@@ -175,6 +180,105 @@ def test_rss_collector_event_reaches_telegram_fixture_without_backfill(tmp_path:
     assert database.one(
         "SELECT status FROM relevance_telegram_delivery WHERE event_id = ?", (undated["id"],)
     ) == {"status": "delivered"}
+
+
+@pytest.mark.parametrize("ingestion_context", ["recovery", "extended"])
+def test_old_recovery_items_reach_telegram_without_browser_notification(
+    tmp_path: Path, ingestion_context: str
+) -> None:
+    database = _database_with_openai_source(tmp_path)
+    observed_at = "2026-09-15T12:00:00Z"
+    database.set_state("relevance_notification_watermark", "2026-09-16T00:00:00Z", observed_at)
+    source = database.one("SELECT * FROM source_registry WHERE id = 'openai-news'")
+    observation = Observation(
+        "old-recovery-item",
+        "Open-source AI model release publishes public weights",
+        "https://openai.com/news/old-recovery-item",
+        "2026-09-10T12:00:00Z",
+        "The publisher released open model weights and a security evaluation.",
+        metadata={
+            "source_reported_at": "2026-09-10T12:00:00Z",
+            "effective_published_at": "2026-09-10T12:00:00Z",
+            "timestamp_status": "valid",
+        },
+    )
+    qualification = qualify(observation, source, observed_at=observed_at)
+    assert qualification.relevant
+
+    telegram = TelegramService(database)
+    telegram.pair(-100123, "Wire team", 123, "wire_bot")
+    telegram.mark_tested()
+    telegram.enable()
+    with database.transaction() as connection:
+        collector = Collector(database)
+        collector._persist_story(
+            connection,
+            source,
+            observation,
+            qualification,
+            observed_at,
+            1,
+            ingestion_context,
+        )
+
+    event = database.one(
+        "SELECT id, published_at FROM relevance_notification_event WHERE canonical_url = ?",
+        (observation.url,),
+    )
+    assert event == {"id": 1, "published_at": "2026-09-10T12:00:00Z"}
+    assert database.one(
+        "SELECT event_id FROM relevance_notification_outbox WHERE event_id = ?", (event["id"],)
+    ) is None
+    projection, _digest = build_notification_projection(DashboardService(database))
+    assert projection == []
+
+    fixture = _TelegramFixture()
+    result = TelegramDispatcher(
+        database,
+        token_provider=lambda: "test-token",
+        client_factory=lambda _token: fixture,
+        now=lambda: datetime(2026, 9, 15, 12, 0, tzinfo=UTC),
+        monotonic_clock=lambda: 0.0,
+        sleep=lambda _seconds: None,
+    ).dispatch()
+    assert result["delivered"] == 1
+    assert "Published: 2026-09-10T12:00:00Z" in str(fixture.calls[0][1]["text"])
+
+
+@pytest.mark.parametrize("ingestion_context", ["recovery", "extended"])
+def test_old_recovery_item_keeps_existing_age_policy_when_telegram_is_disabled(
+    tmp_path: Path, ingestion_context: str
+) -> None:
+    database = _database_with_openai_source(tmp_path)
+    observed_at = "2026-09-15T12:00:00Z"
+    database.set_state("relevance_notification_watermark", "2026-09-15T11:00:00Z", observed_at)
+    source = database.one("SELECT * FROM source_registry WHERE id = 'openai-news'")
+    observation = Observation(
+        "old-disabled-recovery-item",
+        "Open-source AI model release publishes public weights",
+        "https://openai.com/news/old-disabled-recovery-item",
+        "2026-09-10T12:00:00Z",
+        "The publisher released open model weights and a security evaluation.",
+        metadata={
+            "source_reported_at": "2026-09-10T12:00:00Z",
+            "effective_published_at": "2026-09-10T12:00:00Z",
+            "timestamp_status": "valid",
+        },
+    )
+    qualification = qualify(observation, source, observed_at=observed_at)
+    assert qualification.relevant
+    with database.transaction() as connection:
+        Collector(database)._persist_story(
+            connection,
+            source,
+            observation,
+            qualification,
+            observed_at,
+            1,
+            ingestion_context,
+        )
+
+    assert database.one("SELECT COUNT(*) AS count FROM relevance_notification_event") == {"count": 0}
 
 
 def test_schema9_migration_preserves_existing_event_as_unknown_without_replay(tmp_path: Path) -> None:

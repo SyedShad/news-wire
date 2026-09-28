@@ -1883,11 +1883,12 @@ class DashboardService:
         """Return immutable relevance events in FIFO order for bridge/native consumers."""
         return self.database.query(
             """
-            SELECT id AS event_id, article_key, story_id, canonical_url, title,
-                   publisher, category, context, provenance, source_type,
-                   published_at, detected_at
-            FROM relevance_notification_event
-            ORDER BY detected_at, id
+            SELECT e.id AS event_id, e.article_key, e.story_id, e.canonical_url, e.title,
+                   e.publisher, e.category, e.context, e.provenance, e.source_type,
+                   e.published_at, e.detected_at
+            FROM relevance_notification_event e
+            JOIN relevance_notification_outbox o ON o.event_id = e.id
+            ORDER BY e.detected_at, e.id
             """
         )
 

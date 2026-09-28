@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unreliable original publication dates are labelled as not verified.
 - Queued retries no longer expire because of publication age. Activation cursors,
   canonical URL deduplication, delivery records, and schema 10 are preserved.
+- Newly collected relevant items from recovery and explicit catch-up scans also
+  reach Telegram. Existing browser and native notification recovery limits remain.
 
 ## [0.5.1] - 2026-09-27
 
