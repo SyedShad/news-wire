@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Open Source AI News Wire releases**
 
+## [0.5.2] - 2026-09-28
+
+### Changed
+
+- Telegram sends every newly fetched relevant item, including discovery items
+  and items with unknown, invalid, future, or older original publication dates.
+- Fetch time is shown separately from verified publication time. Missing or
+  unreliable original publication dates are labelled as not verified.
+- Queued retries no longer expire because of publication age. Activation cursors,
+  canonical URL deduplication, delivery records, and schema 10 are preserved.
+
 ## [0.5.1] - 2026-09-27
 
 ### Fixed

@@ -29,13 +29,14 @@ def _time(value: datetime) -> str:
 
 def _event(
     database: Database,
-    published_at: str,
+    published_at: str | None,
     *,
     status: str = "valid",
     source_type: str = "article",
     provenance: str = "publisher_excerpt",
 ) -> int:
     now = _time(datetime.now(UTC))
+    url_timestamp = (published_at or now).replace(":", "").replace("-", "")
     with database.transaction() as connection:
         cursor = connection.execute(
             """
@@ -47,7 +48,7 @@ def _event(
             """,
             (
                 "story-telegram",
-                f"https://example.com/{source_type}/{published_at.replace(':', '').replace('-', '')}",
+                f"https://example.com/{source_type}/{url_timestamp}",
                 "Open model release",
                 "Example Publisher",
                 "Open Ecosystem News",
@@ -115,21 +116,27 @@ def test_enable_uses_max_event_id_and_sends_only_new_events(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
-    ("status", "published_at", "expected"),
+    ("status", "published_at", "expected_publication"),
     [
-        ("unknown", None, "skipped"),
-        ("malformed_source_fallback_detection", "2026-09-15T10:00:00Z", "skipped"),
-        ("valid", "2026-09-13T10:00:00Z", "expired"),
-        ("valid", "2026-09-15T13:00:00Z", "skipped"),
+        ("unknown", None, "Original publication date: not verified"),
+        (
+            "malformed_source_fallback_detection",
+            "not-a-timestamp",
+            "Original publication date: not verified",
+        ),
+        ("valid", "2026-09-15T10:00:00", "Original publication date: not verified"),
+        ("valid", "not-a-timestamp", "Original publication date: not verified"),
+        ("valid", "0001-01-01T00:00:00+14:00", "Original publication date: not verified"),
+        ("valid", "2026-09-13T10:00:00Z", "Published: 2026-09-13T10:00:00Z"),
+        ("valid", "2026-09-15T13:00:00Z", "Original publication date: not verified"),
     ],
 )
-def test_dispatch_skips_undated_invalid_future_and_expired_items(
-    tmp_path: Path, status: str, published_at: str | None, expected: str
+def test_dispatch_delivers_missing_malformed_old_and_future_publication_times(
+    tmp_path: Path, status: str, published_at: str | None, expected_publication: str
 ) -> None:
     database = _database(tmp_path)
     service = _enabled(database, now=datetime.now(UTC))
-    value = published_at or _time(datetime.now(UTC) - timedelta(hours=1))
-    event_id = _event(database, value, status=status)
+    event_id = _event(database, published_at, status=status)
     client = FakeClient()
     result = TelegramDispatcher(
         database,
@@ -140,14 +147,16 @@ def test_dispatch_skips_undated_invalid_future_and_expired_items(
         sleep=lambda _seconds: None,
     ).dispatch()
 
-    assert result["delivered"] == 0
+    assert result["delivered"] == 1
     assert database.one(
         "SELECT status FROM relevance_telegram_delivery WHERE event_id = ?", (event_id,)
-    ) == {"status": expected}
-    assert client.calls == []
+    ) == {"status": "delivered"}
+    text = str(client.calls[0][1]["text"])
+    assert "Fetched:" in text
+    assert expected_publication in text
 
 
-def test_dispatch_skips_discovery_post_date_but_sends_direct_article(tmp_path: Path) -> None:
+def test_dispatch_delivers_discovery_date_without_mislabeling_it_as_publication(tmp_path: Path) -> None:
     database = _database(tmp_path)
     _enabled(database, now=datetime.now(UTC))
     published_at = _time(datetime.now(UTC) - timedelta(minutes=5))
@@ -157,7 +166,6 @@ def test_dispatch_skips_discovery_post_date_but_sends_direct_article(tmp_path: P
         source_type="discovery",
         provenance="discovery_metadata",
     )
-    article_id = _event(database, published_at)
     client = FakeClient()
     result = TelegramDispatcher(
         database,
@@ -168,15 +176,16 @@ def test_dispatch_skips_discovery_post_date_but_sends_direct_article(tmp_path: P
         sleep=lambda _seconds: None,
     ).dispatch()
 
-    assert result["skipped"] == 1
+    assert result["skipped"] == 0
     assert result["delivered"] == 1
     assert database.one(
-        "SELECT status, error_class FROM relevance_telegram_delivery WHERE event_id = ?",
+        "SELECT status FROM relevance_telegram_delivery WHERE event_id = ?",
         (discovery_id,),
-    ) == {"status": "skipped", "error_class": "publication_time_unreliable"}
-    assert database.one(
-        "SELECT status FROM relevance_telegram_delivery WHERE event_id = ?", (article_id,)
     ) == {"status": "delivered"}
+    text = str(client.calls[0][1]["text"])
+    assert "Fetched:" in text
+    assert "Original publication date: not verified" in text
+    assert "Published:" not in text
 
 
 def test_429_persists_cooldown_and_retries_later(tmp_path: Path) -> None:
@@ -296,27 +305,29 @@ def test_dispatch_caps_attempts_and_paces_across_process_restarts(tmp_path):
     assert _dispatcher(restarted, clock, client).dispatch()["status"] == "idle"
 
 
-def test_stale_pages_cannot_obstruct_a_fresh_event(tmp_path):
+def test_old_events_are_delivered_across_bounded_runs_before_newest_event(tmp_path):
     database = _database(tmp_path)
     clock = _AdvancingClock()
     _enabled(database, now=clock.now())
     for i in range(105):
         _event(database, _time(clock.now() - timedelta(hours=25, minutes=i)))
     _event(database, _time(clock.now() - timedelta(minutes=1)))
-    result = _dispatcher(database, clock, FakeClient()).dispatch()
-    assert result["skipped"] == 105
-    assert result["delivered"] == 1
+    client = FakeClient()
+    results = [_dispatcher(database, clock, client).dispatch() for _ in range(9)]
+    assert sum(result["skipped"] for result in results) == 0
+    assert sum(result["delivered"] for result in results) == 106
 
 
-def test_pacing_rechecks_24_hour_boundary_and_dispatch_deadline(tmp_path):
+def test_old_items_pass_24_hour_boundary_and_dispatch_deadline_is_preserved(tmp_path):
     database = _database(tmp_path)
     clock = _AdvancingClock()
     _enabled(database, now=clock.now())
     _event(database, _time(clock.now() - timedelta(hours=24)))
     second = _event(database, _time(clock.now() - timedelta(hours=24) + timedelta(seconds=1)))
     result = _dispatcher(database, clock, FakeClient()).dispatch()
-    assert result["delivered"] == result["skipped"] == 1
-    assert database.one("SELECT status FROM relevance_telegram_delivery WHERE event_id = ?", (second,))["status"] == "expired"
+    assert result["delivered"] == 2
+    assert result["skipped"] == 0
+    assert database.one("SELECT status FROM relevance_telegram_delivery WHERE event_id = ?", (second,))["status"] == "delivered"
     for i in range(10):
         _event(database, _time(clock.now() - timedelta(minutes=i + 1)))
 
@@ -331,16 +342,17 @@ def test_pacing_rechecks_24_hour_boundary_and_dispatch_deadline(tmp_path):
     assert clock.elapsed - before <= 50
 
 
-def test_failed_retry_expires_after_sleep_and_unavailable_keychain_is_actionable(tmp_path):
+def test_failed_retry_delivers_after_24_hours_and_unavailable_keychain_is_actionable(tmp_path):
     database = _database(tmp_path)
     clock = _AdvancingClock()
     service = _enabled(database, now=clock.now())
     event_id = _event(database, _time(clock.now() - timedelta(hours=23, minutes=59)))
     failed = FakeClient(error=TelegramAPIError("telegram_network_timeout"))
     assert _dispatcher(database, clock, failed).dispatch()["failed"] == 1
-    clock.sleep(120)
-    assert _dispatcher(Database(database.paths), clock, FakeClient()).dispatch()["skipped"] == 1
-    assert database.one("SELECT status FROM relevance_telegram_delivery WHERE event_id = ?", (event_id,))["status"] == "expired"
+    clock.sleep(25 * 60 * 60)
+    retry = _dispatcher(Database(database.paths), clock, FakeClient()).dispatch()
+    assert retry["delivered"] == 1
+    assert database.one("SELECT status FROM relevance_telegram_delivery WHERE event_id = ?", (event_id,))["status"] == "delivered"
     _event(database, _time(clock.now() - timedelta(minutes=1)))
     def unavailable():
         raise RuntimeError("private backend detail")

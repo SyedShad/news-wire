@@ -114,7 +114,7 @@ def test_rss_collector_event_reaches_telegram_fixture_without_backfill(tmp_path:
     database.set_state("hosted_dashboard_enabled", "false", clock.value)
     database.set_state("relevance_notification_watermark", "2027-01-01T00:00:00Z", clock.value)
 
-    # A later undated RSS item is captured but cannot pass the strict sender gate.
+    # A later undated RSS item is captured and will still be sent.
     clock.value = "2026-09-15T09:05:00Z"
     body["value"] = _feed(
         [
@@ -124,7 +124,7 @@ def test_rss_collector_event_reaches_telegram_fixture_without_backfill(tmp_path:
     )
     assert collector.scan(trigger="manual").result == "success"
 
-    # The next source-dated item is newer than the cursor and is deliverable.
+    # The next source-dated item is newer than the cursor and is deliverable too.
     clock.value = "2026-09-15T09:10:00Z"
     body["value"] = _feed(
         [
@@ -158,17 +158,23 @@ def test_rss_collector_event_reaches_telegram_fixture_without_backfill(tmp_path:
     )
     result = dispatcher.dispatch()
     assert result["status"] == "sent"
-    assert result["delivered"] == 1
-    assert result["skipped"] == 1
-    assert fixture.calls[0][0] == "sendMessage"
-    payload = fixture.calls[0][1]
-    assert payload["chat_id"] == -100123
-    assert "Open-source AI model release publishes a safer runtime" in str(payload["text"])
-    assert "Source: https://openai.com/news/three" in str(payload["text"])
-    assert payload["allow_paid_broadcast"] is False
+    assert result["delivered"] == 2
+    assert result["skipped"] == 0
+    assert [call[0] for call in fixture.calls] == ["sendMessage", "sendMessage"]
+    undated_payload, dated_payload = [call[1] for call in fixture.calls]
+    assert undated_payload["chat_id"] == -100123
+    assert "Open-source AI model release adds a security benchmark" in str(undated_payload["text"])
+    assert "Fetched:" in str(undated_payload["text"])
+    assert "Original publication date: not verified" in str(undated_payload["text"])
+    assert "Published:" not in str(undated_payload["text"])
+    assert "Open-source AI model release publishes a safer runtime" in str(dated_payload["text"])
+    assert "Fetched:" in str(dated_payload["text"])
+    assert "Published: 2026-09-15T09:06:00Z" in str(dated_payload["text"])
+    assert "Source: https://openai.com/news/three" in str(dated_payload["text"])
+    assert dated_payload["allow_paid_broadcast"] is False
     assert database.one(
         "SELECT status FROM relevance_telegram_delivery WHERE event_id = ?", (undated["id"],)
-    ) == {"status": "skipped"}
+    ) == {"status": "delivered"}
 
 
 def test_schema9_migration_preserves_existing_event_as_unknown_without_replay(tmp_path: Path) -> None:

@@ -6,13 +6,14 @@ Open Source AI News Wire uses semantic application versions and explicit databas
 
 | Item | Value |
 |---|---|
-| Application | 0.5.1 |
+| Application | 0.5.2 |
 | Database schema | 10 |
 | Release tag | Pending local validation and source release |
 | Validated source commit | Bound by the local validation report at install time |
 | Distribution | Owner source repository; no prebuilt binary attached |
 
-Release 0.5.1 prevents discovery-post dates from qualifying as original article
+Release 0.5.2 sends all newly fetched relevant items to Telegram, independently
+of publication date. Messages distinguish fetch time from verified original
 publication times. Telegram alerts remain hosted on the owner's Mac. Schema 10
 adds publication-time snapshots and independent delivery records. Telegram stays
 disabled until private-group pairing, a successful test, and deliberate activation.
@@ -90,6 +91,13 @@ It is a release-maintainer workflow, not the everyday installation path. See [Up
 Rollback is allowed only when the selected installed release supports the current database schema. Runtime data is never automatically rolled back or deleted.
 
 ## News Wire release history
+
+### 0.5.2 - Telegram alerts for newly fetched items
+
+- Sends each newly fetched relevant item even when its original publication date
+  is unavailable, unreliable, or old. Pending retries no longer expire by age.
+- Shows fetch time separately and marks unverified original publication dates.
+- Preserves activation boundaries, duplicate protection, delivery history, and schema 10.
 
 ### 0.5.1 - Reliable Telegram publication dates
 

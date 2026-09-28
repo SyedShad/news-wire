@@ -31,19 +31,19 @@ Each message contains:
 
 - the relevant article headline;
 - publisher/source context;
-- the reliable source publication time; and
+- the time News Wire first fetched the item, plus its publication time when verified; and
 - the public source link.
 
 Messages do not include scores, priority, research instructions, drafts,
 editorial controls, or hosted-dashboard actions. The existing relevance event
 identity prevents tracking variants and rescans from producing a second alert.
 
-An alert is eligible only when its source publication time is reliable and no
-older than 24 hours at send time. The sender skips unknown or future times,
-aggregator/discovery timestamps used as fallbacks, and detection-time fallbacks.
-Discovery-only social posts are also skipped: the post date does not establish
-the original linked article's publication date.
-Enabling or resuming does not backfill older events.
+Every newly fetched relevant item is eligible, including discovery items and
+items with unknown, invalid, future, or older publication dates. Publication
+dates do not block sending or retries. Messages label fetch time separately;
+unreliable original publication dates are marked as not verified. A social-post
+or aggregator date is never presented as the original article's publication date.
+Enabling or re-enabling starts with new events and does not backfill older events.
 
 ## Scheduling, limits, and recovery
 
@@ -54,7 +54,7 @@ schedule. The Bot API uses ordinary free delivery only; paid broadcast,
 payment, and Stars flows are disabled. See the [Telegram limits and cost FAQ](https://core.telegram.org/bots/faq#my-bot-is-hitting-limits-how-do-i-avoid-this).
 
 Sleep, logout, or offline state pauses work. The local ledger resumes after the
-next awake launch. A request whose response is lost after Telegram may have
+next awake launch, including items queued for more than 24 hours. A request whose response is lost after Telegram may have
 accepted it is retried under the bounded at-least-once policy. A rare duplicate
 is possible; the ledger records attempts and confirmed message IDs, but cannot prove
 whether Telegram accepted a request whose response was lost.
@@ -80,8 +80,8 @@ delivery can resume.
 - `telegram_api_403`: restore the bot's group membership and sending permission,
   send a new test, then enable again.
 - `cooldown`: Telegram requested a pause; the sender waits until the reported time.
-- A failed request retries with increasing delays up to 30 minutes. Every attempt
-  rechecks the source publication time; expired news is recorded and skipped.
+- A failed request retries with increasing delays up to 30 minutes. Publication
+  age does not expire a queued item; its fetched time remains visible in the message.
 
 Group members control Telegram notification sounds and banners themselves.
 The Mac must be awake, logged in, and connected for collection and delivery.

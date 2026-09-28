@@ -536,8 +536,8 @@ class TelegramDispatcher:
         self.service = TelegramService(database)
 
     def _events(self):
-        # Advance through terminal/expired rows without making fresh articles
-        # wait for another LaunchAgent cycle behind a stale page.
+        # Read committed eligible events in stable order across pages.
+        # The per-run send limit bounds how quickly the queue drains.
         after_event_id = 0
         while True:
             rows = self.service.pending(after_event_id=after_event_id, now=_format_time(self.now()))
@@ -571,11 +571,6 @@ class TelegramDispatcher:
             for event in self._events():
                 if self.monotonic() >= deadline:
                     break
-                freshness = self._freshness(event)
-                if freshness is not None:
-                    self.service.record(int(event["event_id"]), status=freshness[0], error_class=freshness[1])
-                    skipped += 1
-                    continue
                 if attempted >= MAX_SENDS_PER_RUN:
                     break
                 next_start = (last_started + MIN_SEND_INTERVAL_SECONDS) if last_started is not None else self.monotonic()
@@ -592,11 +587,6 @@ class TelegramDispatcher:
                     self.sleep(wait)
                 if self.monotonic() >= deadline:
                     break
-                freshness = self._freshness(event)
-                if freshness is not None:
-                    self.service.record(int(event["event_id"]), status=freshness[0], error_class=freshness[1])
-                    skipped += 1
-                    continue
                 try:
                     message = self._message(event)
                 except TelegramError as error:
@@ -615,11 +605,6 @@ class TelegramDispatcher:
                         return self._result("token_unavailable", attempted=attempted, skipped=skipped)
                 if self.monotonic() + 0.1 >= deadline:
                     break
-                freshness = self._freshness(event)
-                if freshness is not None:
-                    self.service.record(int(event["event_id"]), status=freshness[0], error_class=freshness[1])
-                    skipped += 1
-                    continue
                 # Reserve the pacing slot durably before sending, so a restart
                 # or another manual dispatch still respects the group interval.
                 with self.database.transaction() as connection:
@@ -714,36 +699,34 @@ class TelegramDispatcher:
             return False
         return self.now().astimezone(UTC) < cooldown.astimezone(UTC)
 
-    def _freshness(self, event: dict[str, object]) -> tuple[str, str] | None:
+    def _verified_publication(self, event: dict[str, object]) -> str | None:
+        """Return the original-source publication time only when it is verified."""
         if str(event.get("source_type") or "") == "discovery":
-            return "skipped", "publication_time_unreliable"
+            return None
         if str(event.get("timestamp_status") or "") not in {
             "valid",
             "future_aggregator_ignored",
             "malformed_aggregator_ignored",
         }:
-            return "skipped", "publication_time_unreliable"
+            return None
         source_time = str(event.get("source_reported_at") or "")
         published = str(event.get("published_at") or "")
         if not source_time or not published:
-            return "skipped", "publication_time_missing"
+            return None
         try:
             source_moment = datetime.fromisoformat(source_time.replace("Z", "+00:00"))
             published_moment = datetime.fromisoformat(published.replace("Z", "+00:00"))
-        except ValueError:
-            return "skipped", "publication_time_invalid"
-        if source_moment.tzinfo is None or published_moment.tzinfo is None:
-            return "skipped", "publication_time_invalid"
-        now = self.now().astimezone(UTC)
-        source_moment = source_moment.astimezone(UTC)
-        published_moment = published_moment.astimezone(UTC)
-        if source_moment != published_moment:
-            return "skipped", "publication_time_fallback"
-        if source_moment > now:
-            return "skipped", "publication_time_future"
-        if now - source_moment > timedelta(hours=24):
-            return "expired", "publication_time_expired"
-        return None
+            if source_moment.tzinfo is None or published_moment.tzinfo is None:
+                return None
+            source_moment = source_moment.astimezone(UTC)
+            published_moment = published_moment.astimezone(UTC)
+            if source_moment != published_moment:
+                return None
+            if source_moment > self.now().astimezone(UTC):
+                return None
+        except (ValueError, OverflowError):
+            return None
+        return published
 
     @staticmethod
     def _clean(value: object, maximum: int | None) -> str:
@@ -755,13 +738,13 @@ class TelegramDispatcher:
         )
         return text[:maximum].strip() if maximum is not None else text.strip()
 
-    @classmethod
-    def _message(cls, event: dict[str, object]) -> str:
-        title = cls._clean(event.get("title"), 500)
-        publisher = cls._clean(event.get("publisher"), 120)
-        context = cls._clean(event.get("context"), 900)
-        publication = cls._clean(event.get("published_at"), 64)
-        source = cls._clean(event.get("canonical_url"), None)
+    def _message(self, event: dict[str, object]) -> str:
+        title = self._clean(event.get("title"), 500)
+        publisher = self._clean(event.get("publisher"), 120)
+        context = self._clean(event.get("context"), 900)
+        publication = self._clean(self._verified_publication(event), 64)
+        fetched = self._clean(event.get("detected_at"), 64) or "time unavailable"
+        source = self._clean(event.get("canonical_url"), None)
         if not title:
             raise TelegramError("headline_missing")
         if not publisher:
@@ -769,9 +752,10 @@ class TelegramDispatcher:
         parsed = urlsplit(source)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise TelegramError("source_link_invalid")
-        if not publication:
-            raise TelegramError("publication_time_missing")
-        prefix = f"{title}\n\n{publisher}\nPublished: {publication}\n"
+        publication_line = (
+            f"Published: {publication}" if publication else "Original publication date: not verified"
+        )
+        prefix = f"{title}\n\n{publisher}\nFetched: {fetched}\n{publication_line}\n"
         suffix = f"\n\nSource: {source}"
         available = MAX_MESSAGE_LENGTH - len((prefix + suffix).encode("utf-16-le")) // 2
         if available < 0:
