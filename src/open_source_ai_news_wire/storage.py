@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 import sqlite3
 from collections.abc import Iterator, Sequence
@@ -15,7 +16,7 @@ from typing import Any
 from .config import RuntimePaths, ensure_runtime_layout
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 11
 
 
 def _exact_signature_records(value: object, *, source: bool) -> bool:
@@ -725,7 +726,187 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         ON CONFLICT(key) DO NOTHING
         """,
     ),
+    10: (
+        "ALTER TABLE relevance_notification_event ADD COLUMN source_reported_at TEXT",
+        "ALTER TABLE relevance_notification_event ADD COLUMN timestamp_status TEXT NOT NULL DEFAULT 'unknown'",
+        """
+        CREATE TABLE relevance_telegram_delivery (
+            event_id INTEGER PRIMARY KEY REFERENCES relevance_notification_event(id) ON DELETE CASCADE,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'delivered', 'failed', 'skipped', 'expired', 'dead_lettered')),
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+            delivered_at TEXT,
+            next_attempt_at TEXT,
+            error_class TEXT,
+            provider_message_id INTEGER,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX idx_relevance_telegram_delivery_state ON relevance_telegram_delivery(status, next_attempt_at, event_id)",
+        """
+        INSERT INTO app_state(key, value, updated_at)
+        VALUES('telegram_enabled', 'false', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        ON CONFLICT(key) DO NOTHING
+        """,
+        """
+        INSERT INTO app_state(key, value, updated_at)
+        VALUES('telegram_test_passed', 'false', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        ON CONFLICT(key) DO NOTHING
+        """,
+        """
+        INSERT INTO app_state(key, value, updated_at)
+        VALUES('telegram_activation_event_id', '0', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        ON CONFLICT(key) DO NOTHING
+        """,
+        """
+        INSERT INTO app_state(key, value, updated_at)
+        VALUES('telegram_activation_at', '', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        ON CONFLICT(key) DO NOTHING
+        """,
+        """
+        INSERT INTO app_state(key, value, updated_at)
+        VALUES('telegram_cooldown_until', '', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        ON CONFLICT(key) DO NOTHING
+        """,
+    ),
+    11: (
+        # Historical backfill resolves each observation's earliest revision.
+        # Index that lookup before processing large production histories.
+        "CREATE INDEX idx_source_revision_raw_observed ON source_revision(raw_observation_id, observed_at)",
+        """
+        CREATE TABLE fetched_article (
+            id TEXT PRIMARY KEY,
+            canonical_url TEXT NOT NULL UNIQUE,
+            story_id TEXT REFERENCES story_cluster(id) ON DELETE SET NULL,
+            source_item_id INTEGER REFERENCES source_item(id) ON DELETE SET NULL,
+            raw_observation_id INTEGER REFERENCES raw_observation(id) ON DELETE SET NULL,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '',
+            publisher TEXT NOT NULL,
+            source_id TEXT REFERENCES source_registry(id) ON DELETE SET NULL,
+            lane TEXT NOT NULL DEFAULT '',
+            language TEXT NOT NULL DEFAULT 'und',
+            published_at TEXT,
+            first_fetched_at TEXT NOT NULL,
+            last_fetched_at TEXT NOT NULL,
+            first_fetched_provenance TEXT NOT NULL DEFAULT 'observed',
+            status TEXT NOT NULL DEFAULT 'fetched' CHECK(status IN ('fetched', 'archived', 'withdrawn'))
+        )
+        """,
+        "CREATE INDEX idx_fetched_article_feed ON fetched_article(first_fetched_at DESC, id)",
+        "CREATE INDEX idx_fetched_article_story ON fetched_article(story_id)",
+        """
+        CREATE TABLE generation_job (
+            id TEXT PRIMARY KEY,
+            article_id TEXT NOT NULL REFERENCES fetched_article(id),
+            task_type TEXT NOT NULL CHECK(task_type IN ('text','graphics')),
+            model TEXT NOT NULL,
+            skill_ids_json TEXT NOT NULL DEFAULT '[]',
+            customizations TEXT NOT NULL DEFAULT '',
+            request_id TEXT NOT NULL UNIQUE,
+            source_snapshot_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued',
+            output_text TEXT NOT NULL DEFAULT '',
+            artifacts_json TEXT NOT NULL DEFAULT '[]',
+            question_json TEXT,
+            error TEXT NOT NULL DEFAULT '',
+            thread_id TEXT,
+            turn_id TEXT,
+            response_json TEXT,
+            lease_owner TEXT,
+            lease_expires_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            parent_job_id TEXT REFERENCES generation_job(id)
+        )
+        """,
+        "CREATE INDEX idx_generation_article ON generation_job(article_id,created_at DESC)",
+        "CREATE INDEX idx_generation_pending ON generation_job(status,created_at)",
+    ),
+
 }
+
+
+def article_id_for_url(url: str) -> str:
+    return "article-" + hashlib.sha256(url.encode("utf-8")).hexdigest()[:24]
+
+
+def backfill_fetched_articles(connection: sqlite3.Connection) -> None:
+    """Recover historical relevant article identities without replaying notifications."""
+    from .adapters import Observation, canonical_url
+    from .qualification import classify
+
+    # Source items were already admitted by relevance. Preserve their legacy
+    # archive/withdraw state and earliest known fetch rather than the last scan.
+    for row in connection.execute(
+        "SELECT i.*, s.lane, s.status AS story_status, s.detected_at, "
+        "s.updated_at AS story_updated_at, r.family, r.monitoring_role FROM source_item i "
+        "JOIN story_cluster s ON s.id = i.story_id "
+        "LEFT JOIN source_registry r ON r.id = i.source_registry_id ORDER BY i.id"
+    ).fetchall():
+        item = dict(row)
+        url = canonical_url(str(item.get("canonical_url") or item["url"]), str(item["url"]))
+        unknown = (str(item.get("timestamp_status") or "").startswith("unknown_original") or "fallback" in str(item.get("timestamp_status") or ""))
+        published = None if unknown else item.get("effective_published_at") or item.get("published_at")
+        first = str(item.get("first_seen_at") or item["detected_at"])
+        classification = classify(
+            Observation(str(item["id"]), item["title"], url, published or first,
+                        item.get("passage") or "", item.get("language") or "und"),
+            item, observed_at=first,
+        )
+        connection.execute(
+            """INSERT INTO fetched_article(id,canonical_url,story_id,source_item_id,
+                title,summary,publisher,source_id,lane,language,published_at,
+                first_fetched_at,last_fetched_at,first_fetched_provenance,status)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(canonical_url) DO UPDATE SET
+                lane=CASE WHEN fetched_article.lane NOT IN
+                    ('Open Ecosystem News','AGI Development','Broader AI News')
+                    THEN excluded.lane ELSE fetched_article.lane END""",
+            (article_id_for_url(url),url,item["story_id"],item["id"],item["title"],
+             item.get("passage") or "",item["source_name"],item.get("source_registry_id"),
+             classification.lane,item.get("language") or "und",published,first,
+             item.get("story_updated_at") or first,
+             "legacy_source_first_seen" if item.get("first_seen_at") else "legacy_story_detected",
+             item["story_status"] if item["story_status"] in {"archived","withdrawn"} else "fetched"),
+        )
+    # Raw records can include relevant observations never promoted into a story.
+    for row in connection.execute(
+        "SELECT o.*, r.name AS source_name, r.family, r.monitoring_role, "
+        "(SELECT MIN(v.observed_at) FROM source_revision v WHERE v.raw_observation_id = o.id) AS earliest_at "
+        "FROM raw_observation o JOIN source_registry r ON r.id = o.source_id ORDER BY o.id"
+    ).fetchall():
+        item = dict(row)
+        try:
+            metadata = json.loads(item.get("metadata_json") or "{}")
+        except (ValueError, TypeError):
+            metadata = {}
+        observation = Observation(item["external_id"],item["title"],item["canonical_url"],
+            item["published_at"],str(metadata.get("summary") or ""),item["language"],metadata)
+        classification = classify(observation,item,observed_at=item["observed_at"])
+        if not classification.relevant:
+            continue
+        url = canonical_url(item["canonical_url"],item["canonical_url"])
+        known = not (str(item.get("timestamp_status") or "").startswith("unknown_original") or "fallback" in str(item.get("timestamp_status") or ""))
+        published = (item.get("effective_published_at") or item["published_at"]) if known else None
+        first = str(item.get("earliest_at") or item["observed_at"])
+        connection.execute(
+            """INSERT INTO fetched_article(id,canonical_url,raw_observation_id,title,
+                summary,publisher,source_id,lane,language,published_at,
+                first_fetched_at,last_fetched_at,first_fetched_provenance,status)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'fetched') ON CONFLICT(canonical_url) DO UPDATE SET
+                raw_observation_id=COALESCE(fetched_article.raw_observation_id,excluded.raw_observation_id),
+                lane=CASE WHEN fetched_article.lane NOT IN
+                    ('Open Ecosystem News','AGI Development','Broader AI News')
+                    THEN excluded.lane ELSE fetched_article.lane END,
+                first_fetched_provenance=CASE WHEN excluded.first_fetched_at < fetched_article.first_fetched_at
+                    THEN excluded.first_fetched_provenance ELSE fetched_article.first_fetched_provenance END,
+                first_fetched_at=MIN(fetched_article.first_fetched_at,excluded.first_fetched_at),
+                last_fetched_at=MAX(fetched_article.last_fetched_at,excluded.last_fetched_at)""",
+            (article_id_for_url(url),url,item["id"],item["title"],observation.summary,
+             item["source_name"],item["source_id"],classification.lane,item["language"],
+             published,first,item["observed_at"],
+             "source_revision_earliest" if item.get("earliest_at") else "raw_observed"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -761,7 +942,6 @@ class Database:
                 raise MigrationRequired(
                     f"Database schema {version} requires explicit migration to {SCHEMA_VERSION}"
                 )
-        self._repair_037_orphaned_evidence()
         self.paths.database.chmod(0o600)
 
     def _repair_037_orphaned_evidence(self) -> None:
@@ -1466,6 +1646,18 @@ class Database:
                             """,
                             (key, value, now),
                         )
+                if target == 11:
+                    backfill_fetched_articles(connection)
+                    connection.execute(
+                        "UPDATE work_item SET status = 'cancelled', last_error_class = 'retired_editorial_workflow' "
+                        "WHERE kind IN ('triage', 'research', 'semantic', 'evidence_enrichment') "
+                        "AND status IN ('pending', 'queued', 'waiting')"
+                    )
+                    connection.execute(
+                        "UPDATE work_item SET status = 'cancelled', last_error_class = 'retired_editorial_workflow' "
+                        "WHERE kind = 'source_research' AND status IN ('pending', 'queued', 'waiting') "
+                        "AND json_valid(payload_json) AND json_extract(payload_json, '$.purpose') = 'background'"
+                    )
                 connection.execute(
                     "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                     (str(target),),

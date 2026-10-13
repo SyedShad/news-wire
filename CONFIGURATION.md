@@ -17,6 +17,67 @@ This is a focused **configuration reference** maintained alongside the engine. T
 
 ---
 
+## News Wire generation
+
+Generation runs locally through the installed Codex app-server and this application's Sign in with ChatGPT registration. The hosted dashboard relays commands and bounded artifact results; it receives no credentials or internal output paths.
+
+```bash
+uv run open-source-ai-news-wire generation login
+uv run open-source-ai-news-wire generation status
+uv run open-source-ai-news-wire generation catalog
+uv run open-source-ai-news-wire generation logout
+```
+
+`OPEN_SOURCE_AI_NEWS_WIRE_DATA` selects the local data root, which must remain outside Git. `NEWSWIRE_CODEX_BINARY` optionally selects an installed Codex executable. Model and ordered skill selections are saved separately for content and graphics. Skills initially remain unselected. Catalog membership does not guarantee model access; failed access never switches providers or models silently.
+
+The worker privately injects its short-lived ChatGPT access token into its own app-server process. Do not set, copy, or publish that internal token environment variable. No OpenAI API key or paid fallback is used. The current plan route lacks native image generation and hosted connectors; compatible local renderer skills remain available. Live local and hosted generation must be validated before readiness is declared.
+
+## Local Telegram alerts
+
+The News Wire has one narrowly scoped destination integration: an explicitly
+paired private Telegram team group for informational alerts. It does not
+publish Reddit drafts, send to public channels, or expose hosted-dashboard
+controls. The sender runs only on the Mac and has no dependency on the hosted
+dashboard or bridge.
+
+Telegram uses the native macOS Keychain for the bot token. The chat destination
+is paired locally and is restricted to the one confirmed private group. The
+token is never stored in this file, a runtime configuration file, a LaunchAgent
+plist, a processing packet, or diagnostics.
+
+```bash
+open-source-ai-news-wire telegram pair
+open-source-ai-news-wire telegram send-test
+open-source-ai-news-wire telegram enable
+open-source-ai-news-wire telegram status
+open-source-ai-news-wire telegram dispatch
+open-source-ai-news-wire telegram disable
+open-source-ai-news-wire telegram unpair
+```
+
+Open BotFather and use `/newbot`, add the bot to the private group with group
+privacy enabled, then run the pairing command. Enter the token hidden at the
+terminal; never paste it into Codex. A short-lived pairing code binds the
+command to the local pairing attempt. The test command must verify a receipt
+before `enable` can activate delivery.
+
+Only relevant articles with a reliable source publication time no older than
+24 hours at send time are eligible. Unknown or future publication times,
+aggregator or discovery timestamps used as fallbacks, and detection-time
+fallbacks are skipped.
+Enabling or resuming does not backfill older events. The existing scanner still
+runs every 30 minutes; the Telegram LaunchAgent dispatch loop runs at load and
+every 60 seconds while the Mac is awake, with a 50-second dispatch budget and a
+maximum batch of 12 paced at four seconds per send.
+
+The Bot API is used only for ordinary free delivery. Paid broadcast options and
+payment or Stars flows are disabled. Network uncertainty is recorded for
+operator reconciliation because an accepted Telegram request can outlive a
+lost response. Sleep and logout stop delivery; the durable ledger resumes
+after the next awake launch.
+
+---
+
 ## Where output is saved
 
 | Platform | Default path | Override |

@@ -9,6 +9,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Open Source AI News Wire releases**
 
+## [0.6.0] - 2026-10-13
+
+### Changed
+
+- Replaced the graded review inbox with separate relevant fetched articles ordered by first fetch time.
+- Moved operational notices and their unread badge to Operational Review.
+- Retired active trust scores, priority floors, qualification gates, automatic editorial research, and reapproval on source updates.
+- Preserved historical drafts, manual edits, archive choices, source history, and external article-alert delivery.
+
+### Added
+
+- Independent text and graphics generation with runtime models, ordered skills, and optional customizations.
+- Local Codex app-server execution using Sign in with ChatGPT plan authorization, durable task states, input responses, cancellation, retries, revisions, and artifact downloads.
+- Schema 11 article/job migration and bridge 2.3 projections for jobs, runtime catalogs, and bounded authenticated artifact chunks.
+
+### Availability
+
+- First-party sign-in and successful text/graphics runtime checks are required to validate generation on each installation. No paid API fallback is used.
+
+## [0.5.2] - 2026-09-28
+
+### Changed
+
+- Telegram sends every newly fetched relevant item, including discovery items
+  and items with unknown, invalid, future, or older original publication dates.
+- Fetch time is shown separately from verified publication time. Missing or
+  unreliable original publication dates are labelled as not verified.
+- Queued retries no longer expire because of publication age. Activation cursors,
+  canonical URL deduplication, delivery records, and schema 10 are preserved.
+- Newly collected relevant items from recovery and explicit catch-up scans also
+  reach Telegram. Existing browser and native notification recovery limits remain.
+
+## [0.5.1] - 2026-09-27
+
+### Fixed
+
+- Telegram no longer treats a discovery-only social post timestamp as evidence
+  of the original article publication date. The automatic sender skips these
+  items even when the social timestamp itself is valid.
+
+## [0.5.0] - 2026-09-15
+
+### Added
+
+- MacBook-hosted Telegram alerts for one explicitly paired private group, with
+  source-linked messages for newly detected relevant articles reliably published
+  within the preceding 24 hours.
+- Native macOS Keychain credential storage, finite group pairing, a test-and-enable
+  setup flow, and an independent per-user delivery LaunchAgent.
+- Schema 10 publication-time snapshots and a separate durable Telegram delivery
+  ledger, including activation cursors, retries, pacing, and freshness expiry.
+
+### Changed
+
+- Telegram delivery operates independently of browser notification activation,
+  hosted dashboard availability, and the scanner's research work.
+- Invalid or unavailable publication times never become fresh Telegram news by
+  falling back to detection or aggregator timestamps. Editorial publication
+  remains manual.
+
 ## [0.4.3] - 2026-08-20
 
 ### Changed

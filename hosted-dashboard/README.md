@@ -1,8 +1,8 @@
 # Owner-only hosted dashboard
 
-This project is the ChatGPT Sites frontend for Open Source AI News Wire 0.4.3.
+This project is the owner frontend for Open Source AI News Wire.
 It provides the complete owner workspace while keeping collection, SQLite,
-research, drafting, and every canonical mutation on the laptop.
+generation and every canonical mutation on the laptop.
 
 The local loopback dashboard remains the emergency operator fallback. The
 laptop accepts no inbound internet connection.
@@ -29,7 +29,7 @@ current bridge heartbeat.
 
 ## Data architecture
 
-Bridge protocol v2.2 polls outbound every ten seconds. HMAC-SHA256 signs the
+Bridge protocol v2.3.0 (schema v2) polls outbound every ten seconds. HMAC-SHA256 signs the
 protocol version, timestamp, random nonce, method, path, and request-body
 digest. Sites rejects stale timestamps, replayed nonces, oversized payloads,
 invalid schemas, unsupported bridge versions, and operations outside the fixed
@@ -38,9 +38,10 @@ allowlist.
 D1 stores only the minimum hosted service state:
 
 - hashed authentication sessions and lockout/audit state;
-- normalized, redacted projections for the story index, current story details,
-  drafts and version history, sources, notices, schedule and usage, settings,
-  and diagnostics;
+- normalized projections for fetched articles, historical drafts, sources,
+  operational notices, generation catalog/jobs, schedule, settings and diagnostics;
+- authenticated generation artifact metadata and bounded base64 chunks; the
+  runtime keeps canonical files and never exposes local paths;
 - bridge heartbeat and protocol/runtime versions;
 - five-minute idempotent owner commands with claimed/completed/failed results;
 - one-minute on-demand historical read requests and bounded short-lived detail
@@ -49,11 +50,40 @@ D1 stores only the minimum hosted service state:
   per-device FIFO deliveries, and expiring action capabilities. Subscription
   endpoints and keys are never projected, logged, or exported.
 
-The story index supports Review Now, Older Context, All History, status/lane/kind
-filters, priority/newest sorting, and cursor pagination. Historical details not
-already projected are requested through the outbound queue. Cached information
-shows its synchronization time when the laptop is asleep; operational controls
-are disabled until the heartbeat is current.
+The News inbox contains separate relevant source articles, ordered by first fetch
+time across all history. There is no score, trust qualification, automatic
+research or editorial approval gate. Each article opens its original source and
+an independent **Generate content / Generate graphics** workspace. Each task
+selects runtime models, an ordered list of installed skills, and customizations.
+The last model/skill selections are remembered independently for each task.
+
+`GENERATION_ENABLED` defaults to `false`. The layout and retained news history
+can deploy before inference is ready: cached bridge 2.2 stories open their source
+history, and their generation sections remain disabled. Missing fetch timestamps
+fall back to the cached detection time. No machine review window hides these rows.
+Bridge 2.3 catalog/article reads are queued only after that version is connected.
+Set this flag to `true` on staging after local authentication and real text/graphics
+acceptance, then on production after hosted acceptance. The server enforces it
+for create, retry and input commands. Reads, cancellation and manual text saves
+remain available without inference on the compatible bridge.
+
+Jobs retain their input, progress, interactive questions, errors, outputs and
+version history. Text can be copied or edited into a new version; graphics can be
+previewed and downloaded. Hosted artifact transfer is limited to 25 MiB per
+artifact with 500 KiB decoded chunks; downloads verify size and SHA256. HTML and
+SVG are downloaded as attachments rather than rendered inline.
+
+Operational Review is its own tab with unread badges and read controls for health,
+correction, catch-up, recovery and generation notices. Notice actions do not affect articles.
+Existing fetched-article external notification eligibility and delivery ledgers
+are retained. The notification **Open news inbox** action opens the human
+workspace; older automatic-research capabilities return 410 and queue no work.
+Dismiss remains durable and replay-safe.
+
+Cached information and outputs remain readable when the laptop sleeps. Generation
+and other operational controls require a current heartbeat. Models and skills
+come from the local Codex runtime, including skills available through that runtime.
+ChatGPT website-only models or GPTs are not a separately accessible catalog.
 
 The hosted interface intentionally has no **Stop bridge** action. Starting,
 stopping, reinstalling, and recovering the only connection remain local-only.
@@ -70,6 +100,7 @@ values, marking every credential as secret:
 | `MASTER_PASSWORD_VERIFIER` | Yes | Slow salted owner-password verifier |
 | `MASTER_PASSWORD_VERSION` | No | Credential-rotation version |
 | `BRIDGE_SECRET` | Yes | Laptop-to-Sites HMAC key |
+| `GENERATION_ENABLED` | No | Inference activation switch; defaults false |
 | `PUSH_VAPID_PUBLIC_KEY` | No | Browser Web Push application-server key |
 | `PUSH_VAPID_PRIVATE_KEY` | Yes | Web Push signing key |
 | `PUSH_VAPID_SUBJECT` | No | Owner contact URI for Web Push providers |
@@ -114,7 +145,7 @@ regenerates only its ignored local verifier when the hosting runtime changes.
 
 ## Laptop bridge operation
 
-Run these from a verified immutable 0.4.3 install, never from a Git worktree:
+Run these from a verified immutable install that supports bridge 2.3.0, never from a Git worktree:
 
 ```bash
 open-source-ai-news-wire hosted-bridge configure \
@@ -151,7 +182,13 @@ Production must be saved and deployed only from the exact tested source commit:
    cross-device rendering, exports, and a harmless `bridge.healthcheck` command;
 7. retain the previous Sites version for rollback.
 
-Assisted drafting is a separate release-bound gate. Run a fresh isolation and
-search-canary check after installing 0.4.3, and enable assistance only if
-identity, isolation, and canary checks all pass. Dashboard access remains useful
-when assistance is disabled.
+Before deploying this version, apply `drizzle/0007_article_generation.sql`. It
+adds fetch-time indexing and expands historical read requests without deleting
+existing pending reads. Preserve the earlier Sites version for rollback.
+
+Generation uses the laptop's signed, ChatGPT-authenticated Codex app-server.
+On the Mac, run `open-source-ai-news-wire generation login` and complete local
+ChatGPT authentication. The hosted dashboard never receives ChatGPT credentials.
+Use **Refresh models and skills** after login or skill changes. The dashboard
+shows login, usage and generation failures without hiding fetched articles.
+Publishing remains manual.

@@ -54,7 +54,7 @@ def test_schema9_is_additive_off_by_default_and_does_not_backfill(tmp_path: Path
     database = _database(tmp_path)
     seed_demo_data(database)
 
-    assert database.schema_version() == SCHEMA_VERSION == 9
+    assert database.schema_version() == SCHEMA_VERSION == 11
     assert database.one("SELECT COUNT(*) AS count FROM relevance_notification_event") == {"count": 0}
     state = DashboardService(database).relevance_notification_state()
     assert state["capture_enabled"] is True
@@ -245,7 +245,7 @@ def test_context_strips_markup_and_uses_an_honest_limited_fallback() -> None:
 
 
 class _SearchInvoker:
-    def invoke_search(self, _packet):
+    def invoke_search(self, packet):
         return InvocationResult(
             {
                 "schema_version": 1,
@@ -254,7 +254,7 @@ class _SearchInvoker:
                     "url": "https://publisher.example/report",
                     "title": "Independent transparent inference runtime report",
                     "publisher": "Publisher",
-                    "published_at": "2026-08-20T09:00:00Z",
+                    "published_at": packet["first_public_at"],
                     "snippet": "Independent report on signed reproducible runtime builds.",
                 }],
                 "notes": "",

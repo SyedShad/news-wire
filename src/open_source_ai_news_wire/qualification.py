@@ -118,6 +118,61 @@ def freshness_points(age_hours: float) -> int:
     return 0
 
 
+def classify(
+    observation: Observation,
+    source: dict[str, object],
+    *,
+    observed_at: str,
+    novelty: int = 10,
+) -> Qualification:
+    text = _normalized_text(observation)
+    ai_matches = _contains(text, AI_TERMS)
+    family = str(source.get("family", ""))
+    source_implies_ai = family in {
+        "Official AI organizations", "Open development ecosystems", "Research",
+        "Safety and security", "Aggregation",
+    }
+    relevant = bool(ai_matches or source_implies_ai)
+    open_matches = _contains(text, OPEN_TERMS)
+    agi_matches = _contains(text, AGI_TERMS)
+    broader_matches = _contains(text, BROADER_TERMS)
+    if open_matches or family == "Open development ecosystems":
+        lane = "Open Ecosystem News"
+    elif agi_matches:
+        lane = "AGI Development"
+    else:
+        lane = "Broader AI News"
+        # Broad coverage is intentionally narrow: a generic AI launch, funding
+        # round, chip, acquisition, research result, or safety story is outside
+        # this lane unless the item directly names privacy, security, or a
+        # regulatory/legal enforcement issue.
+        relevant = relevant and bool(broader_matches)
+
+    if "open source" in text or "open-source" in text:
+        openness = "open source"
+    elif "open weight" in text or "open-weight" in text:
+        openness = "open-weight"
+    elif "source available" in text or "source-available" in text:
+        openness = "source-available"
+    elif any(term in text for term in ("closed", "proprietary")):
+        openness = "closed/proprietary"
+    else:
+        openness = "not stated"
+
+    published = datetime.fromisoformat(observation.published_at.replace("Z", "+00:00"))
+    detected = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    age_hours = max(0.0, (detected.astimezone(UTC) - published.astimezone(UTC)).total_seconds() / 3600)
+    freshness = "Breaking" if age_hours <= 2 else "Fresh" if age_hours <= 24 else "Older"
+
+    return Qualification(
+        relevant=relevant, lane=lane, openness_class=openness, freshness=freshness,
+        score=0, impact_score=0, novelty_score=0, source_significance=0,
+        importance_score=0, priority="", importance_gate=False,
+        opportunity_strength=None, relevance_bridge="", mechanism="",
+        counterargument="", reasons=(),
+    )
+
+
 def qualify(
     observation: Observation,
     source: dict[str, object],

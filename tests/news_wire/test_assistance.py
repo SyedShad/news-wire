@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.news_wire.historical_fixtures import seed_historical_draft_request
 from open_source_ai_news_wire import assistance as assistance_module
 from open_source_ai_news_wire.assistance import (
     ApprovalInvalidated,
@@ -214,7 +215,7 @@ def _pass_isolation(database: Database) -> None:
 
 def test_packet_contains_only_bounded_story_evidence(tmp_path: Path) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-runtime-001", "approve_neutral", "Keep this factual")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral", "Keep this factual")
     work = database.one("SELECT id FROM work_item WHERE kind = 'draft'")
 
     packet = build_packet(database, int(work["id"]))
@@ -231,7 +232,7 @@ def test_packet_contains_only_bounded_story_evidence(tmp_path: Path) -> None:
 
 def test_approved_draft_is_generated_versioned_and_accounted(tmp_path: Path) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
     shell = database.one(
         "SELECT id, status, provenance_json FROM draft WHERE story_id='story-demo-runtime-001'"
     )
@@ -278,7 +279,7 @@ def test_approval_keeps_editable_shell_even_when_assistance_is_ready(tmp_path: P
     _pass_isolation(database)
     database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
 
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
 
     assert database.one(
         "SELECT status FROM draft WHERE story_id = 'story-demo-runtime-001'"
@@ -289,7 +290,7 @@ def test_ai_completion_wins_before_stale_shell_save_without_duplicate_current(
     tmp_path: Path,
 ) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
     shell = database.one(
         "SELECT * FROM draft WHERE story_id = 'story-demo-runtime-001'"
     )
@@ -317,7 +318,7 @@ def test_ai_completion_wins_before_stale_shell_save_without_duplicate_current(
 
 def test_lens_draft_requires_and_preserves_separate_approved_mode(tmp_path: Path) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-policy-002", "approve_lens")
+    seed_historical_draft_request(service, "story-demo-policy-002", "approve_lens")
     _pass_isolation(database)
     database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
 
@@ -343,7 +344,7 @@ def test_manual_override_uses_discovery_sources_without_prompting_with_gate_labe
     tmp_path: Path, action: str, expected_operation: str
 ) -> None:
     database, service = _service(tmp_path)
-    service.review(
+    seed_historical_draft_request(service,
         "story-demo-watch-003",
         action,
         confirmation_version="manual_override_v1",
@@ -481,7 +482,7 @@ def test_assistance_disabled_empty_queue_and_invocation_failure_are_explicit(tmp
 
 def test_transient_draft_failure_retries_once_and_accounts_retry(tmp_path: Path) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
     _pass_isolation(database)
     database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
 
@@ -511,7 +512,7 @@ def test_transient_draft_failure_retries_once_and_accounts_retry(tmp_path: Path)
 
 def test_usage_exhaustion_waits_without_consuming_retry_or_charge(tmp_path: Path) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
     _pass_isolation(database)
     database.set_state("assistance_enabled", "true", assistance_module._now())
 
@@ -556,7 +557,7 @@ def test_volatile_source_is_refetched_unchanged_before_model_and_charged_once(
         "INSERT INTO evidence_link(claim_id, source_item_id, relationship) VALUES(?, ?, 'supports')",
         (volatile_claim["id"], second_source["id"]),
     )
-    service.review("story-demo-policy-002", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-policy-002", "approve_neutral")
     _pass_isolation(database)
     database.set_state("assistance_enabled", "true", assistance_module._now())
     invoker = FakeInvoker()
@@ -583,7 +584,7 @@ def test_volatile_source_drift_requires_reapproval_without_model_or_charge(
     tmp_path: Path,
 ) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-policy-002", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-policy-002", "approve_neutral")
     _pass_isolation(database)
     database.set_state("assistance_enabled", "true", assistance_module._now())
     invoker = FakeInvoker()
@@ -612,7 +613,7 @@ def test_unavailable_volatile_source_waits_without_model_or_charge(
     tmp_path: Path,
 ) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-policy-002", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-policy-002", "approve_neutral")
     _pass_isolation(database)
     database.set_state("assistance_enabled", "true", assistance_module._now())
     invoker = FakeInvoker()
@@ -636,7 +637,7 @@ def test_unavailable_volatile_source_waits_without_model_or_charge(
 
 def test_unsafe_volatile_source_fails_without_model_or_charge(tmp_path: Path) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-policy-002", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-policy-002", "approve_neutral")
     _pass_isolation(database)
     database.set_state("assistance_enabled", "true", assistance_module._now())
     invoker = FakeInvoker()
@@ -660,8 +661,8 @@ def test_unsafe_volatile_source_fails_without_model_or_charge(tmp_path: Path) ->
 
 def test_exact_claim_does_not_process_another_draft_or_reclaim_live_lease(tmp_path: Path) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-runtime-001", "approve_neutral")
-    service.review("story-demo-policy-002", "approve_lens")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-policy-002", "approve_lens")
     _pass_isolation(database)
     database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
     work = database.one(
@@ -691,7 +692,7 @@ def test_immediate_and_scheduled_workers_cannot_claim_the_same_draft(
     tmp_path: Path,
 ) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
     _pass_isolation(database)
     database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
     work = database.one("SELECT id FROM work_item WHERE kind = 'draft'")
@@ -736,7 +737,7 @@ def test_exact_draft_waits_with_visible_prerequisite_codes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
     work = database.one("SELECT id FROM work_item WHERE kind = 'draft'")
     monkeypatch.setattr(assistance_module, "CodexInvoker", FakeInvoker)
 
@@ -762,7 +763,7 @@ def test_runtime_bootstrap_failure_is_visible_on_the_preserved_work_item(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
 
     class MissingCodex:
         def __init__(self):
@@ -791,7 +792,7 @@ def test_bootstrap_failure_cannot_clobber_an_active_lease_or_future_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
     work = database.one("SELECT id FROM work_item WHERE kind = 'draft'")
 
     class MissingCodex:
@@ -823,7 +824,7 @@ def test_bootstrap_failure_loses_race_without_clobbering_new_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
     work = database.one("SELECT id FROM work_item WHERE kind = 'draft'")
 
     class RacingMissingCodex:
@@ -853,7 +854,7 @@ def test_bootstrap_failure_loses_race_without_clobbering_new_owner(
 
 def test_expired_generation_lease_is_reclaimed_without_duplicate_result(tmp_path: Path) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
     _pass_isolation(database)
     database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
     database.execute(
@@ -967,7 +968,7 @@ def test_natural_attribution_tokens_are_validated_rendered_and_deduplicated() ->
 
 def test_material_change_invalidates_approval_before_drafting(tmp_path: Path) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-policy-002", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-policy-002", "approve_neutral")
     work = database.one("SELECT id FROM work_item WHERE kind = 'draft'")
     database.execute(
         "UPDATE story_cluster SET material_update = 1 WHERE id = 'story-demo-policy-002'"
@@ -986,7 +987,7 @@ def test_material_change_invalidates_approval_before_drafting(tmp_path: Path) ->
 
 def test_approval_invalidation_does_not_resurrect_archived_story(tmp_path: Path) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-policy-002", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-policy-002", "approve_neutral")
     work = database.one("SELECT id FROM work_item WHERE kind = 'draft'")
     database.execute(
         "UPDATE story_cluster SET status = 'archived', material_update = 1 "
@@ -1031,7 +1032,7 @@ def test_approval_snapshot_validation_fails_closed(
     tmp_path: Path, mutation: str
 ) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
     work = database.one("SELECT id, payload_json FROM work_item WHERE kind = 'draft'")
     payload = json.loads(work["payload_json"])
 
@@ -1090,7 +1091,7 @@ def test_packet_uses_signed_approval_snapshot_if_rows_change_after_validation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database, service = _service(tmp_path)
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
     work = database.one("SELECT id, payload_json FROM work_item WHERE kind = 'draft'")
     approved = json.loads(work["payload_json"])
     approved_text = approved["claims"][0]["text"]
@@ -1116,7 +1117,7 @@ def test_manual_approval_is_invalidated_when_approved_claim_or_passage_changes(
     tmp_path: Path,
 ) -> None:
     database, service = _service(tmp_path)
-    service.review(
+    seed_historical_draft_request(service,
         "story-demo-watch-003",
         "manual_approve_neutral",
         confirmation_version="manual_override_v1",

@@ -1,37 +1,43 @@
 # Open Source AI News Wire
 
-Open Source AI News Wire is a local application for monitoring public AI news and preparing source-linked Reddit content. It collects public, no-login sources, groups related reports, classifies source trust, runs automatic research when needed, and keeps final review and publication manual.
+Open Source AI News Wire is a local application for monitoring public AI news and preparing source-linked Reddit content. It collects public, no-login sources and displays every relevant fetched article. Humans choose what to read, generate, and publish.
 
 It covers open-source and open-weight AI, AGI developments, and broader AI news specifically related to privacy, security, and regulation.
 
-The application never publishes automatically.
+The application never publishes editorial content automatically. It can send
+informational alerts to one explicitly paired private Telegram team group when
+the owner enables that local notification lane; Telegram is not a publishing
+destination and does not receive drafts or hosted-dashboard controls.
 
 The owner-only online dashboard lives in [`hosted-dashboard`](hosted-dashboard/README.md).
 Its interface is hosted on ChatGPT Sites while the SQLite corpus, collection,
-research, drafting, and canonical mutations remain on the laptop. The laptop
+skill-based generation and canonical mutations remain on the laptop. The laptop
 makes only signed outbound HTTPS requests and accepts no inbound internet
 connection.
 
-![The fictional demo dashboard showing the Priority Wire, source health, schedule, and notices](docs/assets/screenshots/0.3.7/01-overview.png)
+![Fictional article workspace with independent content and graphics selections](docs/assets/screenshots/0.6.0/02-article-workspace.png)
 
 ## What the product includes
 
 - **Public-source monitoring:** scheduled and on-demand collection from dated public sources.
-- **Local review dashboard:** Ready, Researching, and Content-ready stories with trust, provenance, priority, and audit history.
-- **macOS scheduling and recovery:** scans at minute `00` and `30` while the Mac is awake, plus recovery after missed time.
-- **Optional ChatGPT search and drafting:** a fresh secured source search followed by packet-only Reddit writing, with an immediate editable local shell.
+- **Article inbox:** separate relevant articles, marked Fetched and ordered by first fetch time, with source links and no editorial grading.
+- **Operational Review:** source-health, recovery, catch-up, and source-update notices with a separate unread badge.
+- **Skill-based generation:** independent Generate content and Generate graphics controls with a ChatGPT model, ordered skills, and optional customizations.
+- **Durable outputs:** task progress, input requests, cancellation/retry, saved revisions, and artifact previews/downloads.
+- **macOS scheduling and recovery:** scans at minute `00` and `30` while the Mac is awake.
+- **Optional private Telegram alerts:** existing informational article alerts remain independent of generation.
 
 The normal workflow is:
 
 ```mermaid
 flowchart LR
-    A["Public sources"] --> B{"Source trust"}
-    B -->|Trusted| C["Ready and Urgent"]
-    B -->|Research required| D["Automatic research"]
-    D --> C
-    C --> E["Create content"]
-    E --> F["Editable shell and fresh search"]
-    F --> G["Edit and export"]
+    A["Public sources"] --> B["Relevant fetched articles"]
+    B --> C["Human opens article"]
+    C --> D["Generate content"]
+    C --> E["Generate graphics"]
+    D --> F["Selected ChatGPT model and skills"]
+    E --> F
+    F --> G["Edit, preview, and download"]
     G --> H["Manual publication"]
 ```
 
@@ -72,14 +78,13 @@ See [Getting started](docs/guide/getting-started.md) for the full setup and firs
 | [Product guide](docs/guide/index.md) | Understand the product, its parts, and its boundaries |
 | [Getting started](docs/guide/getting-started.md) | Install, launch, schedule, and verify the application |
 | [Features and use cases](docs/guide/features-and-use-cases.md) | See every user-visible capability and when to use it |
-| [Everyday workflows](docs/guide/everyday-workflows.md) | Review trust and research, create content, revise, and export |
+| [Everyday workflows](docs/guide/everyday-workflows.md) | Browse articles, select skills, generate, revise, and download |
+| [Telegram alerts](docs/guide/telegram-alerts.md) | Pair one private team group and operate local informational alerts |
 | [Releases](docs/guide/releases.md) | Check the current version, update, and review release history |
 
 ## Current release
 
-The current application release is v0.4.3 with database schema 9. It expands
-deterministic recognition of AI security advisories while retaining the
-owner-only, relevance-only Web Push lane and manual publishing workflow.
+The source version is v0.6.0 with database schema 11 and bridge protocol 2.3. Existing installations need an explicit migration. Fetch time stays distinct from publication time.
 
 See the [release guide](docs/guide/releases.md) and [changelog](CHANGELOG.md) for details.
 
@@ -88,10 +93,13 @@ See the [release guide](docs/guide/releases.md) and [changelog](CHANGELOG.md) fo
 - Collection runs on a schedule; it is not a guaranteed real-time wire service.
 - Sources must be public and usable without accounts, cookies, payment, or access bypasses.
 - Scheduled work runs while the Mac is awake. A locked screen is fine; sleep pauses work.
-- Notifications can arrive immediately after bridge ingestion, but they cannot detect new items while the Mac is asleep or offline.
+- Notifications can arrive after local ingestion, but they cannot detect or send new items while the Mac is asleep, logged out, or offline.
+- Telegram alerts are optional, Mac-only, and independent of the hosted dashboard. They include a relevant headline, publisher/source context, fetch time, publication time when verified, and public source link.
 - Broader AI News is limited to privacy, security, and regulation; Open Ecosystem and AGI coverage remain separate.
 - ChatGPT assistance is optional and can remain unavailable if its local checks fail.
-- A human starts content creation with one button, reviews the editable result, and publishes it manually.
+- A human chooses the model and skills for each task, reviews the output, and publishes manually.
+- Skills and models come from the local runtime catalog; catalog entries do not guarantee account entitlement or tool availability.
+- Generation uses Sign in with ChatGPT plan authorization. No paid API fallback is enabled. Native image-generation and hosted connector tools are currently unavailable on that route; locally rendered graphics are supported.
 - Canonical runtime data stays local and has no built-in backup. The hosted
   dashboard retains a redacted read projection, short-lived requested details,
   authentication state, and expiring relay queues.

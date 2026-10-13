@@ -13,7 +13,7 @@ open-source-ai-news-wire dashboard
 
 Use `schedule run-now` for an immediate bounded scan. Overlapping triggers coalesce into the durable queue.
 
-Release 0.4.3 uses schema 9 and expands deterministic recognition of AI security advisories. The Overview and inbox show mutually exclusive Ready, Researching, and Content-ready states. Candidate, Watch, evidence, importance, lens, qualification, approval, and manual-override controls are retired. Archive and withdraw remain available.
+Release 0.5.0 uses schema 10 and expands deterministic recognition of AI security advisories. The Overview and inbox show mutually exclusive Ready, Researching, and Content-ready states. Candidate, Watch, evidence, importance, lens, qualification, approval, and manual-override controls are retired. Archive and withdraw remain available.
 
 ## Relevance notifications
 
@@ -30,6 +30,51 @@ eligible items for up to 72 hours. Full headlines and source context may appear
 on the lock screen. Start working queues only `operator_review` source research
 and sends a terminal follow-up; it never creates content or a draft. Dismiss
 resolves only that notification.
+
+## Private Telegram alerts
+
+Telegram alerts are an optional local notification lane for one private team
+group. They are informational: each message contains the relevant headline,
+publisher/source context, reliable publication time, and public source link.
+They never contain drafts, editorial controls, or hosted-dashboard actions.
+
+Open BotFather and use `/newbot`, add the bot to the private group with group
+privacy enabled, then confirm the destination from the Mac. Enter the token
+hidden at the terminal; never paste it into Codex:
+
+```bash
+open-source-ai-news-wire telegram pair
+open-source-ai-news-wire telegram send-test
+open-source-ai-news-wire telegram enable
+open-source-ai-news-wire telegram status
+```
+
+The token is stored through native macOS Keychain APIs. A short-lived pairing code
+binds the command to the local destination confirmation. `send-test` must
+verify a Telegram receipt before `enable` is accepted. The sender is restricted
+to the paired private group ID and ordinary free Bot API delivery; paid broadcast
+options, payment/Stars flows, public channels, and other groups are rejected.
+
+The Telegram LaunchAgent runs at load and every 60 seconds while the Mac is
+awake. Each dispatch has a 50-second budget, sends at most 12 items, and paces
+them at four seconds per send. The existing scanner remains on its 30-minute
+schedule. Delivery is independent of the hosted dashboard and continues from
+the local ledger after restart. Disable or unpair with:
+
+```bash
+open-source-ai-news-wire telegram disable
+open-source-ai-news-wire telegram unpair
+open-source-ai-news-wire telegram dispatch
+```
+
+Only events with a reliable source publication time within 24 hours at send
+time qualify. Unknown or future times, aggregator/discovery timestamps used as
+fallbacks, and detection-time fallbacks are skipped. Enabling or resuming starts
+at the current watermark and does not backfill older events. Sleep, logout, or
+offline state stops delivery until the next awake launch. If a request may have reached
+Telegram but its response is lost, the ledger retries under the bounded
+at-least-once policy. A rare duplicate is possible and should be reconciled by
+the operator.
 
 ## Trust, automatic research, and priority
 
@@ -78,7 +123,7 @@ open-source-ai-news-wire assistance status
 open-source-ai-news-wire assistance enable
 ```
 
-Release 0.4.3 retains the reviewed Apple-signed `codex-cli 0.146.0-alpha.9.2` pin. The canary verifies both execution paths: source discovery permits only secured web search, while final writing is packet-only with filesystem, shell, browser, apps, and all other tools disabled. The attestation expires after 24 hours. Failure keeps assistance disabled and records the exact safe error state.
+Release 0.5.0 retains the reviewed Apple-signed `codex-cli 0.146.0-alpha.9.2` pin. The canary verifies both execution paths: source discovery permits only secured web search, while final writing is packet-only with filesystem, shell, browser, apps, and all other tools disabled. The attestation expires after 24 hours. Failure keeps assistance disabled and records the exact safe error state.
 
 ## Hosted owner dashboard
 

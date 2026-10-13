@@ -21,8 +21,11 @@
         <a class="nav-item {{ 'active' if page == 'overview' else '' }}" href="{{ url_for('overview') }}" aria-label="Overview">
           <span class="nav-icon" aria-hidden="true">⌂</span><span>Overview</span>
         </a>
-        <a class="nav-item {{ 'active' if page == 'inbox' else '' }}" href="{{ url_for('inbox') }}" aria-label="Review inbox{% if unread_alerts %}, {{ unread_alerts }} unread{% endif %}" data-live-inbox-link>
-          <span class="nav-icon" aria-hidden="true">≡</span><span>Review inbox</span>
+        <a class="nav-item {{ 'active' if page == 'inbox' else '' }}" href="{{ url_for('inbox') }}" aria-label="News inbox">
+          <span class="nav-icon" aria-hidden="true">≡</span><span>News inbox</span>
+        </a>
+        <a class="nav-item {{ 'active' if page == 'operations' else '' }}" href="{{ url_for('operations') }}" aria-label="Operational Review{% if unread_alerts %}, {{ unread_alerts }} unread{% endif %}" data-live-inbox-link>
+          <span class="nav-icon" aria-hidden="true">◇</span><span>Operational Review</span>
           <span class="nav-count" data-live-unread {{ 'hidden' if not unread_alerts else '' }}>{{ unread_alerts }}</span>
         </a>
         <a class="nav-item {{ 'active' if page == 'drafts' else '' }}" href="{{ url_for('drafts') }}" aria-label="Content">

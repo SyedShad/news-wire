@@ -50,6 +50,13 @@
       "when": 1787217390956,
       "tag": "0006_green_landau",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1791850000000,
+      "tag": "0007_article_generation",
+      "breakpoints": true
     }
   ]
 }

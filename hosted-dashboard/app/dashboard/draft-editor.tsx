@@ -15,8 +15,8 @@ export default function DraftEditor({ draft, connected }: { draft: RecordValue; 
       <CommandMessage message={message} />
       <label>Title<input name="headline" required maxLength={300} defaultValue={text(draft, "headline", "")} /></label>
       <label>Metadata<input name="metadata" maxLength={500} defaultValue={text(draft, "metadata", "")} /></label>
-      <label>Factual brief <span>confirmed source links use portable Markdown</span><textarea name="body" rows={16} required defaultValue={text(draft, "body", "")} /></label>
-      {text(draft, "mode", "") === "Open-Source Lens Brief" || text(draft, "lens", "") ? <label>Open-source lens <span>approved analysis section</span><textarea name="lens" rows={6} defaultValue={text(draft, "lens", "")} /></label> : <input type="hidden" name="lens" value="" />}
+      <label>Factual brief <span>source links use portable Markdown</span><textarea name="body" rows={16} required defaultValue={text(draft, "body", "")} /></label>
+      {text(draft, "mode", "") === "Open-Source Lens Brief" || text(draft, "lens", "") ? <label>Open-source lens <span>earlier analysis section</span><textarea name="lens" rows={6} defaultValue={text(draft, "lens", "")} /></label> : <input type="hidden" name="lens" value="" />}
       <label>Suggested flair<input name="suggested_flair" maxLength={80} defaultValue={text(draft, "suggested_flair", "")} /></label>
       <div className="editor-actions"><span>Current status: <strong>{text(draft, "status", "unknown")}</strong></span><button className="button button-primary" disabled={busy || !connected}>Save as version {Number(draft.version || 0) + 1}</button></div>
     </form>

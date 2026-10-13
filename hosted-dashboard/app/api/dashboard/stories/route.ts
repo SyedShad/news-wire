@@ -12,8 +12,8 @@ export async function GET(request: Request) {
     status: query.get("status") || "all",
     lane: query.get("lane") || "all",
     kind: query.get("kind") || "all",
-    window: query.get("window") || "review_now",
-    sort: query.get("sort") || "priority",
+    window: query.get("window") || "all",
+    sort: query.get("sort") || "newest",
     cursor: query.get("cursor") || "",
     pageSize: Number(query.get("page_size") || 25),
   });

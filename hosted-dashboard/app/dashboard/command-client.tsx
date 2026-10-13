@@ -30,13 +30,14 @@ export function useOwnerCommand() {
         const command = statusResult.commands?.find((item) => item.id === commandId);
         if (command?.status === "completed") {
           setMessage("Completed on the laptop. Synchronized information will refresh shortly.");
-          break;
+          return command;
         }
         if (command?.status === "failed") {
           setMessage(command.error || "The laptop could not complete this command.");
-          break;
+          return command;
         }
       }
+      setMessage("Command is still pending. Its result will appear when the laptop finishes.");
       return result.command;
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "The command could not be queued");

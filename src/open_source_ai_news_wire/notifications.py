@@ -49,13 +49,11 @@ class NativeNotifier:
         watermark = self.database.get_state("pilot_notification_watermark", "")
         if not watermark:
             return 0
+        # Editorial candidate/watch notices are retired. Existing explicitly
+        # enabled operational delivery remains, without introducing new channels.
         condition = "AND a.kind IN ('health', 'recovery')" if shadow else """
-        AND (
-          (a.kind = 'candidate' AND a.severity IN ('high', 'urgent', 'critical')) OR
-          (a.kind = 'watch' AND a.severity IN ('watch', 'high', 'urgent', 'critical')) OR
-          a.kind = 'correction' OR
-          (a.kind IN ('health', 'recovery') AND a.severity IN ('high', 'urgent', 'critical'))
-        )
+        AND (a.kind = 'correction' OR
+          (a.kind IN ('health','recovery') AND a.severity IN ('high','urgent','critical')))
         """
         rows = self.database.query(
             f"""
@@ -66,15 +64,6 @@ class NativeNotifier:
             """,
             (watermark,),
         )
-        ranked: dict[str, dict[str, Any]] = {}
-        if any(row.get("kind") in {"candidate", "watch"} for row in rows):
-            from .services import DashboardService
-
-            ranked = {
-                str(story["id"]): story
-                for story in DashboardService(self.database)._story_rows()
-            }
-        rows = [row for row in rows if self._current_content_alert(row, ranked)]
         if not rows:
             return 0
         recent_cutoff = datetime.now(UTC) - timedelta(minutes=10)

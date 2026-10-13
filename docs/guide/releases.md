@@ -6,28 +6,23 @@ Open Source AI News Wire uses semantic application versions and explicit databas
 
 | Item | Value |
 |---|---|
-| Application | 0.4.3 |
-| Database schema | 9 |
+| Application | 0.6.0 |
+| Database schema | 11 |
 | Release tag | Pending local validation and source release |
 | Validated source commit | Bound by the local validation report at install time |
 | Distribution | Owner source repository; no prebuilt binary attached |
 
-Release 0.4.3 expands deterministic recognition of AI security advisories and
-corrects immutable-install schema provenance. Database schema 9, bridge 2.2,
-and the owner-only relevance notification workflow are unchanged.
+Release 0.6.0 replaces graded story queues with a plain article feed and separates operational notices. It adds durable skill-based text and graphics jobs through the local Codex app-server. Live generation readiness requires local ChatGPT sign-in and successful local and hosted runs. Existing external article-alert policies and notification ledgers are preserved.
 
 Highlights:
 
-- Trusted detections receive an immediate Urgent floor; research-required detections research automatically and receive the same floor at any terminal outcome.
-- Every active story has one Create content action that creates a shell before its own fresh search.
-- Broader AI News is restricted to privacy, security, and regulation.
-- Reddit output follows one source-linked style and remains manually edited and published.
-- The reviewed identity pin is `codex-cli 0.146.0-alpha.9.2`; source discovery permits only web search, and final writing permits no tools.
-- The ChatGPT Sites frontend uses a redacted hosted read projection and expiring
-  relay queues; SQLite and every canonical mutation remain on the laptop.
-- Browser notifications show source-derived context. Start working runs only a
-  fresh source search; it never creates a draft, and Dismiss changes only the
-  notification.
+- All relevant fetched articles are visible without editorial scores, trust floors, or approval prerequisites.
+- Each article has independent content and graphics generation controls using runtime catalogs.
+- Broader AI News remains restricted to privacy, security, and regulation.
+- Selected skills determine output style and research. Publication remains manual.
+- Generation uses local/open-source Sign in with ChatGPT; no paid fallback is enabled.
+- The hosted frontend receives a redacted read projection and expiring relay queues; canonical data remains on the Mac.
+- Browser notifications retain source-derived context. Opening one leads to the news feed; Dismiss changes only the notification.
 
 See the complete [changelog](../../CHANGELOG.md) for the file-level release record.
 
@@ -70,7 +65,7 @@ uv run open-source-ai-news-wire sources health
 uv run open-source-ai-news-wire dashboard
 ```
 
-The migration operates on the configured local data root. The application does not create a backup before migration. Pause scheduling and snapshot the database before moving to schema 9, then run a fresh isolation/search canary before resuming assistance.
+The migration operates on the configured local data root. The application does not create a backup before migration. Pause the scanner and any active bridge or Telegram sender, stop local dashboards, and take a consistent SQLite backup before moving to schema 10. Restore the previously active jobs after installation. Any assisted drafting still requires a current release-bound isolation check.
 
 If the schedule was installed with the checkout's `.venv/bin/open-source-ai-news-wire` launcher, `uv sync --locked` updates that same environment and no schedule reinstall is normally required.
 
@@ -78,11 +73,40 @@ If the schedule was installed with the checkout's `.venv/bin/open-source-ai-news
 
 The application also supports immutable local releases with an atomic current-version switch. That path requires a clean commit reachable from owner `main` and a validation report bound to the exact commit.
 
+For an explicitly requested local development install, the existing installer
+API also supports an audited source override. The manifest records that the
+commit is not yet on owner main; the exact-commit validation report remains
+required. This does not publish, tag, or merge the source.
+
 It is a release-maintainer workflow, not the everyday installation path. See [Updates and rollback](../operator-guide.md#updates-and-rollback) for the commands and release safeguards.
 
 Rollback is allowed only when the selected installed release supports the current database schema. Runtime data is never automatically rolled back or deleted.
 
 ## News Wire release history
+
+### 0.5.2 - Telegram alerts for newly fetched items
+
+- Sends each newly fetched relevant item even when its original publication date
+  is unavailable, unreliable, or old. Pending retries no longer expire by age.
+- Shows fetch time separately and marks unverified original publication dates.
+- Preserves activation boundaries, duplicate protection, delivery history, and schema 10.
+
+### 0.5.1 - Reliable Telegram publication dates
+
+- Skips discovery-only social or aggregator items when their dates do not
+  establish the original article publication time.
+- Keeps the existing activation cursor, delivery history, and schema 10.
+
+### 0.5.0 - Local Telegram alerts
+
+- Sends informational alerts to one paired private group using the existing
+  relevance filter and a strict 24-hour source-publication cutoff.
+- Keeps credentials in macOS Keychain and queue processing in a separate local
+  LaunchAgent. No hosted dashboard or paid AI service is required.
+- Uses independent activation and delivery state, without replaying historical
+  articles when enabled or re-enabled.
+- Requires schema 10. Older schema-9 releases cannot run against the upgraded
+  database; disabling Telegram does not downgrade the database.
 
 ### 0.4.3 - Security advisory recognition
 
@@ -200,4 +224,4 @@ Rollback is allowed only when the selected installed release supports the curren
 - Automatic notification activation.
 - Automatic publication.
 
-Inherited Last30Days release history remains preserved in the repository changelog for attribution. The News Wire application follows its separate 0.3.x line.
+Inherited Last30Days release history remains preserved in the repository changelog for attribution. The News Wire application follows its separate 0.x release line.

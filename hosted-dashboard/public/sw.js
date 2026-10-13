@@ -4,7 +4,7 @@ const PUSH_SCHEMA_VERSION = 1;
 const PAYLOAD_CACHE = "news-wire-push-payload-v1";
 const PAYLOAD_PATH = "/__push_payload__/";
 const ARTICLE_ACTIONS = [
-  { action: "start_research", title: "Start working" },
+  { action: "start_research", title: "Open news inbox" },
   { action: "dismiss", title: "Dismiss" },
 ];
 const ALLOWED_KINDS = new Set(["article_alert", "research_result", "canary"]);
@@ -155,7 +155,11 @@ self.addEventListener("notificationclick", (event) => {
     event.waitUntil(openOrFocus("/dashboard"));
     return;
   }
-  if (event.action !== "start_research" && event.action !== "dismiss") {
+  if (event.action === "start_research") {
+    event.waitUntil(openOrFocus("/dashboard/inbox"));
+    return;
+  }
+  if (event.action !== "dismiss") {
     event.waitUntil(openOrFocus(cardPath));
     return;
   }

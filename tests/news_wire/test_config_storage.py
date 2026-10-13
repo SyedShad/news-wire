@@ -5,6 +5,7 @@ import sqlite3
 import stat
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -559,17 +560,21 @@ def test_v7_migration_versions_revisions_disables_assistance_and_repairs_only_ex
     assert json.loads(action["source_signatures_json"]) == exact_payload["source_signatures"]
 
 
-def test_storage_pressure_levels_can_be_forced(tmp_path: Path) -> None:
+def test_storage_pressure_levels_can_be_forced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
     database.initialize()
-    free = database.storage_pressure().free_bytes
+    free = 1_000_000
+    monkeypatch.setattr(
+        "open_source_ai_news_wire.storage.shutil.disk_usage",
+        lambda _path: SimpleNamespace(free=free),
+    )
 
     assert database.storage_pressure(warning_bytes=free + 2, critical_bytes=free + 1).level == "critical"
     assert database.storage_pressure(warning_bytes=free + 1, critical_bytes=0).level == "warning"
     assert database.storage_pressure(warning_bytes=0, critical_bytes=0).level == "normal"
 
 
-def test_initialize_repairs_orphaned_evidence_without_deleting_history(tmp_path: Path) -> None:
+def test_initialize_preserves_legacy_evidence_without_restarting_editorial_work(tmp_path: Path) -> None:
     database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
     database.initialize()
     now = "2026-07-23T16:00:00Z"
@@ -622,11 +627,7 @@ def test_initialize_repairs_orphaned_evidence_without_deleting_history(tmp_path:
         "SELECT status, error_class, confirmation_reason FROM evidence_source WHERE id = ?",
         (orphan_id,),
     )
-    assert repaired == {
-        "status": "excluded",
-        "error_class": "superseded_duplicate",
-        "confirmation_reason": f"Superseded by preserved evidence proposal {fetched_id}.",
-    }
+    assert repaired == {"status": "queued", "error_class": None, "confirmation_reason": ""}
     assert database.one(
         "SELECT status FROM evidence_source WHERE id = ?", (fetched_id,)
     ) == {"status": "fetched"}
@@ -636,6 +637,4 @@ def test_initialize_repairs_orphaned_evidence_without_deleting_history(tmp_path:
     diagnostic = database.one(
         "SELECT detail_json FROM diagnostic_event WHERE event_type = 'orphaned_evidence_repair'"
     )
-    assert json.loads(diagnostic["detail_json"])["superseded"] == [
-        {"evidence_source_id": orphan_id, "superseded_by": fetched_id}
-    ]
+    assert diagnostic is None

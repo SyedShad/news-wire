@@ -81,6 +81,16 @@
 
   <aside class="story-rail">
     <section class="panel"><p class="section-index">Status</p><dl class="detail-list"><div><dt>Trust</dt><dd>{{ story.trust_label }}</dd></div><div><dt>Research</dt><dd>{{ story.research_status|replace('_',' ') }}</dd></div><div><dt>Priority floor</dt><dd>{{ 'Applied' if story.priority_floor_applied else 'Pending research' }}</dd></div><div><dt>Publishing</dt><dd>Manual only</dd></div></dl></section>
+    {% if story.content_allowed %}
+    <form class="panel" action="{{ url_for('prepare_story_image', story_id=story.id) }}" method="post">
+      <h2>Editorial image</h2><p>Prepare a layout and illustration brief for review. Image generation requires separate approval and a configured provider.</p>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Image headline<input name="headline" value="{{ story.headline }}" maxlength="160" required></label>
+      <label>Category<input name="category" value="AI NEWS" maxlength="40" required></label>
+      <label>Your branding<input name="branding" value="SENTIENT" maxlength="60" required></label>
+      <button class="button button-secondary">Prepare image brief</button>
+    </form>
+    {% endif %}
     <section class="panel"><p class="section-index">Content history</p><div class="version-list">{% for draft in story.drafts %}<a href="{{ url_for('draft_detail', draft_id=draft.id) }}"><span>v{{ draft.version }} · {{ draft.status }}</span><small>{{ draft.updated_at|wire_time }}</small></a>{% else %}<p>No content yet.</p>{% endfor %}</div></section>
     {% if story.content_allowed %}<form class="panel" action="{{ url_for('review_story', story_id=story.id) }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label>Audit note<textarea name="reason" rows="2"></textarea></label><div class="header-actions"><button class="button button-secondary" name="action" value="archive">Archive</button><button class="button button-secondary" name="action" value="withdraw">Withdraw</button></div></form>{% endif %}
   </aside>

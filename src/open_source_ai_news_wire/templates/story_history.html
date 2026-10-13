@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}{{ story.headline }} · History{% endblock %}
+{% block content %}
+<header class="page-header"><div><p class="kicker">Saved history</p><h1>{{ story.headline }}</h1><p class="lede">{{ story.summary }}</p></div><a class="button button-secondary" href="{{ url_for('inbox') }}">News inbox</a></header>
+<section class="panel"><h2>Source links</h2>{% for source in story.sources %}<p><a href="{{ source.url|safe_external_url }}" rel="noopener noreferrer" target="_blank">{{ source.title }}</a> · {{ source.source_name }}</p>{% endfor %}</section>
+<section class="panel"><h2>Previous content</h2>{% for draft in story.drafts %}<p><a href="{{ url_for('draft_detail', draft_id=draft.id) }}">Version {{ draft.version }} · {{ draft.updated_at|wire_time }}</a></p>{% else %}<p>No saved drafts.</p>{% endfor %}</section>
+{% endblock %}

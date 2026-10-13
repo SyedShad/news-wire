@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack, nullcontext
+import getpass
 import json
+import secrets
 import sys
+import time
+import warnings
 from dataclasses import asdict
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -129,6 +134,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("check-isolation", "enable", "disable", "run-pending", "status"),
     )
 
+    generation = subparsers.add_parser("generation", help="Manage local Sign in with ChatGPT and article generation")
+    generation.add_argument("action", choices=("login", "status", "logout", "catalog", "run-pending"))
+
     pilot = subparsers.add_parser("pilot", help="Manage shadow and notification activation gates")
     pilot.add_argument(
         "action",
@@ -139,13 +147,327 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pilot.add_argument("--confirm-reviewed", action="store_true")
     pilot.add_argument("--auto-activate", action="store_true")
+
+    telegram = subparsers.add_parser(
+        "telegram", help="Manage private-group Telegram relevance alerts"
+    )
+    telegram.add_argument(
+        "action",
+        choices=("pair", "send-test", "enable", "disable", "status", "dispatch", "unpair"),
+    )
+    telegram.add_argument("--launcher", help="Stable launcher path used by the Telegram LaunchAgent")
+    telegram.add_argument("--pair-timeout", type=int, default=120, help=argparse.SUPPRESS)
+    telegram.add_argument("--max-seconds", type=int, default=50, help=argparse.SUPPRESS)
+    telegram.add_argument("--confirm", action="store_true", help=argparse.SUPPRESS)
+    telegram.add_argument("--confirm-received", action="store_true", help=argparse.SUPPRESS)
     return parser
+
+
+def _telegram_components(
+    data_root: str | None,
+    launcher: str | None = None,
+    with_keychain: bool = True,
+):
+    """Lazy-load Telegram-only modules so existing commands stay independent."""
+    from .telegram import TelegramClient, TelegramDispatcher, TelegramService
+    from .telegram_scheduler import TelegramLaunchAgent
+
+    database = _database(data_root)
+    keychain = _telegram_keychain(database) if with_keychain else None
+    scheduler = TelegramLaunchAgent(
+        database,
+        launcher=Path(launcher).expanduser() if launcher else None,
+    )
+    return database, keychain, scheduler, TelegramClient, TelegramDispatcher, TelegramService
+
+
+def _telegram_keychain(database):
+    from .telegram_keychain import TelegramKeychain
+
+    return TelegramKeychain(database.paths.root)
+
+
+def _telegram_setup_lock(scheduler):
+    factory = getattr(scheduler, "setup_lock", None)
+    return factory() if callable(factory) else nullcontext()
+
+
+def _telegram_error(error: Exception, token: str = "") -> str:
+    message = str(error).strip() or type(error).__name__
+    if token:
+        message = message.replace(token, "[redacted]")
+    return message[:500]
+
+
+def _telegram_pair_updates(client, *, username: str, nonce: str, timeout_seconds: int) -> dict[str, object]:
+    command = f"/newswire_pair@{username} {nonce}"
+    deadline = time.monotonic() + max(1, min(600, timeout_seconds))
+    offset: int | None = None
+    while time.monotonic() < deadline:
+        payload: dict[str, object] = {"allowed_updates": ["message"], "limit": 100, "timeout": 5}
+        if offset is not None:
+            payload["offset"] = offset
+        updates = client.call("getUpdates", payload, timeout=8)
+        if not isinstance(updates, list):
+            raise RuntimeError("Telegram returned an invalid pairing update list")
+        for update in updates:
+            if not isinstance(update, dict):
+                continue
+            update_id = update.get("update_id")
+            message = update.get("message")
+            if isinstance(update_id, int):
+                offset = max(offset or update_id, update_id + 1)
+            if not isinstance(message, dict) or str(message.get("text") or "").strip() != command:
+                continue
+            chat = message.get("chat")
+            if not isinstance(chat, dict):
+                continue
+            return {"update": update, "chat": chat, "message": message}
+        time.sleep(0.05)
+    raise RuntimeError("Pairing command was not received before the timeout")
+
+
+def _telegram_confirm_target(chat: dict[str, object], *, confirm: bool) -> bool:
+    title = str(chat.get("title") or "(untitled group)")
+    chat_type = str(chat.get("type") or "unknown")
+    print(f"Telegram pairing target: {title} ({chat_type})")
+    if confirm:
+        return True
+    try:
+        answer = input("Pair this private team group? [y/N] ")
+    except EOFError:
+        return False
+    return answer.strip().lower() in {"y", "yes"}
+
+
+def _telegram_main(arguments, parser: argparse.ArgumentParser, data_root: str | None) -> int:
+    action = arguments.action
+    token = ""
+    lifecycle = ExitStack()
+    try:
+        database, keychain, scheduler, TelegramClient, TelegramDispatcher, TelegramService = _telegram_components(
+            data_root, arguments.launcher, action not in {"status", "disable", "unpair"}
+        )
+        service = TelegramService(database)
+        if action in {"pair", "send-test", "enable", "disable", "unpair"}:
+            lifecycle.enter_context(_telegram_setup_lock(scheduler))
+        if action == "pair":
+            # Invalidate the old test before any credential write. A cancelled
+            # or interrupted re-pair must not authorize the replaced token.
+            service.disable(require_test=True)
+            scheduler.disable()
+            if not sys.stdin.isatty() or not sys.stdout.isatty():
+                raise RuntimeError("Telegram pairing requires an interactive terminal for hidden token input")
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error", getpass.GetPassWarning)
+                    token = getpass.getpass("Telegram bot token: ").strip()
+            except getpass.GetPassWarning as error:
+                raise RuntimeError("Telegram pairing refused an echoed token prompt") from error
+            if not token:
+                raise ValueError("Telegram bot token is required")
+            client = TelegramClient(token)
+            bot = client.call("getMe", {}, timeout=10)
+            if not isinstance(bot, dict) or not bot.get("id") or not bot.get("username"):
+                raise RuntimeError("Telegram did not return a usable bot identity")
+            if bool(bot.get("can_read_all_group_messages")):
+                raise RuntimeError("Telegram privacy mode is disabled; enable it before pairing")
+            webhook = client.call("getWebhookInfo", {}, timeout=10)
+            if isinstance(webhook, dict) and str(webhook.get("url") or ""):
+                raise RuntimeError("Telegram bot already has a webhook; remove it before pairing")
+            username = str(bot["username"])
+            nonce = secrets.token_urlsafe(12)
+            print(f"Add @{username} as a normal member of the private team group, then send:")
+            print(f"/newswire_pair@{username} {nonce}")
+            matched = _telegram_pair_updates(
+                client, username=username, nonce=nonce, timeout_seconds=arguments.pair_timeout
+            )
+            update = matched["update"]
+            chat = matched["chat"]
+            if not isinstance(chat, dict):
+                raise RuntimeError("Telegram pairing update did not contain a group")
+            chat_type = str(chat.get("type") or "")
+            if chat_type not in {"group", "supergroup"}:
+                raise RuntimeError("Telegram pairing requires a group or supergroup")
+            if str(chat.get("username") or ""):
+                raise RuntimeError("Telegram pairing requires a private group without a public username")
+            chat_id = chat.get("id")
+            if isinstance(chat_id, bool) or not isinstance(chat_id, (int, str)) or not str(chat_id):
+                raise RuntimeError("Telegram pairing update did not contain a valid chat ID")
+            details = client.call("getChat", {"chat_id": chat_id}, timeout=10)
+            if not isinstance(details, dict):
+                raise RuntimeError("Telegram returned invalid group details")
+            if str(details.get("id")) != str(chat_id):
+                raise RuntimeError("Telegram group details did not match the pairing update")
+            if str(details.get("type") or "") not in {"group", "supergroup"} or str(details.get("username") or ""):
+                raise RuntimeError("Telegram group is not private")
+            member = client.call(
+                "getChatMember", {"chat_id": chat_id, "user_id": int(bot["id"])}, timeout=10
+            )
+            if not isinstance(member, dict) or str(member.get("status") or "") != "member":
+                raise RuntimeError("Telegram bot must remain a normal group member with send rights")
+            target = {"id": chat_id, "title": details.get("title") or chat.get("title") or "", "type": details.get("type")}
+            if not _telegram_confirm_target(target, confirm=arguments.confirm):
+                print(json.dumps({"status": "cancelled"}, indent=2))
+                return 2
+            keychain.store_token(token)
+            service.pair(
+                chat_id=str(chat_id),
+                title=str(target["title"]),
+                bot_id=int(bot["id"]),
+                bot_username=username,
+            )
+            update_id = update.get("update_id") if isinstance(update, dict) else None
+            if isinstance(update_id, int):
+                try:
+                    client.call(
+                        "getUpdates",
+                        {"offset": update_id + 1, "limit": 100, "timeout": 0},
+                        timeout=8,
+                    )
+                except Exception:
+                    # Pairing state is already durable; leaving an old update queued
+                    # is safer than turning a successful pair into a failure.
+                    pass
+            print(json.dumps({"status": "paired", "title": target["title"], "type": target["type"]}, indent=2))
+            return 0
+
+        if action == "send-test":
+            token = keychain.get_token() or ""
+            if not token:
+                raise RuntimeError("Telegram bot token is not available in Keychain")
+            state = service.status()
+            if not state.get("paired") or not state.get("chat_id"):
+                raise RuntimeError("Pair a private Telegram group first")
+            client = TelegramClient(token)
+            bot = client.call("getMe", {}, timeout=10)
+            if not isinstance(bot, dict) or str(bot.get("id")) != str(state.get("bot_id")):
+                raise RuntimeError("Telegram bot identity does not match the paired bot")
+            result = client.call(
+                "sendMessage",
+                {
+                    "chat_id": state["chat_id"],
+                    "text": "Open Source AI News Wire pairing test. Please confirm receipt in the private team group.",
+                    "disable_web_page_preview": True,
+                },
+                timeout=10,
+            )
+            if not isinstance(result, dict) or not result.get("message_id"):
+                raise RuntimeError("Telegram test message was not acknowledged")
+            service.mark_tested()
+            print(json.dumps({"status": "test_sent", "message_id": result["message_id"]}, indent=2))
+            return 0
+
+        if action == "enable":
+            state = service.status()
+            if not state.get("paired"):
+                raise RuntimeError("Pair a private Telegram group first")
+            if not state.get("test_passed"):
+                raise RuntimeError("Run telegram send-test and confirm receipt before enabling alerts")
+            if not arguments.confirm_received:
+                try:
+                    answer = input("Did the Telegram test message arrive in the group? [y/N] ")
+                except EOFError:
+                    answer = ""
+                if answer.strip().lower() not in {"y", "yes"}:
+                    print(json.dumps({"status": "confirmation_required"}, indent=2))
+                    return 2
+            scheduler.enable()
+            result = service.enable()
+            print(json.dumps(result, indent=2))
+            return 0
+
+        if action == "disable":
+            scheduler.disable()
+            result = service.disable()
+            print(json.dumps(result, indent=2))
+            return 0
+
+        if action == "status":
+            result = dict(service.status())
+            scheduler_status = scheduler.status()
+            result["scheduler"] = {
+                "installed": scheduler_status.installed,
+                "loaded": scheduler_status.loaded,
+                "state": scheduler_status.state,
+                "plist_path": str(scheduler_status.plist_path),
+            }
+            print(json.dumps(result, indent=2))
+            return 0
+
+        if action == "dispatch":
+            if arguments.max_seconds != 50:
+                raise ValueError("Telegram dispatch is fixed to a 50-second deadline")
+            dispatcher = TelegramDispatcher(
+                database,
+                token_provider=keychain.get_token,
+                client_factory=TelegramClient,
+            )
+            print(json.dumps(dispatcher.dispatch(), indent=2))
+            return 0
+
+        if action == "unpair":
+            scheduler_error = None
+            try:
+                scheduler.uninstall()
+            except Exception as error:
+                scheduler_error = _telegram_error(error)
+            result = service.unpair()
+            result = dict(result)
+            result["status"] = "unpaired"
+            keychain_error = None
+            try:
+                _telegram_keychain(database).delete_token()
+            except Exception as error:
+                keychain_error = _telegram_error(error)
+            if scheduler_error:
+                result["scheduler_error"] = scheduler_error
+            if keychain_error:
+                result["keychain_error"] = "keychain_deletion_failed"
+                print(json.dumps(result, indent=2))
+                return 2
+            print(json.dumps(result, indent=2))
+            return 2 if scheduler_error else 0
+    except Exception as error:
+        print(json.dumps({"status": "blocked", "reason": _telegram_error(error, token)}, indent=2))
+        return 2
+    finally:
+        lifecycle.close()
+    parser.error(f"unsupported telegram action: {action}")
+    return 2
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     arguments = parser.parse_args(argv)
     data_root = arguments.data_root
+
+    if arguments.command == "generation":
+        from .chatgpt_plan import ChatGPTPlanAuth, ChatGPTPlanError
+        from .generation import GenerationService
+        # Connecting an account is independent of application migrations. Users
+        # can authorize the new runner before upgrading an existing runtime DB.
+        auth = ChatGPTPlanAuth(resolve_runtime_paths(data_root).config)
+        try:
+            if arguments.action == "login":
+                print("Complete Continue with ChatGPT in the browser opened on this Mac.", flush=True)
+                result = auth.login()
+            elif arguments.action == "logout":
+                result = auth.logout()
+            elif arguments.action == "status":
+                result = auth.status()
+            elif arguments.action == "catalog":
+                service = GenerationService(_database(data_root), auth=auth)
+                service._refresh_catalog()
+                result = service.catalog()
+            else:
+                service = GenerationService(_database(data_root), auth=auth)
+                result = {"processed": service.run_pending()}
+            print(json.dumps(result, indent=2))
+            return 0
+        except ChatGPTPlanError as error:
+            print(str(error), file=sys.stderr)
+            return 2
 
     if arguments.command == "init":
         database = _database(data_root)
@@ -474,6 +796,9 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(json.dumps(asdict(status), indent=2))
         return 0
+
+    if arguments.command == "telegram":
+        return _telegram_main(arguments, parser, data_root)
 
 
 if __name__ == "__main__":

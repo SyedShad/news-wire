@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}{{ article.title }} · News Wire{% endblock %}
+{% block content %}
+<header class="page-header"><div><p class="kicker">{{ article.publisher }} · Fetched</p><h1>{{ article.title }}</h1><p class="lede">{{ article.summary }}</p><div class="story-meta"><span>Fetched {{ article.first_fetched_at|wire_time('full') }}</span><span>Published {{ article.published_at|wire_time('full') if article.published_at else 'Unknown' }}</span></div></div><a class="button button-secondary" href="{{ article.canonical_url|safe_external_url }}" target="_blank" rel="noopener noreferrer">Visit source ↗</a></header>
+<div data-generation-workspace data-article-id="{{ article.id }}" data-jobs-url="{{ url_for('generation_jobs', article_id=article.id) }}" data-catalog-url="{{ url_for('generation_catalog') }}">
+  <p class="owner-warning" data-catalog-error>{{ catalog.error or '' }}</p>
+  {% if not catalog.ready %}<p class="owner-warning">Sign in with ChatGPT on the Mac to enable generation. Run <code>open-source-ai-news-wire generation login</code> on the Mac.</p>{% endif %}
+  <button type="button" class="button button-small" data-refresh-catalog>Refresh models and skills</button>
+  <div class="generation-grid">
+  {% for task, title in [('text', 'Generate content'), ('graphics', 'Generate graphics')] %}
+    <section class="panel generation-task"><h2>{{ title }}</h2>
+    <form action="{{ url_for('generate_article', article_id=article.id) }}" method="post" data-generation-form data-task="{{ task }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="task_type" value="{{ task }}"><input type="hidden" name="request_id" data-request-id><input type="hidden" name="skill_ids" value="[]" data-skill-ids>
+      <label>ChatGPT model<select name="model" required data-model-select><option value="">Loading models…</option></select></label>
+      <label>Add a skill<select data-skill-select><option value="">Loading skills…</option></select></label><button type="button" class="button button-small" data-add-skill>Add skill</button>
+      <ol class="selected-skills" data-selected-skills aria-label="Selected skills in application order"></ol>
+      <p class="muted">Skills are applied in the order shown.</p>
+      <label>Customizations <span>optional</span><textarea name="customizations" rows="4" maxlength="12000" placeholder="Paste a draft or add directions for this task."></textarea></label>
+      <button class="button button-primary" type="submit" data-generate-button{% if not catalog.ready %} disabled{% endif %}>{{ title }}</button>
+    </form>
+    <div class="generation-history">
+    {% for job in jobs if job.task_type == task %}
+      <article class="generation-result" data-job-id="{{ job.id }}" data-job-status="{{ job.status }}"><div class="panel-heading"><strong>{{ job.status|replace('_',' ')|title }}</strong><small>{{ job.created_at|wire_time }} · {{ job.model }}</small></div>
+      {% if job.error %}<p class="owner-warning">{{ job.error }}</p>{% endif %}
+      {% if job.status == 'needs_input' %}<form action="{{ url_for('generation_action', job_id=job.id, action='input') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {% for question in job.question.questions or [] %}<label>{{ question.question }}{% if question.options %}<select name="answer_{{ question.id }}" required><option value="">Choose an answer</option>{% for option in question.options %}<option value="{{ option.label }}">{{ option.label }}</option>{% endfor %}</select>{% else %}<textarea name="answer_{{ question.id }}" required rows="3"></textarea>{% endif %}</label>{% else %}<label>{{ job.question.message or 'Additional input required' }}<textarea name="answers" required rows="3" placeholder='{"field": "answer"}'></textarea></label>{% endfor %}<button class="button button-secondary">Send answer</button></form>{% endif %}
+      {% if job.output_text %}{% if task == 'text' %}<form action="{{ url_for('generation_action', job_id=job.id, action='save') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label>Content<textarea name="text" rows="12" data-output-text>{{ job.output_text }}</textarea></label><div class="button-row"><button class="button button-small">Save revision</button><button type="button" class="button button-small" data-copy-output>Copy</button><a class="button button-small" href="{{ url_for('generation_text', job_id=job.id) }}">Download text</a></div></form>{% else %}<pre class="artifact-description">{{ job.output_text }}</pre>{% endif %}{% endif %}
+      {% for artifact in job.artifacts %}<div class="generation-artifact">{% if artifact.mime_type in ['image/png','image/jpeg','image/webp','image/gif'] %}<img src="{{ url_for('generation_artifact', job_id=job.id, artifact_id=artifact.id) }}" alt="{{ artifact.name }}" loading="lazy">{% endif %}<a href="{{ url_for('generation_artifact', job_id=job.id, artifact_id=artifact.id, download=1) }}">Download {{ artifact.name }}</a></div>{% endfor %}
+      {% if job.status in ['queued','running','needs_input'] %}<form action="{{ url_for('generation_action', job_id=job.id, action='cancel') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button button-small">Cancel</button></form>{% elif job.status in ['failed','cancelled','interrupted'] %}<form action="{{ url_for('generation_action', job_id=job.id, action='retry') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button button-small">Retry</button></form>{% endif %}
+      </article>
+    {% else %}<p class="muted">No outputs yet.</p>{% endfor %}
+    </div></section>
+  {% endfor %}
+  </div>
+</div>
+{% if article.legacy_drafts or article.drafts %}<section class="panel"><h2>Previous content</h2>{% for draft in article.legacy_drafts or article.drafts %}<a href="{{ url_for('draft_detail', draft_id=draft.id) }}">Version {{ draft.version }}</a>{% endfor %}</section>{% endif %}
+{% endblock %}

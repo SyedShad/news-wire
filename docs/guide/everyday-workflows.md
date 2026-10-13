@@ -1,86 +1,47 @@
 # Everyday workflows
 
-## Start a session
+## Browse fetched articles
+
+Open **News inbox**. Every relevant fetched article appears separately, newest fetched first. Search headlines, publishers, and excerpts or filter the coverage lane. Old and unknown publication dates remain visible. Repeat fetches update the existing article without changing its first-fetched order.
+
+Use **Visit source** to read the original page. There are no trust scores, priority floors, machine approvals, or editorial review queues.
+
+## Generate text or graphics
+
+Open an article and choose **Generate content** or **Generate graphics**. Each task has its own model, ordered skills, and optional customization field. Paste a draft, specify an angle, or give design directions as needed. Select at least one skill, then press Generate; no separate approval is required.
+
+The selected skills control their research and output workflow. Graphics do not require a text draft first. The selected model runs the workflow; a local renderer may create the actual image files.
+
+Progress appears as queued, running, needs input, completed, failed, or cancelled. Answer a skill's questions within its task. Retry creates a new attempt while preserving earlier outputs. Edit text and save a revision, copy it, or download it. Preview graphics and download the artifacts.
+
+Final publication remains manual. Generating does not authorize publishing, messaging, or unrelated account changes.
+
+## Connect your ChatGPT plan
+
+Run locally:
 
 ```bash
-uv run open-source-ai-news-wire dashboard
+uv sync --extra dev
+uv run open-source-ai-news-wire migrate
+uv run open-source-ai-news-wire generation login
+uv run open-source-ai-news-wire generation status
 ```
 
-Open **News inbox**. Use review priority for the most time-sensitive items, newest-first for chronology, Older Context for historical material, and All History for audit work. Filter by lane or state when useful.
+Complete the first-party browser sign-in and authorize ChatGPT plan usage. Credentials remain on this Mac. The application does not fall back to paid API credentials. Runtime skill and model catalogs refresh independently of article collection.
 
-## Understand a story
+Some skills require unavailable capabilities. ChatGPT-plan integration currently does not support native image-generation or hosted connector tools; the photo-based OpenAGI graphics renderer runs locally. An unavailable model, tool, dependency, or account limit appears as a generation failure and never hides the fetched article.
 
-The story page shows the timeline, organic and review scores, source trust state, research status and history, claims, sources, provenance, and decision history.
+## Operational notices
 
-- **Trusted source** means the configured publisher was reviewed as first-party, governmental, original research, or vetted reporting.
-- **Researching** means the automatic 30-second source search is active.
-- **Research complete** means the attempt reached a terminal state; partial or unavailable results remain visible.
-- **Verify this yourself** is an editorial dashboard warning for a research-required detection. It is never copied into a Reddit draft or export.
+Open **Operational Review** for source-health, catch-up, recovery, and source-update notices. Its badge counts unread operational notices only. Marking these read does not acknowledge article alerts. Source updates preserve existing outputs and manual edits.
 
-No qualification action is required. Trusted stories receive the Urgent score floor immediately; research-required stories receive it after their automatic attempt ends.
-
-## Create content
-
-Select **Create content** on any active story.
-
-The application immediately creates and opens an editable source-bound shell. It also records a new `draft_refresh` attempt, even if background research already ran. The fresh search looks for up to three current independent sources and adds only relevant, public, safely fetched HTTPS pages.
-
-Search and writing are separate. A timeout, unsafe result, duplicate publisher, account limit, or no-result outcome stays visible but never removes the shell. Only a repeated click while the same content request is active is prevented.
-
-## Edit the Reddit draft
-
-Review these fields:
-
-1. **Title:** concise and factual.
-2. **Body:** value first, casual but accurate, and supported by attached sources.
-3. **Suggested flair:** use it only if it fits the eventual community.
-4. **Reminder:** keep the exact `Verify rules before posting`.
-5. **Sources:** confirm each natural Markdown link supports the nearby statement.
-6. **Engagement:** end with a genuine open-ended question.
-
-The application does not assume a subreddit. Edit the shell or generated version as needed and save a new version. Use Copy, Markdown export, or HTML export only after checking the story and destination rules.
-
-Final publication happens manually outside the application.
-
-## Handle a changed story
-
-A genuine claim change records a material update and may require the current content to be revised. Return to the story, inspect its updated sources and research history, then select **Create content** again after prior active work is complete. Every request receives a distinct fresh-search attempt and uses the latest story revision before writing.
-
-Earlier drafts, sources, research attempts, corrections, and decisions stay in history.
-
-## Archive or withdraw
-
-Use Archive for material you want removed from active work but preserved in history. Use Withdraw when the story should no longer be treated as publishable. These are the only editorial state controls that intentionally make **Create content** unavailable.
-
-## Check source health
-
-```bash
-uv run open-source-ai-news-wire sources health
-uv run open-source-ai-news-wire sources disable SOURCE_ID
-uv run open-source-ai-news-wire sources enable SOURCE_ID
-```
-
-Distinguish an individual degraded endpoint, a locally disabled source, a remote rate limit, and a whole-Mac outage. Existing stories and provenance remain stored when a source is disabled.
-
-## Run now, pause, resume, or catch up
+## Scheduling and recovery
 
 ```bash
 uv run open-source-ai-news-wire schedule run-now
 uv run open-source-ai-news-wire schedule pause
 uv run open-source-ai-news-wire schedule resume
 uv run open-source-ai-news-wire schedule status
-uv run open-source-ai-news-wire catch-up --start 2026-07-01 --end 2026-07-07
 ```
 
-Overlapping scans coalesce. Pause stops future scheduled triggers; resume restores the `:00` and `:30` cadence. Catch-up preserves original publication time and uses the same trust and coverage rules.
-
-## If assistance is unavailable
-
-The editable shell remains usable. Check the visible condition with:
-
-```bash
-uv run open-source-ai-news-wire assistance status
-uv run open-source-ai-news-wire assistance check-isolation
-```
-
-Do not bypass isolation, public-network, or account checks. You can finish the shell manually from stored safe sources, or restore assistance and let durable work recover. The local background allowance is informational and does not block automatic research.
+Collection and generation require the Mac awake and connected. The hosted dashboard shows synchronized data when the Mac is offline; operational commands wait for a current connection. Existing informational article-alert delivery remains independent.

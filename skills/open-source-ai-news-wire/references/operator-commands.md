@@ -64,6 +64,26 @@ The dashboard shows Ready, Researching, and Content-ready work. `Newest first` c
 
 There are no qualification, approval, evidence, research, importance, lens, or manual-override controls. Only duplicate active content work and inactive archived or withdrawn stories are blocked. Trust and verification warnings remain in the dashboard and never enter content exports.
 
+## Private Telegram alerts
+
+Telegram is an optional local notification lane for one paired private team
+group. Use the setup and safety rules in [telegram-alerts.md](telegram-alerts.md).
+
+```bash
+open-source-ai-news-wire telegram pair
+open-source-ai-news-wire telegram send-test
+open-source-ai-news-wire telegram enable
+open-source-ai-news-wire telegram status
+open-source-ai-news-wire telegram dispatch
+open-source-ai-news-wire telegram disable
+open-source-ai-news-wire telegram unpair
+```
+
+Pairing and `send-test` are required before enabling delivery. The token stays
+in the native macOS Keychain. `enable` and resume do not backfill older events.
+The sender only delivers eligible recent source events to the paired private
+group and has no hosted-dashboard control path.
+
 ## Data deletion
 
 ```bash
