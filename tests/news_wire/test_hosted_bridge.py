@@ -9,6 +9,7 @@ import httpx
 
 from open_source_ai_news_wire.config import resolve_runtime_paths
 from open_source_ai_news_wire.demo import seed_demo_data
+from open_source_ai_news_wire.generation import GenerationService
 from open_source_ai_news_wire.hosted_bridge import (
     BRIDGE_VERSION,
     HostedBridge,
@@ -85,6 +86,63 @@ def test_signed_client_covers_method_path_timestamp_nonce_and_body(tmp_path: Pat
         client=httpx.Client(transport=transport),
     )
     assert client.request("PUT", "/api/bridge/snapshot", {"value": 1})["ok"] is True
+
+
+def test_maximum_unicode_revision_syncs_in_bounded_signed_utf8_body(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    article_id = service.list_articles()["articles"][0]["id"]
+    service.database.execute(
+        """INSERT INTO generation_job(id,article_id,task_type,model,request_id,
+           source_snapshot_json,status,output_text,created_at,updated_at)
+           VALUES('unicode-original',?,'text','test-model','unicode-request','{}',
+                  'completed','Original version','2026-10-13','2026-10-13')""",
+        (article_id,),
+    )
+    text = "\U0001f680" * 200000
+    revision = GenerationService(service.database).save_text("unicode-original", text)
+    resources, resource_digest = build_resource_projection(service)
+    # Content manifest hashes retain their existing canonical serialization.
+    assert resource_digest == hashlib.sha256(
+        json.dumps(resources, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    secret = "test-bridge-secret-with-at-least-thirty-two-characters"
+    received_jobs = {}
+    resource_body_sizes = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content
+        canonical = "\n".join((
+            "v1", request.headers["x-news-wire-timestamp"],
+            request.headers["x-news-wire-nonce"], request.method,
+            request.url.path, hashlib.sha256(body).hexdigest(),
+        ))
+        signature = hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+        assert hmac.compare_digest(request.headers["x-news-wire-signature"], signature)
+        if request.method == "GET":
+            return httpx.Response(200, json={"ok": True, "commands": [], "read_requests": []})
+        payload = json.loads(body)
+        if payload.get("kind") == "resources":
+            resource_body_sizes.append(len(body))
+            assert len(body) < 1_450_000
+            for resource in payload["resources"]:
+                if resource["resource_type"] == "generation_job":
+                    received_jobs[resource["resource_id"]] = resource["payload"]["output_text"]
+                    if resource["resource_id"] == revision["id"]:
+                        assert text.encode("utf-8") in body
+                        assert b"\\ud83d\\ude80" not in body
+        return httpx.Response(200, json={
+            "ok": True, "stories_required": True, "resources_required": True,
+        })
+
+    client = SignedHostedClient(
+        "https://dashboard.example.test", secret,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    bridge = HostedBridge(service, client, service.database.paths)
+    bridge.sync_once()
+    assert received_jobs[revision["id"]] == text
+    assert received_jobs["unicode-original"] == "Original version"
+    assert resource_body_sizes
 
 
 class _FakeHostedClient:

@@ -714,6 +714,19 @@ export async function listGenerationJobs(db: D1Database, articleId: string): Pro
   }).sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
 }
 
+export async function listStoryArticles(db: D1Database, storyId: string): Promise<Array<Record<string, JsonValue>>> {
+  await ensureDashboardSchema(db);
+  const rows = await db.prepare(`SELECT resource_id, payload_json FROM resource_projection
+    WHERE resource_type = 'article_detail' AND json_extract(payload_json, '$.story_id') = ?
+    ORDER BY rank, resource_id`).bind(storyId).all<{ resource_id: string; payload_json: string }>();
+  return (rows.results || []).flatMap((row) => {
+    try {
+      const article = JSON.parse(row.payload_json) as Record<string, JsonValue>;
+      return article.story_id === storyId ? [{ ...article, id: row.resource_id }] : [];
+    } catch { return []; }
+  });
+}
+
 export async function readBridgeConnection(db: D1Database): Promise<boolean> {
   return (await readBridgeState(db)).connected;
 }

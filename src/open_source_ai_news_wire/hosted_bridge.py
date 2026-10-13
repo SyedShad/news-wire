@@ -446,7 +446,7 @@ def _projection_chunks(items: list[dict[str, Any]]) -> list[list[dict[str, Any]]
     current: list[dict[str, Any]] = []
     current_bytes = 0
     for item in items:
-        item_bytes = len(json.dumps(item, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+        item_bytes = len(json.dumps(item, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8"))
         if item_bytes > SYNC_CHUNK_TARGET_BYTES:
             raise HostedBridgeError("One redacted projection record exceeds the hosted size limit")
         if current and (len(current) >= STORY_CHUNK_SIZE or current_bytes + item_bytes > SYNC_CHUNK_TARGET_BYTES):
@@ -719,7 +719,7 @@ class SignedHostedClient:
 
     def request(self, method: str, path: str, payload: Any | None = None) -> dict[str, Any]:
         body = b"" if payload is None else json.dumps(
-            payload, separators=(",", ":"), sort_keys=True
+            payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False
         ).encode("utf-8")
         response = self.client.request(
             method,

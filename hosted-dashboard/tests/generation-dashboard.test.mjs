@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { createSession } from "../lib/auth/store.ts";
 import { artifactDisposition, assembleArtifact, MAX_ARTIFACT_BYTES, verifyArtifactDigest } from "../lib/dashboard/artifacts.ts";
-import { claimCommands, claimReadRequests, completeReadRequest, listGenerationJobs, listStoryPage, readDetail, requestDetail, saveProjectionState, saveResourceChunk, saveStoryChunk } from "../lib/dashboard/store.ts";
+import { claimCommands, claimReadRequests, completeReadRequest, listGenerationJobs, listStoryArticles, listStoryPage, readDetail, requestDetail, saveProjectionState, saveResourceChunk, saveStoryChunk } from "../lib/dashboard/store.ts";
 import { parseBridgeSync, validateOwnerCommand } from "../lib/dashboard/validation.ts";
 import { bridgeSupportsGeneration, generationCommandError, generationEnabled } from "../lib/dashboard/features.ts";
 class Statement {
@@ -143,6 +143,34 @@ test("workspace and artifact routes are owner-only and serve verified protected 
   assert.equal((await command("generation.cancel",{job_id:"job-1"})).status,202);
   environment.GENERATION_ENABLED="true";
   assert.equal((await command("generation.create",{article_id:"article-new",task_type:"text",model:"model-1",skill_ids:["skill-1"],customizations:"",request_id:"enabled-create"})).status,202);
+});
+
+test("bookmarked story routes open each matching article workspace and retain legacy drafts",async () => {
+  const db=await populatedDatabase();
+  await saveResourceChunk(db,syncId,"full",[
+    {resource_type:"story_detail",resource_id:"story-bookmarked",rank:0,payload:{id:"story-bookmarked",headline:"Saved story history",sources:[{url:"https://example.com/original",title:"Historic source"}],drafts:[{id:42,version:3,headline:"Earlier saved draft"}]}},
+    {resource_type:"article_detail",resource_id:"article-first",rank:0,payload:{id:"article-first",story_id:"story-bookmarked",headline:"First fetched article",publisher:"First publisher",canonical_url:"https://example.com/first"}},
+    {resource_type:"article_detail",resource_id:"article-second",rank:1,payload:{id:"article-second",story_id:"story-bookmarked",headline:"Second fetched article",publisher:"Second publisher",canonical_url:"http://example.com/second"}},
+    {resource_type:"article_detail",resource_id:"article-other",rank:2,payload:{id:"article-other",story_id:"story-bookmarked-other",headline:"Unrelated article"}},
+    {resource_type:"generation_job",resource_id:"job-other",rank:0,payload:{id:"job-other",story_id:"story-bookmarked"}},
+    {resource_type:"generation_catalog",resource_id:"runtime",rank:0,payload:{ready:true,models:[{id:"model-1"}],skills:[{id:"skill-1",name:"Writing"}]}},
+  ],[]);
+  assert.deepEqual((await listStoryArticles(db,"story-bookmarked")).map((article) => article.id),["article-first","article-second"]);
+  assert.deepEqual(await listStoryArticles(db,"story-bookmarked' OR 1=1 --"),[]);
+  const environment={DB:db,ASSETS:{fetch:async () => new Response("Not found",{status:404})},AUTH_BASE_URL:"http://localhost",AUTH_SECRET:"test-auth-secret-long-enough-for-tests",MASTER_PASSWORD_VERSION:"1",GENERATION_ENABLED:"true"};
+  const token=await createSession(environment,{actorId:"master",role:"master",email:null,credentialVersion:"1",lifetimeSeconds:60});
+  const fetchApp=(path,authenticated=true) => {globalThis.__CLOUDFLARE_TEST_ENV__=environment;return worker.fetch(new Request(`http://localhost${path}`,{headers:authenticated?{cookie:`osainw_session=${token}`}:{},redirect:"manual"}),environment,context);};
+  const response=await fetchApp("/dashboard/stories/story-bookmarked");assert.equal(response.status,200);
+  const html=await response.text();
+  assert.match(html,/href="\/dashboard\/articles\/article-first"/);assert.match(html,/href="\/dashboard\/articles\/article-second"/);
+  assert.equal((html.match(/>Open article workspace<\/a>/gu)||[]).length,2);
+  assert.match(html,/First fetched article/);assert.match(html,/Second fetched article/);assert.match(html,/http:\/\/example.com\/second/);
+  assert.match(html,/Historic source/);assert.match(html,/Earlier saved draft/);assert.match(html,/href="\/dashboard\/drafts\/42"/);
+  assert.doesNotMatch(html,/Unrelated article|Generation setup is pending|generation-panel/);
+  for(const id of ["article-first","article-second"]) {
+    const workspace=await fetchApp(`/dashboard/articles/${id}`);assert.equal(workspace.status,200);
+    const workspaceHtml=await workspace.text();assert.match(workspaceHtml,/Generate content/);assert.match(workspaceHtml,/Generate graphics/);
+  }
 });
 
 test("stage-one dashboard retains old bridge history without unsupported reads or inference",async () => {
