@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import sqlite3
 from pathlib import Path
 
 import httpx
@@ -53,6 +54,95 @@ def test_snapshot_contains_dashboard_surfaces_without_local_paths_or_credentials
     assert "[local path]" in encoded
     assert "password" not in encoded.lower()
     assert len(encoded.encode("utf-8")) < 1_450_000
+
+
+def test_bulk_projection_preserves_existing_resources_digest_and_order(tmp_path: Path, monkeypatch) -> None:
+    import open_source_ai_news_wire.hosted_bridge as bridge
+
+    service = _service(tmp_path)
+    database = service.database
+    original = database.one("SELECT * FROM fetched_article WHERE story_id IS NOT NULL LIMIT 1")
+    assert original
+    for identifier, story_id in (("compat-related", original["story_id"]), ("compat-unclustered", None)):
+        row = {**original, "id": identifier, "canonical_url": f"https://example.test/{identifier}", "story_id": story_id}
+        columns = list(row)
+        database.execute(f"INSERT INTO fetched_article ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+                         tuple(row[key] for key in columns))
+    draft = database.one("SELECT * FROM draft LIMIT 1")
+    assert draft
+    for version in (4, 7):
+        row = {key: value for key, value in draft.items() if key != "id"}
+        row.update(story_id=original["story_id"], version=version)
+        columns = list(row)
+        database.execute(f"INSERT INTO draft ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+                         tuple(row[key] for key in columns))
+    manager = GenerationService(database)
+    monkeypatch.setattr(manager, "catalog", lambda: {"models": [], "skills": []})
+    service.generation_service = manager
+    for job_id in ("compat-a", "compat-z"):
+        directory = manager.root / job_id
+        directory.mkdir(parents=True)
+        (directory / "proof.txt").write_text("Preserved artifact bytes")
+        artifacts = [{"id": "proof", "name": "proof.txt", "mime_type": "text/plain", "relative_path": "proof.txt"}]
+        database.execute("""INSERT INTO generation_job
+            (id,article_id,task_type,model,request_id,source_snapshot_json,status,output_text,artifacts_json,created_at,updated_at)
+            VALUES(?,?,'text','test-model',?,'{}','completed',?,?,?,?)""",
+            (job_id, original["id"], job_id, f"Output stored at {directory}/proof.txt", json.dumps(artifacts), "2026-10-13", "2026-10-13"))
+    database.execute("INSERT INTO diagnostic_event(level,event_type,message,created_at) VALUES('info','compat',?,'2026-10-13')",
+                     (f"Review file {database.paths.root}/private.txt",))
+    schedule = service.schedule_status()
+    monkeypatch.setattr(service, "schedule_status", lambda: schedule)
+    optimized, optimized_digest = build_resource_projection(service)
+
+    # The pre-optimization implementation obtained these values through the
+    # existing detail/list APIs, one article at a time. Keep that as an oracle.
+    def previous_reads(service, manager, articles):
+        return ({str(article["id"]): service.get_article(str(article["id"])) for article in articles},
+                {str(article["id"]): manager.list_jobs(str(article["id"])) for article in articles})
+    monkeypatch.setattr(bridge, "_bulk_article_resources", previous_reads)
+    previous, previous_digest = build_resource_projection(service)
+    assert optimized == previous
+    assert optimized_digest == previous_digest
+    detail = next(row["payload"] for row in optimized if row["resource_type"] == "article_detail" and row["resource_id"] == original["id"])
+    assert "compat-related" in {row["id"] for row in detail["related_sources"]}
+    assert [row["version"] for row in detail["drafts"]][:2] == [7, 4]
+    unclustered = next(row["payload"] for row in optimized if row["resource_id"] == "compat-unclustered")
+    assert unclustered["related_sources"] == unclustered["drafts"] == []
+    assert str(database.paths.root) not in json.dumps(optimized)
+    assert "[local path]" in json.dumps(optimized)
+    assert {row["resource_type"] for row in optimized} >= {"generation_job", "generation_artifact", "generation_artifact_chunk"}
+
+
+def test_bulk_article_reads_use_one_read_only_snapshot_independent_of_feed_size(tmp_path: Path, monkeypatch) -> None:
+    import open_source_ai_news_wire.hosted_bridge as bridge
+
+    service = _service(tmp_path)
+    original = service.database.one("SELECT * FROM fetched_article LIMIT 1")
+    assert original
+    for index in range(125):
+        row = {**original, "id": f"bulk-{index}", "canonical_url": f"https://example.test/bulk-{index}"}
+        columns = list(row)
+        service.database.execute(f"INSERT INTO fetched_article ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+                                 tuple(row[key] for key in columns))
+    articles = service.list_articles(page_size=None)["articles"]
+    real_connect = sqlite3.connect
+    connections = []
+    statements = []
+    def connect(database, *args, **kwargs):
+        connections.append((database, kwargs))
+        connection = real_connect(database, *args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+    monkeypatch.setattr(bridge.sqlite3, "connect", connect)
+    manager = GenerationService(service.database)
+    details, jobs = bridge._bulk_article_resources(service, manager, articles)
+    assert len(details) == len(articles) > 125
+    assert jobs == {}
+    assert len(connections) == 1
+    assert "mode=ro" in connections[0][0] and connections[0][1]["uri"] is True
+    assert statements[:2] == ["PRAGMA query_only = ON", "BEGIN"]
+    assert len([sql for sql in statements if sql.startswith("SELECT")]) == 3
+    assert not any(sql.startswith(("INSERT", "UPDATE", "DELETE")) for sql in statements)
 
 
 def test_signed_client_covers_method_path_timestamp_nonce_and_body(tmp_path: Path) -> None:

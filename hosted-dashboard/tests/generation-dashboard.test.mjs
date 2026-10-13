@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
@@ -143,6 +143,33 @@ test("workspace and artifact routes are owner-only and serve verified protected 
   assert.equal((await command("generation.cancel",{job_id:"job-1"})).status,202);
   environment.GENERATION_ENABLED="true";
   assert.equal((await command("generation.create",{article_id:"article-new",task_type:"text",model:"model-1",skill_ids:["skill-1"],customizations:"",request_id:"enabled-create"})).status,202);
+});
+
+test("valid authenticated notification staging and completion refresh heartbeat while malformed sync does not",async () => {
+  const db=await populatedDatabase();
+  const environment={DB:db,ASSETS:{fetch:async()=>new Response("Not found",{status:404})},AUTH_BASE_URL:"http://localhost",BRIDGE_SECRET:"test-bridge-secret-long-enough-for-authentication"};
+  const put=async(payload,validSignature=true)=>{
+    const body=JSON.stringify(payload),timestamp=String(Date.now()),nonce=crypto.randomUUID();
+    const canonical=["v1",timestamp,nonce,"PUT","/api/bridge/sync",createHash("sha256").update(body).digest("hex")].join("\n");
+    const signature=validSignature?createHmac("sha256",environment.BRIDGE_SECRET).update(canonical).digest("hex"):"0".repeat(64);
+    globalThis.__CLOUDFLARE_TEST_ENV__=environment;
+    return worker.fetch(new Request("http://localhost/api/bridge/sync",{method:"PUT",headers:{"content-type":"application/json","x-news-wire-timestamp":timestamp,"x-news-wire-nonce":nonce,"x-news-wire-signature":signature,"x-news-wire-bridge-version":"2.3.0","x-news-wire-runtime-version":"0.6.0"},body}),environment,context);
+  };
+  const envelope={schema_version:2,kind:"notification_articles",sync_id:syncId,mode:"full",notification_articles:[{event_id:1,article_key:"c".repeat(64),story_id:"story-1",canonical_url:"https://example.com/news",title:"News",publisher:"Publisher",category:"Open ecosystem",context:"Publisher reports news.",provenance:"publisher_excerpt",source_type:"article",published_at:null,detected_at:new Date().toISOString()}],deleted_ids:[]};
+  await db.prepare("UPDATE bridge_status SET last_seen_at=1,last_error='stale'").run();
+  assert.equal((await put({...envelope,notification_articles:[{...envelope.notification_articles[0],title:""}]})).status,400);
+  assert.equal((await put(envelope,false)).status,401);
+  assert.equal((await db.prepare("SELECT last_seen_at FROM bridge_status").first()).last_seen_at,1);
+  assert.equal((await put(envelope)).status,200);
+  assert.ok((await db.prepare("SELECT last_seen_at FROM bridge_status").first()).last_seen_at>Date.now()-5000);
+  await db.prepare("UPDATE bridge_status SET last_seen_at=1,last_error='stale'").run();
+  const completion={schema_version:2,kind:"complete",sync_id:syncId,projection:"notification_articles",digest:"c".repeat(64),total:1,mode:"full"};
+  assert.equal((await put({...completion,total:2})).status,409);
+  assert.equal((await db.prepare("SELECT last_seen_at FROM bridge_status").first()).last_seen_at,1);
+  assert.equal((await put(completion)).status,200);
+  const heartbeat=await db.prepare("SELECT last_seen_at,last_error FROM bridge_status").first();
+  assert.ok(heartbeat.last_seen_at>Date.now()-5000);assert.equal(heartbeat.last_error,null);
+  assert.equal((await db.prepare("SELECT notification_digest FROM projection_state").first()).notification_digest,completion.digest);
 });
 
 test("bookmarked story routes open each matching article workspace and retain legacy drafts",async () => {

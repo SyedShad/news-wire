@@ -34,19 +34,24 @@ class Statement {
   constructor(database, sql) { this.database = database; this.sql = sql; this.values = []; }
   bind(...values) { this.values = values; return this; }
   async run() {
+    if (!this.database.inBatch) this.database.directRuns += 1;
     const result = this.database.sqlite.prepare(this.sql).run(...this.values);
     return { success: true, meta: { changes: Number(result.changes) } };
   }
-  async first() { return this.database.sqlite.prepare(this.sql).get(...this.values) || null; }
-  async all() { return { success: true, results: this.database.sqlite.prepare(this.sql).all(...this.values) }; }
+  async first() { this.database.reads += 1; return this.database.sqlite.prepare(this.sql).get(...this.values) || null; }
+  async all() { this.database.reads += 1; return { success: true, results: this.database.sqlite.prepare(this.sql).all(...this.values) }; }
 }
 
 class SqliteD1 {
-  constructor() { this.sqlite = new DatabaseSync(":memory:"); }
+  constructor() { this.sqlite = new DatabaseSync(":memory:"); this.directRuns=0;this.reads=0;this.batches=0;this.largestBatch=0;this.inBatch=false; }
   prepare(sql) { return new Statement(this, sql); }
   async batch(statements) {
+    this.batches += 1;
+    this.largestBatch = Math.max(this.largestBatch, statements.length);
+    this.inBatch = true;
     const results = [];
-    for (const statement of statements) results.push(await statement.run());
+    try { for (const statement of statements) results.push(await statement.run()); }
+    finally { this.inBatch = false; }
     return results;
   }
 }
@@ -219,6 +224,38 @@ test("shadow watermark, immutable delta sync, and distinct URL identity prevent 
     syncId: "sync-delta-000002", digest: "b".repeat(64), total: 2, mode: "delta",
   });
   assert.equal((await database.prepare("SELECT COUNT(*) count FROM push_delivery").first()).count, 1);
+});
+
+test("large full notification sync batches writes and preserves history, recovery, and delivery identity", async () => {
+  const database = new SqliteD1();
+  const source = await environment(database);
+  await ensurePushSchema(database);
+  const recent = [article(3462), article(3463)];
+  await stageNotificationArticles(database,"sync-prior",recent);
+  await completeNotificationArticleSync(source,{syncId:"sync-prior",digest:"a".repeat(64),total:2,mode:"full"});
+  const client=await keyMaterial();
+  await registerPushSubscription(source,{endpoint:"https://fcm.googleapis.com/fcm/send/large-sync",expirationTime:null,keys:{p256dh:client.publicKey,auth:base64UrlEncode(crypto.getRandomValues(new Uint8Array(16)))}},"master");
+  await setPushRuntimeMode(source,"active","master");
+  const subscription=(await database.prepare("SELECT id FROM push_subscription").first()).id;
+  await database.prepare("UPDATE notification_event SET resolution='dismissed' WHERE source_event_id='3463'").run();
+  await database.prepare(`INSERT INTO push_delivery (id,event_id,subscription_id,status,attempt_count,next_attempt_at,created_at)
+    VALUES ('already-delivered',?,?,'delivered',1,?,?)`).bind(`article:${recent[1].article_key}`,subscription,Date.now(),Date.now()).run();
+  const oldDate="2026-01-01T00:00:00Z";
+  const articles=Array.from({length:3464},(_,i)=>article(i+1,{detected_at:i<3461?oldDate:recent.find((item)=>item.event_id===String(i+1))?.detected_at || new Date(Date.now()+1000).toISOString()}));
+  await stageNotificationArticles(database,"sync-large",articles);
+  database.batches=0;database.directRuns=0;database.reads=0;database.largestBatch=0;
+  const input={syncId:"sync-large",digest:"b".repeat(64),total:3464,mode:"full"};
+  await completeNotificationArticleSync(source,input);
+  assert.equal(database.directRuns,1); // Subscription credential rotation, not one round trip per article.
+  assert.ok(database.batches<=72);assert.ok(database.largestBatch<=51);assert.ok(database.reads<=4);
+  assert.equal((await database.prepare("SELECT COUNT(*) n FROM notification_event").first()).n,3464);
+  assert.equal((await database.prepare("SELECT COUNT(*) n FROM push_delivery").first()).n,3);
+  assert.equal((await database.prepare("SELECT COUNT(*) n FROM push_delivery d JOIN notification_event e ON e.event_id=d.event_id WHERE CAST(e.source_event_id AS INTEGER)<3462").first()).n,0);
+  assert.equal((await database.prepare("SELECT status FROM push_delivery WHERE id='already-delivered'").first()).status,"delivered");
+  assert.equal((await database.prepare("SELECT resolution FROM notification_event WHERE source_event_id='3463'").first()).resolution,"dismissed");
+  await completeNotificationArticleSync(source,input);
+  assert.equal((await database.prepare("SELECT COUNT(*) n FROM notification_event").first()).n,3464);
+  assert.equal((await database.prepare("SELECT COUNT(*) n FROM push_delivery").first()).n,3);
 });
 
 test("capability actions are replay-safe and queue only durable alert commands", async () => {
