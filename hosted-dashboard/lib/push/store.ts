@@ -202,8 +202,15 @@ export async function stageNotificationArticles(
     ON CONFLICT(stage_key) DO UPDATE SET payload_json = excluded.payload_json,
       staged_at = excluded.staged_at`)
     .bind(`${syncId}:${article.article_key}`, syncId, article.article_key, JSON.stringify(article), now));
+  await writeNotificationSyncBatches(db, statements);
+}
+
+async function writeNotificationSyncBatches(db: D1Database, statements: D1PreparedStatement[]): Promise<void> {
   for (let offset = 0; offset < statements.length; offset += 50) {
-    await db.batch(statements.slice(offset, offset + 50));
+    await db.batch([
+      ...statements.slice(offset, offset + 50),
+      db.prepare("UPDATE bridge_status SET last_seen_at = ?, last_error = NULL WHERE id = 1").bind(Date.now()),
+    ]);
   }
 }
 
@@ -252,29 +259,39 @@ export async function completeNotificationArticleSync(
   const runtime = await runtimeRow(source.DB);
   const subscriptions = runtime.mode === "active" ? await activeSubscriptionIds(source) : [];
   const now = Date.now();
+  const events: D1PreparedStatement[] = [];
+  const deliveries: D1PreparedStatement[] = [];
   for (const row of staged.results || []) {
     const article = JSON.parse(row.payload_json) as NotificationArticleProjection;
     const eventId = `article:${article.article_key}`;
     const payload = articleProjectionToPayload(article);
-    await source.DB.prepare(`INSERT OR IGNORE INTO notification_event
+    events.push(source.DB.prepare(`INSERT OR IGNORE INTO notification_event
         (event_id, source_event_id, article_key, story_id, kind, payload_json, resolution, released_at)
       VALUES (?, ?, ?, ?, 'article_alert', ?, 'open', ?)`)
       .bind(eventId, article.event_id, article.article_key, article.story_id,
-        JSON.stringify({ ...payload, eventId }), now).run();
+        JSON.stringify({ ...payload, eventId }), now));
     const detectedAt = Date.parse(article.detected_at);
     if (
       runtime.mode === "active" &&
       detectedAt >= runtime.activation_watermark &&
       detectedAt >= now - RECOVERY_LIMIT_MS
     ) {
-      await ensureDeliveries(source.DB, eventId, subscriptions, now);
+      for (const subscriptionId of subscriptions) {
+        deliveries.push(source.DB.prepare(`INSERT OR IGNORE INTO push_delivery
+          (id, event_id, subscription_id, status, attempt_count, next_attempt_at, created_at)
+          VALUES (?, ?, ?, 'pending', 0, ?, ?)`)
+          .bind(crypto.randomUUID(), eventId, subscriptionId, now, now));
+      }
     }
   }
+  await writeNotificationSyncBatches(source.DB, events);
+  await writeNotificationSyncBatches(source.DB, deliveries);
   await source.DB.batch([
     source.DB.prepare(`UPDATE projection_state SET notification_digest = ?, notification_total = ?
       WHERE id = 1 AND sync_id = ?`).bind(input.digest, input.total, input.syncId),
     source.DB.prepare("DELETE FROM notification_projection_stage WHERE staged_at < ?")
       .bind(now - RECOVERY_LIMIT_MS),
+    source.DB.prepare("UPDATE bridge_status SET last_seen_at = ?, last_error = NULL WHERE id = 1").bind(Date.now()),
   ]);
 }
 

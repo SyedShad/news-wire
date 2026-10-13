@@ -11,11 +11,13 @@ import os
 import plistlib
 import re
 import secrets
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -381,6 +383,48 @@ def _artifact_resources(manager: GenerationService, job: dict[str, Any]):
     return descriptors, resources
 
 
+def _bulk_article_resources(service: DashboardService, manager: GenerationService, articles):
+    """Read all article details and jobs from one consistent read-only snapshot."""
+    with closing(sqlite3.connect(service.database.paths.database.as_uri() + "?mode=ro", uri=True, timeout=5)) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only = ON")
+        connection.execute("BEGIN")
+        fetched = [dict(row) for row in connection.execute(
+            "SELECT * FROM fetched_article ORDER BY first_fetched_at DESC,id"
+        )]
+        drafts = [dict(row) for row in connection.execute(
+            "SELECT * FROM draft ORDER BY version DESC,id DESC"
+        )]
+        jobs = [dict(row) for row in connection.execute(
+            "SELECT * FROM generation_job ORDER BY created_at DESC,id DESC"
+        )]
+    by_id = {str(row["id"]): row for row in fetched}
+    related_by_story = {}
+    related_keys = ("id", "title", "publisher", "canonical_url", "published_at", "first_fetched_at")
+    for row in fetched:
+        related_by_story.setdefault(row["story_id"], []).append({key: row[key] for key in related_keys})
+    drafts_by_story = {}
+    for row in drafts:
+        drafts_by_story.setdefault(row["story_id"], []).append(row)
+    jobs_by_article = {}
+    for row in jobs:
+        jobs_by_article.setdefault(str(row["article_id"]), []).append(manager._job(row))
+    details = {}
+    for summary in articles:
+        identifier = str(summary["id"])
+        row = by_id.get(identifier)
+        if row is None:
+            continue
+        article = service._article_view(row)
+        article["related_sources"] = [related for related in related_by_story.get(row["story_id"], [])
+                                      if str(related["id"]) != identifier] if row.get("story_id") else []
+        article["sources"] = [{"url": row["canonical_url"], "title": row["title"], "source_name": row["publisher"],
+                               "published_at": row["published_at"]}]
+        article["drafts"] = drafts_by_story.get(row["story_id"], []) if row.get("story_id") else []
+        details[identifier] = article
+    return details, jobs_by_article
+
+
 def build_resource_projection(service: DashboardService, *, story_summaries=None):
     resources = []
     def append(kind, identifier, rank, payload):
@@ -390,10 +434,11 @@ def build_resource_projection(service: DashboardService, *, story_summaries=None
     articles = story_summaries if story_summaries is not None else _all_story_summaries(service)
     manager = _generation_manager(service)
     append("generation_catalog", "runtime", 0, manager.catalog())
+    details, jobs_by_article = _bulk_article_resources(service, manager, articles)
     for rank,article in enumerate(articles):
         identifier = str(article["id"])
-        append("article_detail", identifier, rank, service.get_article(identifier) or article)
-        for job in manager.list_jobs(identifier):
+        append("article_detail", identifier, rank, details.get(identifier) or article)
+        for job in jobs_by_article.get(identifier, []):
             descriptors, artifacts = _artifact_resources(manager, job)
             public = {**job,"artifacts":descriptors}
             append("generation_job", job["id"], rank, public)
