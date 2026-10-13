@@ -112,6 +112,37 @@ test("notification projection is strict, relevance-only, and accepts integer loc
   }), /fields are invalid/);
 });
 
+test("notification sync preserves Unicode text at the Python ledger limits and historic HTTP sources", () => {
+  const envelope = (overrides = {}) => ({
+    schema_version: 2,
+    kind: "notification_articles",
+    sync_id: "0123456789abcdef",
+    mode: "full",
+    notification_articles: [article(83, overrides)],
+    deleted_ids: [],
+  });
+  const text = {
+    title: "a".repeat(498) + "🚀🧠",
+    context: "b".repeat(696) + "🚀🧠🌏💡",
+    publisher: "p".repeat(199) + "🚀",
+    category: "c".repeat(99) + "🧠",
+    canonical_url: "http://example.com/historic-source",
+  };
+  const parsed = parseBridgeSync(envelope(text));
+  for (const [field, value] of Object.entries(text)) {
+    assert.equal(parsed.notification_articles[0][field], value);
+  }
+  for (const field of ["title", "context", "publisher", "category"]) {
+    assert.throws(() => parseBridgeSync(envelope({ ...text, [field]: text[field] + "x" })), /notification article is invalid/);
+  }
+  for (const canonical_url of [
+    "javascript:alert(1)", "data:text/plain,news", "ftp://example.com/news",
+    "http://user:password@example.com/news", "https://user@example.com/news",
+  ]) {
+    assert.throws(() => parseBridgeSync(envelope({ ...text, canonical_url })), /notification article is invalid/);
+  }
+});
+
 test("push endpoints reject SSRF targets and accept only known Web Push providers", () => {
   for (const endpoint of [
     "http://fcm.googleapis.com/send/x",

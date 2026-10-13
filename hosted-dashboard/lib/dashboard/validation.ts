@@ -56,6 +56,12 @@ function requiredSyncString(value: Record<string, unknown>, key: string, max = 2
   return result.trim();
 }
 
+// Notification text is bounded in Python code points before it enters the
+// immutable local ledger. JavaScript string.length counts emoji as two units.
+function notificationTextLength(value: string): number {
+  return Array.from(value).length;
+}
+
 export function parseBridgeSync(value: unknown): BridgeSyncEnvelope {
   if (!isRecord(value) || value.schema_version !== 2) {
     throw new TypeError("Unsupported bridge sync schema");
@@ -174,11 +180,11 @@ export function parseBridgeSync(value: unknown): BridgeSyncEnvelope {
         !eventId ||
         typeof candidate.article_key !== "string" || !/^[a-f0-9]{64}$/u.test(candidate.article_key) ||
         typeof candidate.story_id !== "string" || !candidate.story_id || candidate.story_id.length > 200 ||
-        parsedUrl.protocol !== "https:" || canonicalUrl.length > 2_048 ||
-        typeof candidate.title !== "string" || !candidate.title.trim() || candidate.title.length > 500 ||
-        typeof candidate.publisher !== "string" || !candidate.publisher.trim() || candidate.publisher.length > 200 ||
-        typeof candidate.category !== "string" || !candidate.category.trim() || candidate.category.length > 100 ||
-        typeof candidate.context !== "string" || !candidate.context.trim() || candidate.context.length > 700 ||
+        !new Set(["http:", "https:"]).has(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password || canonicalUrl.length > 2_048 ||
+        typeof candidate.title !== "string" || !candidate.title.trim() || notificationTextLength(candidate.title) > 500 ||
+        typeof candidate.publisher !== "string" || !candidate.publisher.trim() || notificationTextLength(candidate.publisher) > 200 ||
+        typeof candidate.category !== "string" || !candidate.category.trim() || notificationTextLength(candidate.category) > 100 ||
+        typeof candidate.context !== "string" || !candidate.context.trim() || notificationTextLength(candidate.context) > 700 ||
         typeof candidate.provenance !== "string" || !provenanceTypes.has(candidate.provenance) ||
         typeof candidate.source_type !== "string" || !sourceTypes.has(candidate.source_type) ||
         (publishedAt !== null && (typeof publishedAt !== "string" || !isIsoTimestamp(publishedAt))) ||
