@@ -6,6 +6,7 @@ import { isSameOriginRequest } from "@/lib/auth/http.ts";
 import { noStore } from "@/lib/auth/responses.ts";
 import { enqueueCommand, listCommands, readSnapshot } from "@/lib/dashboard/store.ts";
 import { validateOwnerCommand } from "@/lib/dashboard/validation.ts";
+import { generationCommandError } from "@/lib/dashboard/features.ts";
 
 export async function GET(request: Request) {
   const authorization = await authorizeApiRequest(request, ["master"]);
@@ -29,6 +30,8 @@ export async function POST(request: Request) {
       }, { status: 409 }));
     }
     const input = validateOwnerCommand(await request.json());
+    const generationError = generationCommandError(input.operation, source, stored.bridgeVersion);
+    if (generationError) return noStore(NextResponse.json({ok: false, error: generationError}, {status: 409}));
     const command = await enqueueCommand(source.DB, {
       ...input,
       requestedBy: authorization.session.actorId,

@@ -119,7 +119,7 @@ test("service worker renders full source-derived context and exactly two support
   assert.match(notification.options.body, /Context source: publisher excerpt/u);
   assert.match(notification.options.body, /This context comes from the publisher excerpt/u);
   assert.deepEqual(Array.from(notification.options.actions, (item) => item.action), ["start_research", "dismiss"]);
-  assert.deepEqual(Array.from(notification.options.actions, (item) => item.title), ["Start working", "Dismiss"]);
+  assert.deepEqual(Array.from(notification.options.actions, (item) => item.title), ["Open news inbox", "Dismiss"]);
   assert.equal(harness.cached.size, 1);
   assert.doesNotMatch(serviceWorkerSource, /importScripts|https?:\/\//u);
 });
@@ -144,7 +144,7 @@ test("service worker strips control and bidi characters while keeping markup ine
   assert.match(notification.options.body, /<img src=x onerror=alert\(1\)>/u);
 });
 
-test("notification click opens one device-local alert card and inline action posts its capability", async () => {
+test("notification click opens its card and the start action opens the plain inbox without research", async () => {
   const harness = workerHarness();
   const payload = articlePayload();
   await dispatchWaitable(harness.listeners.get("notificationclick"), {
@@ -157,14 +157,11 @@ test("notification click opens one device-local alert card and inline action pos
     action: "start_research",
     notification: { data: payload, close() {} },
   });
-  assert.equal(harness.requests.length, 1);
-  assert.equal(harness.requests[0].request, "https://wire.example/api/push/actions");
-  assert.deepEqual(JSON.parse(harness.requests[0].init.body), {
-    schemaVersion: 1,
-    eventId: "evt-article-1",
-    action: "start_research",
-    capability: "test-start-capability",
-  });
+  assert.equal(harness.requests.length, 0);
+  assert.deepEqual(harness.opened, ["https://wire.example/notification/evt-article-1","https://wire.example/dashboard/inbox"]);
+  await dispatchWaitable(harness.listeners.get("notificationclick"),{action:"dismiss",notification:{data:payload,close(){}}});
+  assert.equal(harness.requests.length,1);
+  assert.equal(JSON.parse(harness.requests[0].init.body).action,"dismiss");
 });
 
 test("follow-up and canary notifications have no article actions or alert card state", async () => {
@@ -190,9 +187,10 @@ test("notification UI contains the privacy warning, explicit opt-in, and only tw
   assert.match(settings, /Disable all devices/u);
   assert.match(settings, /Add to Home Screen/u);
   assert.match(client, /Notification\.requestPermission\(\)/u);
-  assert.match(card, /Start working/u);
+  assert.match(card, /Open news inbox/u);
   assert.match(card, /Dismiss/u);
-  assert.equal((card.match(/<button\b/gu) || []).length, 2);
+  assert.equal((card.match(/<button\b/gu) || []).length, 1);
+  assert.match(card,/href="\/dashboard\/inbox"/u);
   assert.doesNotMatch(`${settings}\n${card}\n${serviceWorkerSource}`, /\b(?:importance|high-quality|priority|review score)\b/iu);
 });
 

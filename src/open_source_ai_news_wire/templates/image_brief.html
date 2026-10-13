@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Image brief history · Open Source AI News Wire{% endblock %}
+{% block content %}
+<nav class="breadcrumb"><a href="{{ url_for('story_detail', story_id=brief.story_id) }}">Back to story</a></nav>
+<section class="panel">
+<h1>Image brief history</h1>
+<p><strong>{{ brief.status|replace('_', ' ') }}</strong></p>
+<p>This saved brief remains available for reference. Open the article and use Generate graphics with your chosen skills and model to create new outputs.</p>
+<dl class="detail-list"><div><dt>Headline</dt><dd>{{ brief.headline }}</dd></div><div><dt>Category</dt><dd>{{ brief.category }}</dd></div><div><dt>Branding</dt><dd>{{ brief.branding }}</dd></div><div><dt>Master size</dt><dd>{{ brief.width }} × {{ brief.height }}</dd></div></dl>
+<h2>Illustration direction</h2><p>{{ brief.background_prompt }}</p>
+<p>Full-bleed hero illustration; lower black gradient; heavy condensed uppercase headline; cyan and yellow accents; coral category pill; your own branding. Final line breaks and fit require review.</p>
+<a class="button button-secondary" href="{{ url_for('image_layout', brief_id=brief.id) }}">Download placeholder layout preview</a>
+</section>
+{% endblock %}

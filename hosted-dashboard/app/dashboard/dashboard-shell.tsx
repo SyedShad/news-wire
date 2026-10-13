@@ -3,11 +3,12 @@ import { requirePageSession } from "@/lib/auth/session.ts";
 import { accessProfile } from "@/lib/auth/authorization.ts";
 import { runtimeEnv } from "@/lib/auth/config.ts";
 import { readSnapshot } from "@/lib/dashboard/store.ts";
-import { dateTime, text } from "./presentation.ts";
+import { dateTime, operationalUnreadCount } from "./presentation.ts";
 
 const NAVIGATION = [
   ["overview", "/dashboard", "⌂", "Overview"],
-  ["inbox", "/dashboard/inbox", "≡", "Review inbox"],
+  ["inbox", "/dashboard/inbox", "≡", "News inbox"],
+  ["operations", "/dashboard/operations", "◈", "Operational review"],
   ["drafts", "/dashboard/drafts", "✎", "Content"],
   ["sources", "/dashboard/sources", "◉", "Sources & health"],
   ["schedule", "/dashboard/schedule", "◷", "Schedule & usage"],
@@ -26,11 +27,7 @@ export default async function DashboardShell(props: {
   const session = await requirePageSession(["master"]);
   const profile = accessProfile(session.role);
   const stored = await readSnapshot(runtimeEnv().DB);
-  const schedule = stored?.snapshot.schedule || {};
-  const notices = stored?.snapshot.notices || [];
-  const assistance = schedule.assistance && typeof schedule.assistance === "object" && !Array.isArray(schedule.assistance)
-    ? schedule.assistance
-    : undefined;
+  const unread = operationalUnreadCount(stored?.snapshot.overview, stored?.snapshot.notices || []);
   const connected = Boolean(stored?.bridgeConnected);
   return (
     <>
@@ -45,7 +42,7 @@ export default async function DashboardShell(props: {
             {NAVIGATION.map(([key, href, icon, label]) => (
               <a key={key} className={`nav-item ${props.active === key ? "active" : ""}`} href={href} aria-current={props.active === key ? "page" : undefined}>
                 <span className="nav-icon" aria-hidden="true">{icon}</span><span>{label}</span>
-                {key === "inbox" && notices.length ? <span className="nav-count">{notices.length}</span> : null}
+                {key === "operations" && unread ? <span className="nav-count">{unread}</span> : null}
               </a>
             ))}
           </nav>
@@ -64,12 +61,6 @@ export default async function DashboardShell(props: {
             {connected ? "Laptop data is current." : "The laptop is offline. Read-only cached data is shown and actions are disabled."}
             <small>Last sync {dateTime(stored?.receivedAt)}</small>
           </div>
-          {assistance && assistance.ready !== true ? (
-            <div className="demo-banner assistance-banner" role="status">
-              <span className="demo-pill">Drafting unavailable</span>
-              {text(assistance, "failure_reason", "The assistance security check has not passed.").replaceAll("_", " ")}
-            </div>
-          ) : null}
           {!props.customHeader ? (
             <header className="page-header">
               <div><p className="kicker">{props.eyebrow}</p><h1>{props.title}</h1><p className="lede">{props.intro}</p></div>

@@ -66,6 +66,30 @@ def test_worker_coalesces_overlapping_triggers(tmp_path: Path) -> None:
     }
 
 
+def test_worker_keeps_operational_alerts_in_badge_without_pilot_autoactivation(tmp_path: Path, monkeypatch) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / 'wire-data'))
+    database.initialize()
+    now = datetime.now(UTC).isoformat().replace('+00:00', 'Z')
+    database.set_state('pilot_auto_activate_armed', 'true', now)
+    database.set_state('notifications_enabled', 'true', now)
+    database.set_state('pilot_notification_watermark', now, now)
+    database.execute("INSERT INTO alert(kind,severity,title,body,created_at) VALUES('health','critical','Health','Body',?)", (now,))
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError('Legacy pilot/native operational dispatch ran')
+
+    calls = []
+    monkeypatch.setattr('open_source_ai_news_wire.pilot.PilotManager.try_auto_activate', forbidden)
+    monkeypatch.setattr('open_source_ai_news_wire.notifications.NativeNotifier.dispatch_pending', forbidden)
+    monkeypatch.setattr('open_source_ai_news_wire.notifications.RelevanceNativeNotifier.dispatch_pending', lambda _self: calls.append('article'))
+    assert Worker(database, collector=RecordingCollector()).run().status == 'success'
+    assert calls == ['article']
+    assert database.get_state('notifications_enabled') == 'true'
+    assert database.get_state('pilot_auto_activate_armed') == 'true'
+    assert database.one("SELECT read_at FROM alert WHERE kind='health'") == {'read_at':None}
+    assert database.query('SELECT * FROM notification_delivery') == []
+
+
 def test_worker_refreshes_reused_coalesced_queue_age(tmp_path: Path) -> None:
     database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
     database.initialize()
@@ -152,7 +176,7 @@ def test_worker_refreshes_persisted_next_scan_after_each_active_run(tmp_path: Pa
     assert next_scan.second == 0
 
 
-def test_worker_prioritizes_recovery_draft_before_collection(tmp_path: Path, monkeypatch) -> None:
+def test_worker_recovers_explicit_generation_without_legacy_assistance(tmp_path: Path, monkeypatch) -> None:
     database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
     database.initialize()
     database.set_state("assistance_enabled", "true", "2026-07-14T00:00:00Z")
@@ -174,9 +198,10 @@ def test_worker_prioritizes_recovery_draft_before_collection(tmp_path: Path, mon
         "open_source_ai_news_wire.runner.assistance_isolation_current", lambda _database: True
     )
 
+    monkeypatch.setattr("open_source_ai_news_wire.generation.process_generation_queue",
+        lambda _database, **_kwargs: order.append("generation"))
     Worker(database, collector=OrderedCollector()).run(trigger="scheduled")
-
-    assert order == ["draft", "collection", "assistance"]
+    assert order == ["generation", "collection", "generation"]
 
 
 def test_worker_skips_end_of_run_assistance_when_full_retry_would_overrun(
@@ -216,10 +241,10 @@ def test_worker_skips_end_of_run_assistance_when_full_retry_would_overrun(
 
     Worker(database, collector=OrderedCollector()).run(trigger="manual")
 
-    assert order == ["draft", "collection"]
+    assert order == ["collection"]
 
 
-def test_worker_renews_stale_assistance_attestation_before_processing(
+def test_worker_does_not_renew_or_process_retired_assistance(
     tmp_path: Path, monkeypatch
 ) -> None:
     database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
@@ -250,8 +275,8 @@ def test_worker_renews_stale_assistance_attestation_before_processing(
 
     Worker(database, collector=RecordingCollector()).run(trigger="manual")
 
-    assert renewed and renewed[0][1] is True
-    assert processed == [True, False]
+    assert renewed == []
+    assert processed == []
 
 
 def test_launchagent_install_pause_resume_and_uninstall_are_atomic(tmp_path: Path) -> None:
@@ -396,7 +421,7 @@ def test_launchagent_preserves_stable_launcher_symlink(tmp_path: Path) -> None:
     ]
 
 
-def test_worker_maintains_promoted_expired_and_active_watches(tmp_path: Path) -> None:
+def test_worker_preserves_historical_watches_without_automatic_review(tmp_path: Path) -> None:
     database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
     database.initialize()
     seed_demo_data(database)
@@ -425,13 +450,13 @@ def test_worker_maintains_promoted_expired_and_active_watches(tmp_path: Path) ->
         for row in database.query("SELECT story_id,status FROM watch_notice")
     }
     assert statuses == {
-        "story-demo-runtime-001": "promoted",
-        "story-demo-policy-002": "expired",
+        "story-demo-runtime-001": "active",
+        "story-demo-policy-002": "active",
         "story-demo-watch-003": "active",
     }
     assert database.one(
         "SELECT next_check_at FROM watch_notice WHERE story_id='story-demo-watch-003'"
-    )["next_check_at"] > current
+    )["next_check_at"] is None
 
 
 def test_worker_marks_claimed_work_failed_and_contains_assistance_failure(tmp_path: Path, monkeypatch) -> None:
@@ -491,3 +516,26 @@ def test_worker_recovery_and_extended_coalescing_edges(tmp_path: Path) -> None:
     assert database.one("SELECT idempotency_key FROM work_item") == {
         "idempotency_key": "coalesced-catch-up"
     }
+
+
+def test_generation_queue_failure_never_stops_fetching_or_sends_new_native_alert(tmp_path, monkeypatch) -> None:
+    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
+    database.initialize()
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("A private credential must not appear in notices")
+    monkeypatch.setattr("open_source_ai_news_wire.generation.process_generation_queue",fail)
+    timestamp = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00","Z")
+    for key,value in [("notifications_enabled","true"),("shadow_mode","true"),("pilot_notification_watermark",timestamp)]:
+        database.set_state(key,value,timestamp)
+    def forbid_native(*_args, **_kwargs):
+        raise AssertionError("Generation operational notices must remain dashboard-only")
+    monkeypatch.setattr("open_source_ai_news_wire.notifications.NativeNotifier._notify",forbid_native)
+    result = Worker(database,collector=RecordingCollector()).run()
+    assert result.summary is not None
+    notices = database.query("SELECT kind,body FROM alert WHERE kind='generation'")
+    assert len(notices) == 1
+    assert "credential" not in notices[0]["body"]
+    from open_source_ai_news_wire.services import DashboardService
+    service = DashboardService(database)
+    assert service.operational_unread_count() == 1
+    assert service.mark_operational_notices_read() == 1

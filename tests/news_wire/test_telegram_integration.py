@@ -310,7 +310,7 @@ def test_schema9_migration_preserves_existing_event_as_unknown_without_replay(tm
         connection.commit()
 
     database = Database(paths)
-    assert database.migrate() == SCHEMA_VERSION == 10
+    assert database.migrate() == SCHEMA_VERSION == 11
     legacy = database.one(
         "SELECT source_reported_at, timestamp_status FROM relevance_notification_event WHERE article_key = ?",
         (article_key,),

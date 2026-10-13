@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.news_wire.historical_fixtures import seed_historical_draft_request
 from open_source_ai_news_wire import __version__
 from open_source_ai_news_wire.config import resolve_runtime_paths
 from open_source_ai_news_wire.demo import seed_demo_data
@@ -299,8 +300,8 @@ def test_momentum_breadth_deduplicates_publishers_and_accounts(
     assert story["evidence_state"] == "Verification pending"
 
 
-def test_human_approval_queues_draft_with_snapshot(service: DashboardService) -> None:
-    status = service.review("story-demo-runtime-001", "approve_neutral", "Keep the scope tight.")
+def test_historical_draft_snapshot_remains_serializable(service: DashboardService) -> None:
+    status = seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral", "Keep the scope tight.")
     assert status == "approved"
 
     work = service.database.one(
@@ -338,85 +339,12 @@ def test_human_approval_queues_draft_with_snapshot(service: DashboardService) ->
     assert json.loads(action["source_signatures_json"]) == snapshot["source_signatures"]
 
 
-def test_approval_aborts_if_story_revision_changes_before_transaction(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
-    database.initialize()
-    seed_demo_data(database)
-    service = DashboardService(database)
-    original_transaction = database.transaction
-    drifted = False
-
-    @contextmanager
-    def transaction_with_drift():
-        nonlocal drifted
-        with original_transaction() as connection:
-            if not drifted:
-                connection.execute(
-                    "UPDATE story_cluster SET story_revision = story_revision + 1 WHERE id = ?",
-                    ("story-demo-watch-003",),
-                )
-                drifted = True
-            yield connection
-
-    monkeypatch.setattr(database, "transaction", transaction_with_drift)
-    with pytest.raises(ValueError, match="changed during approval"):
-        service.review(
-            "story-demo-watch-003",
-            "manual_approve_neutral",
-            confirmation_version="manual_override_v1",
-        )
-    assert database.one(
-        "SELECT COUNT(*) AS count FROM work_item WHERE story_id = 'story-demo-watch-003'"
-    ) == {"count": 0}
 
 
-def test_human_approval_dispatches_exact_work_after_commit(tmp_path: Path) -> None:
-    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
-    database.initialize()
-    seed_demo_data(database)
-    observed: list[tuple[int, str, str]] = []
-
-    def dispatch(work_item_id: int) -> None:
-        work = database.one("SELECT status, story_id FROM work_item WHERE id = ?", (work_item_id,))
-        story = database.one("SELECT status FROM story_cluster WHERE id = ?", (work["story_id"],))
-        observed.append((work_item_id, work["status"], story["status"]))
-
-    immediate = DashboardService(database, draft_callback=dispatch)
-    assert immediate.review("story-demo-runtime-001", "approve_neutral") == "approved"
-    assert observed and observed[0][1:] == ("queued", "approved")
 
 
-def test_dispatch_failure_preserves_durable_queue(tmp_path: Path) -> None:
-    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
-    database.initialize()
-    seed_demo_data(database)
-
-    def fail_dispatch(_work_item_id: int) -> None:
-        raise RuntimeError("test-only callback failure")
-
-    immediate = DashboardService(database, draft_callback=fail_dispatch)
-    immediate.review("story-demo-runtime-001", "approve_neutral")
-    work = database.one("SELECT status FROM work_item WHERE kind = 'draft'")
-    assert work == {"status": "queued"}
-    diagnostic = database.one(
-        "SELECT message, detail_json FROM diagnostic_event WHERE event_type = 'draft_dispatch'"
-    )
-    assert "durable queue was preserved" in diagnostic["message"]
-    assert "test-only callback failure" not in diagnostic["detail_json"]
 
 
-def test_pending_draft_approval_cannot_be_queued_twice(service: DashboardService) -> None:
-    service.review("story-demo-runtime-001", "approve_neutral", "Keep the scope tight.")
-
-    with pytest.raises(ValueError, match="already pending"):
-        service.review("story-demo-runtime-001", "approve_neutral", "Duplicate request.")
-
-    assert service.database.one(
-        "SELECT COUNT(*) AS count FROM work_item WHERE story_id = ? AND kind = 'draft'",
-        ("story-demo-runtime-001",),
-    )["count"] == 1
 
 
 def test_failed_draft_retries_same_work_without_new_approval(tmp_path: Path) -> None:
@@ -425,7 +353,7 @@ def test_failed_draft_retries_same_work_without_new_approval(tmp_path: Path) -> 
     seed_demo_data(database)
     dispatched: list[int] = []
     immediate = DashboardService(database, draft_callback=dispatched.append)
-    immediate.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(immediate, "story-demo-runtime-001", "approve_neutral")
     work_id = dispatched[-1]
     database.execute(
         "UPDATE work_item SET status = 'failed', attempt_count = 2, last_error_class = 'codex_timeout' WHERE id = ?",
@@ -446,7 +374,7 @@ def test_failed_draft_retries_same_work_without_new_approval(tmp_path: Path) -> 
 
 
 def test_draft_status_and_history_include_requests_before_a_draft_exists(service: DashboardService) -> None:
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
     status = service.draft_status("story-demo-runtime-001")
     assert status["status"] == "starting"
     assert status["active"] is True
@@ -494,7 +422,7 @@ def test_draft_status_exposes_exact_operational_condition(
     error_code: str,
     expected_status: str,
 ) -> None:
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
     service.database.execute(
         "UPDATE work_item SET status = ?, attempt_count = ?, last_error_class = ? WHERE kind = 'draft'",
         (raw_status, attempts, error_code),
@@ -509,7 +437,7 @@ def test_draft_status_exposes_exact_operational_condition(
 def test_editable_shell_save_rechecks_transactional_ownership(
     service: DashboardService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
     shell = service.database.one(
         "SELECT * FROM draft WHERE story_id = 'story-demo-runtime-001'"
     )
@@ -533,7 +461,7 @@ def test_editable_shell_save_rechecks_transactional_ownership(
 def test_editable_shell_save_loses_to_completed_generation(
     service: DashboardService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
     shell = service.database.one(
         "SELECT * FROM draft WHERE story_id = 'story-demo-runtime-001'"
     )
@@ -558,7 +486,7 @@ def test_editable_shell_save_loses_to_completed_generation(
 def test_editable_shell_requires_work_provenance(
     service: DashboardService, provenance: str
 ) -> None:
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
     shell = service.database.one(
         "SELECT * FROM draft WHERE story_id = 'story-demo-runtime-001'"
     )
@@ -573,7 +501,7 @@ def test_editable_shell_requires_work_provenance(
 
 
 def test_malformed_legacy_draft_json_remains_visible(service: DashboardService) -> None:
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
     service.database.execute(
         "UPDATE draft SET approval_snapshot_json = '{' WHERE story_id = 'story-demo-runtime-001'"
     )
@@ -590,7 +518,7 @@ def test_malformed_legacy_draft_json_remains_visible(service: DashboardService) 
 def test_completed_request_without_draft_is_visible_as_failed(
     service: DashboardService,
 ) -> None:
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
     service.database.execute(
         "DELETE FROM draft WHERE story_id = 'story-demo-runtime-001'"
     )
@@ -608,7 +536,7 @@ def test_editable_shell_builder_handles_invalid_and_duplicate_snapshot_rows(
     service: DashboardService,
 ) -> None:
     assert service._create_editable_draft_shell(999_999, {}) is None
-    service.review("story-demo-runtime-001", "approve_neutral")
+    seed_historical_draft_request(service, "story-demo-runtime-001", "approve_neutral")
     work = service.database.one(
         "SELECT id, payload_json FROM work_item WHERE story_id = 'story-demo-runtime-001'"
     )
@@ -658,7 +586,7 @@ def test_editable_shell_builder_handles_invalid_and_duplicate_snapshot_rows(
 def test_unavailable_assistance_creates_an_editable_shell_that_can_be_completed(
     service: DashboardService,
 ) -> None:
-    service.review(
+    seed_historical_draft_request(service,
         "story-demo-watch-003",
         "manual_approve_neutral",
         confirmation_version="manual_override_v1",
@@ -694,221 +622,20 @@ def test_unavailable_assistance_creates_an_editable_shell_that_can_be_completed(
     assert status["draft_id"] == completed_id
 
 
-def test_watch_cannot_be_approved_for_drafting(service: DashboardService) -> None:
-    with pytest.raises(ValueError, match="Evidence and importance"):
-        service.review("story-demo-watch-003", "approve_neutral")
 
 
-@pytest.mark.parametrize(
-    ("action", "mode"),
-    (
-        ("manual_approve_neutral", "Neutral News Brief"),
-        ("manual_approve_lens", "Open-Source Lens Brief"),
-    ),
-)
-def test_manual_approval_overrides_all_gates_and_dispatches_immediately(
-    tmp_path: Path, action: str, mode: str
-) -> None:
-    database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
-    database.initialize()
-    seed_demo_data(database)
-    dispatched: list[int] = []
-    immediate = DashboardService(database, draft_callback=dispatched.append)
-
-    assert immediate.review(
-        "story-demo-watch-003",
-        action,
-        confirmation_version="manual_override_v1",
-    ) == "approved"
-
-    assert len(dispatched) == 1
-    work = database.one("SELECT * FROM work_item WHERE id = ?", (dispatched[0],))
-    payload = json.loads(work["payload_json"])
-    assert payload["mode"] == mode
-    assert payload["approval_basis"] == "manual_override"
-    assert payload["manual_override"] is True
-    assert payload["confirmation_version"] == "manual_override_v1"
-    assert payload["qualification_snapshot"] == {
-        "evidence_gate": False,
-        "importance_gate": True,
-        "automated_importance": True,
-        "effective_importance": True,
-        "lens_gate": False,
-        "lens_eligible": False,
-        "candidate_basis": "unqualified",
-    }
-    assert all(source["source_role"] == "Discovery" for source in payload["sources"])
-    assert all(source["citation_allowed"] for source in payload["sources"])
-    candidate = database.one(
-        """
-        SELECT evidence_gate, importance_gate, manual_override,
-               manual_override_action_id, manual_override_snapshot_json
-        FROM candidate WHERE story_id = 'story-demo-watch-003'
-        """
-    )
-    assert candidate["evidence_gate"] == 0
-    assert candidate["importance_gate"] == 1
-    assert candidate["manual_override"] == 1
-    assert candidate["manual_override_action_id"] == payload["review_action_id"]
-    assert json.loads(candidate["manual_override_snapshot_json"])["evidence_gate"] is False
-    action_row = database.one(
-        "SELECT action, approval_snapshot_json FROM review_action WHERE id = ?",
-        (payload["review_action_id"],),
-    )
-    assert action_row["action"] == action
-    assert json.loads(action_row["approval_snapshot_json"])["review_action_id"] == payload["review_action_id"]
-    state = immediate.get_story("story-demo-watch-003")
-    assert state["candidate_basis"] == "manual_override"
-    assert state["manual_override_active"] is True
-    assert state["draft_eligible"] is True
-    assert state["approval_basis"] == "manual_override"
-    with pytest.raises(ValueError, match="already pending"):
-        immediate.review(
-            "story-demo-watch-003",
-            action,
-            confirmation_version="manual_override_v1",
-        )
-    assert database.one(
-        "SELECT COUNT(*) AS count FROM work_item WHERE story_id = 'story-demo-watch-003'"
-    )["count"] == 1
 
 
-def test_manual_approval_requires_versioned_confirmation_and_preserves_gate_results(
-    service: DashboardService,
-) -> None:
-    before = service.database.one(
-        "SELECT evidence_gate, importance_gate FROM candidate WHERE story_id = 'story-demo-watch-003'"
-    )
-
-    for confirmation in ("", "manual_override_v0", "yes"):
-        with pytest.raises(ValueError, match="current confirmation prompt"):
-            service.review(
-                "story-demo-watch-003",
-                "manual_approve_neutral",
-                confirmation_version=confirmation,
-            )
-
-    assert service.database.one(
-        "SELECT evidence_gate, importance_gate, manual_override FROM candidate WHERE story_id = 'story-demo-watch-003'"
-    ) == {**before, "manual_override": 0}
-    assert service.database.one(
-        "SELECT COUNT(*) AS count FROM review_action WHERE action LIKE 'manual_approve_%'"
-    )["count"] == 0
 
 
-def test_manual_approval_rejects_inactive_sourceless_and_claimless_stories(
-    service: DashboardService,
-) -> None:
-    service.database.execute(
-        "UPDATE story_cluster SET status = 'archived' WHERE id = 'story-demo-watch-003'"
-    )
-    with pytest.raises(ValueError, match="Archived or withdrawn"):
-        service.review(
-            "story-demo-watch-003",
-            "manual_approve_neutral",
-            confirmation_version="manual_override_v1",
-        )
-
-    service.database.execute(
-        "UPDATE story_cluster SET status = 'watch' WHERE id = 'story-demo-watch-003'"
-    )
-    service.database.execute(
-        "DELETE FROM source_item WHERE story_id = 'story-demo-watch-003'"
-    )
-    with pytest.raises(ValueError, match="safe public source"):
-        service.review(
-            "story-demo-watch-003",
-            "manual_approve_neutral",
-            confirmation_version="manual_override_v1",
-        )
-
-    service.database.execute(
-        "DELETE FROM claim WHERE story_id = 'story-demo-watch-003'"
-    )
-    with pytest.raises(ValueError, match="stored claim"):
-        service.review(
-            "story-demo-watch-003",
-            "manual_approve_neutral",
-            confirmation_version="manual_override_v1",
-        )
 
 
-def test_manual_approval_rejects_unsafe_stored_urls(service: DashboardService) -> None:
-    service.database.execute(
-        "UPDATE source_item SET url = 'https://127.0.0.1/private/' || id, canonical_url = 'https://127.0.0.1/private/' || id WHERE story_id = 'story-demo-watch-003'"
-    )
-
-    with pytest.raises(ValueError, match="safe public source"):
-        service.review(
-            "story-demo-watch-003",
-            "manual_approve_neutral",
-            confirmation_version="manual_override_v1",
-        )
 
 
-def test_manual_selection_survives_recalculation_and_later_shows_evidence_basis(
-    service: DashboardService,
-) -> None:
-    service.review(
-        "story-demo-watch-003",
-        "manual_approve_neutral",
-        confirmation_version="manual_override_v1",
-    )
-    service.database.execute(
-        "UPDATE story_cluster SET status = 'candidate' WHERE id = 'story-demo-watch-003'"
-    )
-
-    state = qualification_state(service.database, "story-demo-watch-003")
-    assert state["candidate_basis"] == "manual_override"
-    recalculate_story_qualification(service.database, "story-demo-watch-003")
-    assert service.database.one(
-        "SELECT status FROM story_cluster WHERE id = 'story-demo-watch-003'"
-    ) == {"status": "candidate"}
-
-    service.database.execute(
-        "UPDATE source_item SET source_role = 'Event' WHERE story_id = 'story-demo-watch-003'"
-    )
-    state = recalculate_story_qualification(service.database, "story-demo-watch-003")
-    assert state["qualified"] is True
-    assert state["candidate_basis"] == "evidence"
-    assert state["manual_override_active"] is True
 
 
-def test_manual_override_does_not_silently_replace_a_completed_draft(
-    service: DashboardService,
-) -> None:
-    with pytest.raises(ValueError, match="completed draft already exists"):
-        service.review(
-            "story-demo-eval-004",
-            "manual_approve_lens",
-            confirmation_version="manual_override_v1",
-        )
-    assert service.database.one(
-        "SELECT COUNT(*) AS count FROM work_item WHERE story_id = 'story-demo-eval-004'"
-    )["count"] == 0
-    assert service.database.one(
-        "SELECT COUNT(*) AS count FROM review_action WHERE story_id = 'story-demo-eval-004' AND action = 'manual_approve_lens'"
-    )["count"] == 0
-
-    service.database.execute("UPDATE draft SET status = 'Needs Review' WHERE id = 1")
-    service.database.execute(
-        "UPDATE story_cluster SET status = 'candidate' WHERE id = 'story-demo-eval-004'"
-    )
-    assert service.review(
-        "story-demo-eval-004",
-        "manual_approve_lens",
-        confirmation_version="manual_override_v1",
-    ) == "approved"
-    assert service.database.one(
-        "SELECT COUNT(*) AS count FROM work_item WHERE story_id = 'story-demo-eval-004'"
-    )["count"] == 1
 
 
-def test_lens_requires_strong_or_moderate_opportunity(service: DashboardService) -> None:
-    with pytest.raises(ValueError, match="Strong or Moderate"):
-        service.review("story-demo-eval-004", "approve_lens")
-
-    assert service.review("story-demo-policy-002", "approve_lens") == "approved"
 
 
 def test_draft_save_creates_version_and_preserves_history(service: DashboardService) -> None:
@@ -1038,7 +765,7 @@ def test_filters_missing_records_and_guarded_actions(service: DashboardService) 
     assert service.get_story("missing") is None
     assert service.get_draft(999) is None
 
-    with pytest.raises(ValueError, match="Unsupported review"):
+    with pytest.raises(ValueError, match="obsolete"):
         service.review("story-demo-runtime-001", "publish")
     with pytest.raises(LookupError, match="Story not found"):
         service.review("missing", "archive")
@@ -1065,9 +792,9 @@ def test_inbox_type_filters_include_editorial_and_operational_work(service: Dash
 def test_all_non_draft_review_states_are_recorded(service: DashboardService) -> None:
     assert service.review("story-demo-runtime-001", "archive", "No longer timely") == "archived"
     assert service.review("story-demo-watch-003", "withdraw") == "withdrawn"
-    with pytest.raises(ValueError, match="Unsupported"):
+    with pytest.raises(ValueError, match="obsolete"):
         service.review("story-demo-watch-003", "research")
-    with pytest.raises(ValueError, match="Unsupported"):
+    with pytest.raises(ValueError, match="obsolete"):
         service.review("story-demo-watch-003", "accept")
 
 
@@ -1094,7 +821,7 @@ def test_settings_alerts_and_evidence_failure_paths(service: DashboardService) -
     assert settings["app_version"] == __version__
     assert settings["purge_preview"]["operations_count"] == 1
     assert settings["demo_mode"] is True
-    assert service.mark_alerts_read() == 6
+    assert service.mark_alerts_read() == 3
     assert service.mark_alerts_read() == 0
 
     with pytest.raises(LookupError, match="Story not found"):
@@ -1135,3 +862,10 @@ def test_production_draft_sources_render_safely_in_markdown_html_and_view_model(
     assert "javascript:" not in document
     assert 'rel="noreferrer noopener"' in document
     assert "Legacy source name" in markdown and "Legacy source name" in document
+
+
+@pytest.mark.parametrize("action", ["approve_neutral","approve_lens","manual_approve_neutral","manual_approve_lens"])
+def test_retired_approvals_never_create_work(service: DashboardService, action: str) -> None:
+    with pytest.raises(ValueError, match="obsolete"):
+        service.review("story-demo-runtime-001",action)
+    assert service.database.query("SELECT * FROM work_item WHERE kind='draft'") == []

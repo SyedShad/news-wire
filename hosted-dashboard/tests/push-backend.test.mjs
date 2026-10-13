@@ -209,6 +209,13 @@ test("capability actions are replay-safe and queue only durable alert commands",
       (id, token_hash, event_id, subscription_id, story_id, action, status, created_at, expires_at)
     VALUES ('intent-1', ?, 'article:test', 'device-1', 'story-17', 'dismiss', 'pending', ?, ?)`)
     .bind(tokenHash, now, now + 72 * 60 * 60_000).run();
+  const retiredCapability="test-retired-start-capability";
+  await database.prepare(`INSERT INTO push_action_intent
+      (id, token_hash, event_id, subscription_id, story_id, action, status, created_at, expires_at)
+      VALUES ('retired-start', ?, 'article:test', 'device-1', 'story-17', 'start_research', 'pending', ?, ?)`)
+    .bind(await actionCapabilityHash(config,retiredCapability),now,now+72*60*60_000).run();
+  await assert.rejects(performPushAction(source,{eventId:"article:test",action:"start_research",capability:retiredCapability}),/automatic_research_retired/);
+  assert.equal((await database.prepare("SELECT COUNT(*) count FROM command_queue").first()).count,0);
   const first = await performPushAction(source, {
     eventId: "article:test", action: "dismiss", capability,
   });

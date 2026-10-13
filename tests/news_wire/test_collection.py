@@ -1183,7 +1183,7 @@ def test_unknown_original_discovery_creates_no_fresh_watch(tmp_path: Path) -> No
 
     assert database.one(
         "SELECT status, first_public_at FROM story_cluster WHERE id = ?", (story_id,)
-    ) == {"status": "ready", "first_public_at": "2026-07-23T09:00:00Z"}
+    ) == {"status": "fetched", "first_public_at": "2026-07-23T09:00:00Z"}
     assert database.one(
         "SELECT COUNT(*) AS count FROM watch_notice WHERE story_id = ?", (story_id,)
     ) == {"count": 0}
@@ -1460,7 +1460,7 @@ def _feed(title: str, description: str = "Public evidence") -> bytes:
     </item></channel></rss>""".encode()
 
 
-def test_collector_is_incremental_and_creates_verified_candidate(tmp_path: Path) -> None:
+def test_collector_is_incremental_and_preserves_fetched_articles_without_grades(tmp_path: Path) -> None:
     database = _database_with_one_source(tmp_path)
     payload = {"body": _feed("Open-source AI model release improves inference security")}
 
@@ -1488,11 +1488,9 @@ def test_collector_is_incremental_and_creates_verified_candidate(tmp_path: Path)
     assert second.discovered_count == 0
     assert database.one("SELECT COUNT(*) AS count FROM raw_observation") == {"count": 1}
     story = database.one("SELECT status, priority, lane FROM story_cluster")
-    assert story == {"status": "ready", "priority": "Urgent", "lane": "Open Ecosystem News"}
-    assert database.one("SELECT evidence_gate, importance_gate FROM candidate") == {
-        "evidence_gate": 1,
-        "importance_gate": 1,
-    }
+    assert story == {"status": "fetched", "priority": "", "lane": "Open Ecosystem News"}
+    assert database.one("SELECT evidence_gate, importance_gate FROM candidate") is None
+    assert database.one("SELECT status FROM fetched_article") == {"status": "fetched"}
     assert database.one("SELECT health FROM source_state WHERE source_id = 'openai-news'") == {"health": "healthy"}
 
     story_id = database.one("SELECT id FROM story_cluster")["id"]
@@ -1524,8 +1522,8 @@ def test_collector_is_incremental_and_creates_verified_candidate(tmp_path: Path)
     assert database.one("SELECT source_revision FROM source_item") == {
         "source_revision": 2
     }
-    assert database.one("SELECT status FROM draft") == {"status": "Needs Review"}
-    assert database.one("SELECT kind FROM alert WHERE kind='correction'") == {"kind": "correction"}
+    assert database.one("SELECT status FROM draft") == {"status": "Current"}
+    assert database.one("SELECT kind FROM alert WHERE kind='correction'") is None
 
     payload["body"] = _feed(
         "Open-source AI model release improves inference safety",
@@ -1841,7 +1839,7 @@ def test_parser_failure_degrades_only_its_source(tmp_path: Path) -> None:
     assert database.one("SELECT kind FROM alert") == {"kind": "health"}
 
 
-def test_discovery_source_creates_watch_only_above_both_thresholds(tmp_path: Path) -> None:
+def test_discovery_source_is_fetched_without_watch_or_research_thresholds(tmp_path: Path) -> None:
     database = _database_with_one_source(tmp_path)
     override_path = database.paths.config / "sources.local.json"
     overrides = json.loads(override_path.read_text(encoding="utf-8"))
@@ -1865,12 +1863,12 @@ def test_discovery_source_creates_watch_only_above_both_thresholds(tmp_path: Pat
 
     Collector(database, client_factory=factory, now=lambda: "2026-07-14T10:00:00Z").scan()
     assert database.one("SELECT status, watch_status FROM story_cluster") == {
-        "status": "ready", "watch_status": None
+        "status": "fetched", "watch_status": None
     }
-    assert database.one("SELECT COUNT(*) AS count FROM research_attempt") == {"count": 1}
+    assert database.one("SELECT COUNT(*) AS count FROM research_attempt") == {"count": 0}
 
 
-def test_interval_filter_and_critical_storage_gate(tmp_path: Path, monkeypatch) -> None:
+def test_interval_never_discards_fetched_items_and_critical_storage_gate(tmp_path: Path, monkeypatch) -> None:
     database = _database_with_one_source(tmp_path)
     observations = [
         Observation("old", "AI model security release", "https://example.com/old", "2026-07-01T00:00:00Z"),
@@ -1879,11 +1877,51 @@ def test_interval_filter_and_critical_storage_gate(tmp_path: Path, monkeypatch) 
     collector = Collector(database, now=lambda: "2026-07-14T10:00:00Z")
     assert [item.external_id for item in collector._incremental_observations(
         {"id": "openai-news", "cursor": None}, observations, "2026-07-14T00:00:00Z", None
-    )] == ["new"]
+    )] == ["old", "new"]
 
     monkeypatch.setattr(database, "storage_pressure", lambda **_kwargs: SimpleNamespace(level="critical"))
     result = collector.scan()
     assert result.result == "blocked_low_disk"
+
+
+@pytest.mark.parametrize('first_scheduled_scan', [True, False])
+def test_scheduled_recovery_retains_old_and_undated_low_trust_articles(
+    tmp_path: Path, first_scheduled_scan: bool,
+) -> None:
+    from open_source_ai_news_wire.runner import Worker
+
+    database = _database_with_one_source(tmp_path)
+    database.execute("UPDATE source_registry SET monitoring_role='Discovery',trust_class='research_required'")
+    if not first_scheduled_scan:
+        old = (datetime.now(UTC) - timedelta(days=10)).isoformat().replace('+00:00', 'Z')
+        database.set_state('last_scan_at', old, old)
+    payload = b'''<rss><channel><item><guid>old</guid><title>Open-source AI model security release</title>
+      <link>https://openai.com/news/old</link><pubDate>Tue, 01 Jul 2025 09:30:00 GMT</pubDate>
+      <description>A source excerpt about this open-source model.</description></item>
+      <item><guid>undated</guid><title>Open-source AI model privacy update</title>
+      <link>https://openai.com/news/undated</link>
+      <description>A source excerpt about this open-source model.</description></item></channel></rss>'''
+
+    def factory(source: dict[str, object]) -> SafeHttpClient:
+        return SafeHttpClient(
+            allowed_hosts=set(json.loads(str(source['base_hosts_json']))), resolver=PUBLIC_IP,
+            transport=httpx.MockTransport(lambda request: httpx.Response(
+                200, content=payload, headers={'content-type':'application/rss+xml'}, request=request)),
+        )
+
+    collector = Collector(database, client_factory=factory)
+    result = Worker(database, collector=collector).run(trigger='scheduled')
+    assert result.status == 'success'
+    rows = database.query('SELECT canonical_url,published_at,status FROM fetched_article ORDER BY canonical_url')
+    assert [row['canonical_url'] for row in rows] == ['https://openai.com/news/old','https://openai.com/news/undated']
+    assert rows[0]['published_at'] == '2025-07-01T09:30:00Z'
+    assert rows[1]['published_at'] is None
+    assert all(row['status'] == 'fetched' for row in rows)
+    assert database.query('SELECT * FROM candidate') == []
+    assert database.query("SELECT * FROM work_item WHERE kind='source_research'") == []
+    events = database.query('SELECT * FROM relevance_notification_event')
+    collector.scan(trigger='recovery', interval_start='2026-10-12T00:00:00Z', interval_end='2026-10-13T00:00:00Z')
+    assert database.query('SELECT * FROM relevance_notification_event') == events
 
 
 def test_local_source_enablement_updates_both_compatibility_and_state_tables(tmp_path: Path) -> None:

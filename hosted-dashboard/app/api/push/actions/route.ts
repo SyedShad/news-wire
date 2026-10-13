@@ -21,14 +21,14 @@ export async function POST(request: Request) {
       return noStore(NextResponse.json({ ok: false, error: "action_body_too_large" }, { status: 413 }));
     }
     const result = await performPushAction(source, parsePushAction(JSON.parse(body)));
-    return noStore(NextResponse.json(result, { status: result.status === "research_queued" ? 202 : 200 }));
+    return noStore(NextResponse.json(result, { status: 200 }));
   } catch (error) {
     const candidate = error instanceof Error ? error.message : "";
-    const status = candidate === "action_capability_expired" ? 410
+    const status = candidate === "action_capability_expired" || candidate === "automatic_research_retired" ? 410
       : candidate === "action_capability_invalid" ? 401
         : candidate === "push_not_configured" ? 503
           : 400;
-    const code = status === 410 ? "action_capability_expired"
+    const code = candidate === "automatic_research_retired" ? "automatic_research_retired" : status === 410 ? "action_capability_expired"
       : status === 401 ? "action_capability_invalid"
         : status === 503 ? "push_unavailable"
           : "push_action_invalid";

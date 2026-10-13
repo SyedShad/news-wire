@@ -55,7 +55,7 @@ const worker = {
       "permissions-policy",
       "camera=(), microphone=(), geolocation=()",
     );
-    secured.headers.set(
+    if (!secured.headers.has("content-security-policy")) secured.headers.set(
       "content-security-policy",
       "default-src 'self'; base-uri 'none'; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; worker-src 'self'",
     );

@@ -451,6 +451,7 @@ export async function performPushAction(
   if (!intent || intent.event_id !== input.eventId || intent.action !== input.action) {
     throw new Error("action_capability_invalid");
   }
+  if (input.action === "start_research") throw new Error("automatic_research_retired");
   if (intent.status === "completed" && intent.result_json) {
     return JSON.parse(intent.result_json) as Record<string, JsonValue>;
   }
@@ -468,29 +469,26 @@ export async function performPushAction(
     }>();
   if (!event) throw new Error("notification_event_unavailable");
   const commandId = crypto.randomUUID();
-  const proposedResult: Record<string, JsonValue> = input.action === "start_research"
-    ? { ok: true, status: "research_queued", commandId: commandId! }
-    : { ok: true, status: "dismissed", commandId };
+  const proposedResult: Record<string, JsonValue> = { ok: true, status: "dismissed", commandId };
   await source.DB.prepare(`INSERT OR IGNORE INTO notification_global_action
       (event_id, action, command_id, created_at, result_json) VALUES (?, ?, ?, ?, ?)`)
     .bind(intent.event_id, input.action, commandId, Date.now(), JSON.stringify(proposedResult)).run();
   const global = await source.DB.prepare(`SELECT action, command_id, result_json
     FROM notification_global_action WHERE event_id = ?`).bind(intent.event_id).first<GlobalActionRow>();
   if (!global) throw new Error("notification_action_unavailable");
+  if (global.action === "start_research") {
+    // A new explicit dismissal supersedes the obsolete automatic-research action.
+    await source.DB.prepare("UPDATE notification_global_action SET action='dismiss',command_id=?,result_json=? WHERE event_id=? AND action='start_research'")
+      .bind(commandId,JSON.stringify(proposedResult),intent.event_id).run();
+    global.action="dismiss";global.command_id=commandId;global.result_json=JSON.stringify(proposedResult);
+  }
   let result = JSON.parse(global.result_json) as Record<string, JsonValue>;
   if (global.command_id) {
     await ensureArticleAlertCommand(source.DB, {
       commandId: global.command_id,
-      operation: global.action === "start_research"
-        ? "article_alert.start_research"
-        : "article_alert.dismiss",
+      operation: "article_alert.dismiss",
       requestedBy: `push:${intent.subscription_id}`,
-      payload: {
-        event_id: event.source_event_id,
-        article_key: event.article_key,
-        story_id: event.story_id,
-        ...(global.action === "start_research" ? { purpose: "operator_review" } : {}),
-      },
+      payload: {event_id: event.source_event_id,article_key: event.article_key,story_id: event.story_id},
     });
   }
   if (global.action === "dismiss") {
@@ -509,10 +507,6 @@ export async function performPushAction(
   await source.DB.prepare(`UPDATE push_action_intent SET status = 'completed', completed_at = ?,
       result_json = ? WHERE id = ? AND status = 'pending'`)
     .bind(Date.now(), JSON.stringify(result), intent.id).run();
-  if (global.action === "start_research") {
-    await source.DB.prepare(`UPDATE notification_event SET resolution = 'research_requested', resolved_at = ?
-      WHERE event_id = ? AND resolution = 'open'`).bind(Date.now(), intent.event_id).run();
-  }
   return result;
 }
 

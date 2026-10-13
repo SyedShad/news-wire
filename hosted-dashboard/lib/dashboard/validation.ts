@@ -132,7 +132,7 @@ export function parseBridgeSync(value: unknown): BridgeSyncEnvelope {
     if (!Array.isArray(value.resources) || value.resources.length > 100 || !value.resources.every(isRecord)) {
       throw new TypeError("resources chunk is invalid");
     }
-    const supported = new Set(["story_detail", "draft_summary", "draft_detail", "source", "notice", "schedule", "settings", "diagnostic"]);
+    const supported = new Set(["story_detail", "article_detail", "draft_summary", "draft_detail", "source", "notice", "schedule", "settings", "diagnostic", "generation_catalog", "generation_job", "generation_artifact", "generation_artifact_chunk"]);
     const resources = value.resources as ResourceProjection[];
     if (resources.some((resource) => !supported.has(resource.resource_type) || typeof resource.resource_id !== "string" || !resource.resource_id || resource.resource_id.length > 240 || !Number.isInteger(resource.rank) || !isRecord(resource.payload))) {
       throw new TypeError("resource projection is invalid");
@@ -233,11 +233,6 @@ function isIsoTimestamp(value: string): boolean {
 
 const OPERATIONS = new Set([
   "story.review",
-  "story.evidence.inspect",
-  "story.evidence.confirm",
-  "story.evidence.exclude",
-  "story.content.create",
-  "story.draft.retry",
   "draft.save",
   "source.toggle",
   "schedule.action",
@@ -245,6 +240,12 @@ const OPERATIONS = new Set([
   "diagnostics.purge",
   "alerts.mark_read",
   "bridge.healthcheck",
+  "generation.create",
+  "generation.cancel",
+  "generation.retry",
+  "generation.input",
+  "generation.save",
+  "operations.mark_read",
 ]);
 
 function requiredString(input: Record<string, unknown>, key: string, max = 2_000): string {
@@ -264,10 +265,25 @@ export function validateOwnerCommand(value: unknown): {
   if (!OPERATIONS.has(operation)) throw new TypeError("Unsupported owner operation");
   if (!isRecord(value.payload)) throw new TypeError("payload must be an object");
   const payload = value.payload as Record<string, JsonValue>;
-  if (JSON.stringify(payload).length > MAX_COMMAND_PAYLOAD_BYTES) {
+  if (JSON.stringify(payload).length > (operation === "generation.save" ? 250_000 : MAX_COMMAND_PAYLOAD_BYTES)) {
     throw new TypeError("Command payload is too large");
   }
 
+  if (operation === "generation.create") {
+    requiredString(value.payload, "article_id", 200);
+    requiredString(value.payload, "model", 120);
+    requiredString(value.payload, "request_id", 100);
+    if (value.payload.task_type !== "text" && value.payload.task_type !== "graphics") throw new TypeError("Unsupported generation task");
+    if (!Array.isArray(value.payload.skill_ids) || !value.payload.skill_ids.length || value.payload.skill_ids.length > 20 || value.payload.skill_ids.some((id) => typeof id !== "string" || !id || id.length > 240)) throw new TypeError("skill_ids must be an ordered list of one or more skills");
+    if (new Set(value.payload.skill_ids).size !== value.payload.skill_ids.length) throw new TypeError("Duplicate skills are not allowed");
+    if (typeof value.payload.customizations !== "string" || value.payload.customizations.length > 10000) throw new TypeError("customizations must be at most 10000 characters");
+  }
+  if (operation.startsWith("generation.") && operation !== "generation.create") {
+    requiredString(value.payload, "job_id", 200);
+    if (operation === "generation.input" && (!isRecord(value.payload.answers) || JSON.stringify(value.payload.answers).length > 20000)) throw new TypeError("answers must be an object of requested responses");
+    if (operation === "generation.retry") requiredString(value.payload, "request_id", 100);
+    if (operation === "generation.save" && (typeof value.payload.output_text !== "string" || value.payload.output_text.length > 200000)) throw new TypeError("output_text must be at most 200000 characters");
+  }
   if (operation.startsWith("story.")) requiredString(value.payload, "story_id", 200);
   if (operation === "draft.save") {
     if (!Number.isInteger(value.payload.draft_id)) throw new TypeError("draft_id is required");

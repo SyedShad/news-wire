@@ -41,7 +41,7 @@ def test_snapshot_contains_dashboard_surfaces_without_local_paths_or_credentials
     snapshot = build_dashboard_snapshot(service)
 
     assert snapshot["schema_version"] == 1
-    assert snapshot["overview"]["counts"]["review_now"] == 4
+    assert snapshot["overview"]["counts"]["total"] == service.list_articles()["total"]
     assert snapshot["stories"]
     assert snapshot["drafts"]
     assert snapshot["sources"]
@@ -162,14 +162,14 @@ def test_story_projection_is_normalized_ranked_and_stable(tmp_path: Path) -> Non
     assert first == second
     assert first_digest == second_digest
     assert len(first_digest) == 64
-    assert [story["priority_rank"] for story in first] == list(range(len(first)))
+    assert all("priority_rank" not in story and "review_score" not in story for story in first)
     assert sorted(int(story["newest_rank"]) for story in first) == list(range(len(first)))
 
     resources, resource_digest = build_resource_projection(service)
     assert resources
     assert len(resource_digest) == 64
     assert {item["resource_type"] for item in resources} >= {
-        "story_detail", "draft_summary", "draft_detail", "source", "schedule", "settings"
+        "article_detail", "generation_catalog", "draft_summary", "draft_detail", "source", "schedule", "settings"
     }
 
 
@@ -280,3 +280,19 @@ def test_bridge_config_accepts_https_and_localhost_development_origins(tmp_path:
     assert load_bridge_config(paths) == "https://dashboard.example.test"
     save_bridge_config(paths, "http://localhost:3000")
     assert load_bridge_config(paths) == "http://localhost:3000"
+
+
+def test_large_operational_history_does_not_stop_snapshot_sync(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    for index in range(40):
+        service.database.execute(
+            "INSERT INTO alert(kind,severity,title,body,created_at) VALUES('health','info',?,?,?)",
+            (f"Source notice {index}", "Public source detail. " * 2500, "2026-10-13T00:00:00Z"),
+        )
+    total = service.operational_unread_count()
+    snapshot = build_dashboard_snapshot(service)
+    assert len(json.dumps(snapshot, separators=(",", ":")).encode()) <= 1_450_000
+    assert snapshot["overview"]["counts"]["operational_unread"] == total
+    assert len(snapshot["notices"]) < total
+    resources, _ = build_resource_projection(service)
+    assert len([r for r in resources if r["resource_type"] == "notice"]) == total

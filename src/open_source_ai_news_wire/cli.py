@@ -134,6 +134,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("check-isolation", "enable", "disable", "run-pending", "status"),
     )
 
+    generation = subparsers.add_parser("generation", help="Manage local Sign in with ChatGPT and article generation")
+    generation.add_argument("action", choices=("login", "status", "logout", "catalog", "run-pending"))
+
     pilot = subparsers.add_parser("pilot", help="Manage shadow and notification activation gates")
     pilot.add_argument(
         "action",
@@ -438,6 +441,33 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     arguments = parser.parse_args(argv)
     data_root = arguments.data_root
+
+    if arguments.command == "generation":
+        from .chatgpt_plan import ChatGPTPlanAuth, ChatGPTPlanError
+        from .generation import GenerationService
+        # Connecting an account is independent of application migrations. Users
+        # can authorize the new runner before upgrading an existing runtime DB.
+        auth = ChatGPTPlanAuth(resolve_runtime_paths(data_root).config)
+        try:
+            if arguments.action == "login":
+                print("Complete Continue with ChatGPT in the browser opened on this Mac.", flush=True)
+                result = auth.login()
+            elif arguments.action == "logout":
+                result = auth.logout()
+            elif arguments.action == "status":
+                result = auth.status()
+            elif arguments.action == "catalog":
+                service = GenerationService(_database(data_root), auth=auth)
+                service._refresh_catalog()
+                result = service.catalog()
+            else:
+                service = GenerationService(_database(data_root), auth=auth)
+                result = {"processed": service.run_pending()}
+            print(json.dumps(result, indent=2))
+            return 0
+        except ChatGPTPlanError as error:
+            print(str(error), file=sys.stderr)
+            return 2
 
     if arguments.command == "init":
         database = _database(data_root)

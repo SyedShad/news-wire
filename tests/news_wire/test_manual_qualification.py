@@ -3,6 +3,8 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from tests.news_wire.historical_fixtures import seed_historical_draft_request
+
 from open_source_ai_news_wire.config import resolve_runtime_paths
 from open_source_ai_news_wire.collector import Collector
 from open_source_ai_news_wire.demo import seed_demo_data
@@ -139,7 +141,8 @@ def test_hacker_news_link_can_be_confirmed_then_importance_overridden_and_approv
         "SELECT source_role FROM source_item WHERE story_id = ? AND canonical_url = ?",
         (story_id, "https://project.example.org/release"),
     ) == {"source_role": "Discovery"}
-    assert service.review(story_id, "approve_neutral") == "approved"
+    with pytest.raises(ValueError, match="obsolete"):
+        service.review(story_id, "approve_neutral")
 
 
 def test_two_reporting_sources_must_have_independent_publishers(tmp_path) -> None:
@@ -333,7 +336,7 @@ def test_excluding_qualifying_evidence_invalidates_pending_draft(tmp_path) -> No
         story_id, evidence_id, "Event", {claim_id: "supports"}, first_party=True
     )
     service.qualify_story(story_id)
-    service.review(story_id, "approve_neutral")
+    seed_historical_draft_request(service, story_id, "approve_neutral")
 
     state = service.exclude_evidence(story_id, evidence_id, "The page changed ownership.")
 
@@ -356,7 +359,7 @@ def test_completed_draft_is_preserved_and_can_be_reapproved_only_after_requalifi
         story_id, evidence_id, "Event", {claim_id: "supports"}, first_party=True
     )
     service.qualify_story(story_id)
-    service.review(story_id, "approve_neutral")
+    seed_historical_draft_request(service, story_id, "approve_neutral")
     work_id = int(
         database.one(
             "SELECT id FROM work_item WHERE story_id = ? AND kind = 'draft'", (story_id,)
@@ -381,7 +384,7 @@ def test_completed_draft_is_preserved_and_can_be_reapproved_only_after_requalifi
         (now, story_id),
     )
 
-    with pytest.raises(ValueError, match="completed draft already exists"):
+    with pytest.raises(ValueError, match="obsolete"):
         service.review(story_id, "approve_neutral")
 
     service.exclude_evidence(story_id, evidence_id, "The source was withdrawn.")
@@ -393,7 +396,7 @@ def test_completed_draft_is_preserved_and_can_be_reapproved_only_after_requalifi
     ) == {"status": "Needs Review"}
     with pytest.raises(ValueError, match="not available for retry"):
         service.retry_draft(story_id)
-    with pytest.raises(ValueError, match="Evidence and importance"):
+    with pytest.raises(ValueError, match="obsolete"):
         service.review(story_id, "approve_neutral")
 
     database.execute(
@@ -404,11 +407,12 @@ def test_completed_draft_is_preserved_and_can_be_reapproved_only_after_requalifi
     assert database.one(
         "SELECT status FROM story_cluster WHERE id = ?", (story_id,)
     ) == {"status": "candidate"}
-    assert service.review(story_id, "approve_neutral") == "approved"
+    with pytest.raises(ValueError, match="obsolete"):
+        service.review(story_id, "approve_neutral")
     assert database.one(
         "SELECT COUNT(*) AS count FROM work_item WHERE story_id = ? AND kind = 'draft'",
         (story_id,),
-    ) == {"count": 2}
+    ) == {"count": 1}
     assert database.one(
         "SELECT status FROM draft WHERE story_id = ?", (story_id,)
     ) == {"status": "Needs Review"}
@@ -794,150 +798,35 @@ def test_qualification_creation_claim_states_and_repeat_invalidation(tmp_path) -
     }
 
 
-def test_web_routes_retire_qualification_and_keep_safe_url_checks(tmp_path) -> None:
-    app = create_app(
-        data_root=tmp_path / "wire-data",
-        auth_required=False,
-        test_config={"TESTING": True, "SECRET_KEY": "test-secret"},
-    )
+
+
+
+
+
+
+def test_historical_story_link_opens_ungated_article_workspace(tmp_path) -> None:
+    app = create_app(data_root=tmp_path / "wire-data",auth_required=False,
+        test_config={"TESTING":True,"SECRET_KEY":"test-secret"})
     seed_demo_data(app.config["DATABASE"])
-    client = app.test_client()
-    client.get("/")
-    with client.session_transaction() as session:
-        token = session["csrf_token"]
-    story_id = "story-demo-watch-003"
-
-    rendered = client.get(f"/stories/{story_id}")
-    assert b"Ready for content" in rendered.data
-    assert b"Create content" in rendered.data
-    assert b"Evidence gate" not in rendered.data
-
-    response = client.post(
-        f"/stories/{story_id}/qualify",
-        data={"csrf_token": token, "reason": "Bypass"},
-    )
-    assert response.status_code == 410
-    assert app.config["DATABASE"].one(
-        "SELECT status FROM story_cluster WHERE id = ?", (story_id,)
-    ) == {"status": "watch"}
-
-    response = client.post(
-        f"/stories/{story_id}/evidence/inspect",
-        data={"csrf_token": token, "url": "http://127.0.0.1/private", "acquisition_method": "manual"},
-    )
-    assert response.status_code == 303
-    assert app.config["DATABASE"].one(
-        "SELECT COUNT(*) AS count FROM evidence_source WHERE story_id = ?", (story_id,)
-    ) == {"count": 0}
+    rendered = app.test_client().get("/stories/story-demo-watch-003",follow_redirects=True)
+    assert rendered.status_code == 200
+    assert b"Generate content" in rendered.data and b"Generate graphics" in rendered.data
+    assert b"Evidence gate" not in rendered.data and b"priority floor" not in rendered.data
 
 
-def test_web_evidence_routes_complete_qualification_lifecycle(tmp_path) -> None:
-    app = create_app(
-        data_root=tmp_path / "wire-data",
-        auth_required=False,
-        test_config={"TESTING": True, "SECRET_KEY": "test-secret"},
-    )
+@pytest.mark.parametrize("suffix", ["qualify","evidence/inspect","evidence/1/confirm","evidence/1/exclude"])
+def test_retired_evidence_routes_never_create_or_modify_source_history(tmp_path, suffix) -> None:
+    app = create_app(data_root=tmp_path / "wire-data",auth_required=False,
+        test_config={"TESTING":True,"SECRET_KEY":"test-secret"})
     database = app.config["DATABASE"]
     seed_demo_data(database)
     client = app.test_client()
     client.get("/")
     with client.session_transaction() as session:
         token = session["csrf_token"]
-    story_id = "story-demo-watch-003"
-    claim_id = int(database.one("SELECT id FROM claim WHERE story_id = ?", (story_id,))["id"])
-
-    response = client.post(
-        f"/stories/{story_id}/evidence/inspect",
-        data={
-            "csrf_token": token,
-            "url": "https://official.example.org/release",
-            "acquisition_method": "manual",
-        },
-    )
-    assert response.status_code == 303
-    evidence_id = int(database.one("SELECT id FROM evidence_source")["id"])
-    EvidenceEnricher(
-        database,
-        client_factory=_client_factory(b"<html><title>Official release</title><p>Details</p></html>"),
-    ).process_next()
-
-    response = client.post(
-        f"/stories/{story_id}/evidence/{evidence_id}/confirm",
-        data={
-            "csrf_token": token,
-            "role": "Event",
-            "first_party": "yes",
-            "claim_not-a-number": "supports",
-            f"claim_{claim_id}": "attributes",
-            "reason": "Official publisher page.",
-        },
-    )
-    assert response.status_code == 303
-    assert qualification_state(database, story_id)["evidence_gate"] is True
-
-    response = client.post(
-        f"/stories/{story_id}/qualify",
-        data={"csrf_token": token, "reason": "Evidence-backed manual decision."},
-    )
+    before = database.query("SELECT * FROM evidence_source")
+    response = client.post(f"/stories/story-demo-watch-003/{suffix}",
+        data={"csrf_token":token,"url":"http://127.0.0.1/private","role":"Event","reason":"Bypass"})
     assert response.status_code == 410
-    content = client.post(
-        f"/stories/{story_id}/content",
-        data={"csrf_token": token},
-    )
-    assert content.status_code == 303
-    assert database.one(
-        "SELECT kind FROM work_item WHERE story_id = ? AND kind = 'content'",
-        (story_id,),
-    ) == {"kind": "content"}
-
-    response = client.post(
-        f"/stories/{story_id}/evidence/{evidence_id}/exclude",
-        data={"csrf_token": token, "reason": "Material page change."},
-    )
-    assert response.status_code == 303
-    assert database.one("SELECT status FROM evidence_source WHERE id = ?", (evidence_id,)) == {
-        "status": "excluded"
-    }
-
-
-def test_web_reporting_confirmation_records_server_derived_origin_identity(tmp_path) -> None:
-    app = create_app(
-        data_root=tmp_path / "wire-data",
-        auth_required=False,
-        test_config={"TESTING": True, "SECRET_KEY": "test-secret"},
-    )
-    database = app.config["DATABASE"]
-    seed_demo_data(database)
-    client = app.test_client()
-    client.get("/")
-    with client.session_transaction() as session:
-        token = session["csrf_token"]
-    story_id = "story-demo-watch-003"
-    claim_id = int(database.one("SELECT id FROM claim WHERE story_id = ?", (story_id,))["id"])
-    evidence_id = _inspect(database, app.config["DASHBOARD_SERVICE"], story_id, "https://news.example.org/report")
-
-    response = client.post(
-        f"/stories/{story_id}/evidence/{evidence_id}/confirm",
-        data={
-            "csrf_token": token,
-            "role": "Reporting",
-            f"claim_{claim_id}": "attributes",
-            "provenance_type": "cites",
-            "origin_name": "Axios",
-            "origin_key": "forged:publisher",
-            "origin_url": "",
-            "reason": "The hosted report explicitly credits Axios.",
-        },
-    )
-    assert response.status_code == 303
-    assert database.one(
-        "SELECT reporting_origin_name, reporting_origin_key, origin_status FROM evidence_source WHERE id = ?",
-        (evidence_id,),
-    ) == {
-        "reporting_origin_name": "Axios",
-        "reporting_origin_key": "name:axios",
-        "origin_status": "confirmed",
-    }
-    rendered = client.get(f"/stories/{story_id}")
-    assert b"Source provenance" in rendered.data
-    assert b"Create content" in rendered.data
+    assert database.query("SELECT * FROM evidence_source") == before
+    assert database.one("SELECT status FROM story_cluster WHERE id='story-demo-watch-003'") == {"status":"watch"}

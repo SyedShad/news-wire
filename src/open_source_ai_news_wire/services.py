@@ -72,6 +72,115 @@ class DashboardService:
         self.research_callback = research_callback
         self.clock = clock or (lambda: datetime.now(UTC))
 
+    @staticmethod
+    def _article_view(row: dict[str, Any]) -> dict[str, Any]:
+        return {**row, "headline": row["title"], "source_name": row["publisher"],
+                "detected_at": row["first_fetched_at"], "url": row["canonical_url"],
+                "fetched_at": row["first_fetched_at"]}
+
+    def list_articles(self, *, search: str = "", lane: str | None = None,
+                      cursor: str = "", page_size: int | None = 25,
+                      status: str | None = None) -> dict[str, Any]:
+        """Chronological relevant-article feed, without editorial scores or age gates."""
+        clauses: list[str] = []
+        values: list[Any] = []
+        if status and status != "all":
+            clauses.append("a.status = ?")
+            values.append(status)
+        if lane and lane != "all":
+            clauses.append("a.lane = ?")
+            values.append(lane)
+        if search.strip():
+            clauses.append("(a.title LIKE ? ESCAPE '\\' OR a.summary LIKE ? ESCAPE '\\' OR a.publisher LIKE ? ESCAPE '\\')")
+            query = "%" + search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            values.extend([query] * 3)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        total = int((self.database.one("SELECT COUNT(*) AS n FROM fetched_article a" + where, tuple(values)) or {})["n"])
+        if cursor:
+            anchor = self.database.one("SELECT first_fetched_at,id FROM fetched_article WHERE id=?",(cursor,))
+            if anchor:
+                clauses.append("(a.first_fetched_at < ? OR (a.first_fetched_at = ? AND a.id > ?))")
+                values.extend([anchor["first_fetched_at"],anchor["first_fetched_at"],anchor["id"]])
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        limit = None if page_size is None else max(1,min(100,int(page_size)))
+        query = "SELECT a.* FROM fetched_article a" + where + " ORDER BY a.first_fetched_at DESC,a.id ASC"
+        if limit is not None:
+            query += " LIMIT ?"
+            values.append(limit+1)
+        rows = self.database.query(query,tuple(values))
+        more = limit is not None and len(rows) > limit
+        rows = rows[:limit] if more else rows
+        return {"articles": [self._article_view(row) for row in rows], "total": total,
+                "next_cursor": str(rows[-1]["id"]) if more else ""}
+
+    def get_article(self, article_id: str) -> dict[str, Any] | None:
+        row = self.database.one("SELECT * FROM fetched_article WHERE id=?",(article_id,))
+        if not row:
+            return None
+        article = self._article_view(row)
+        article["related_sources"] = self.database.query(
+            "SELECT id,title,publisher,canonical_url,published_at,first_fetched_at FROM fetched_article "
+            "WHERE story_id=? AND id!=? ORDER BY first_fetched_at DESC,id",
+            (row["story_id"],article_id),
+        ) if row.get("story_id") else []
+        article["sources"] = [{"url": row["canonical_url"],"title": row["title"],"source_name": row["publisher"],
+                               "published_at": row["published_at"]}]
+        article["drafts"] = self.database.query(
+            "SELECT * FROM draft WHERE story_id=? ORDER BY version DESC,id DESC",(row["story_id"],)
+        ) if row.get("story_id") else []
+        return article
+
+    def article_overview(self) -> dict[str, Any]:
+        counts = self.database.one(
+            "SELECT COUNT(*) AS total,SUM(status='fetched') AS fetched FROM fetched_article"
+        ) or {}
+        counts["generated"] = int((self.database.one(
+            "SELECT COUNT(*) AS n FROM generation_job WHERE status='completed'"
+        ) or {})["n"])
+        counts["operational_unread"] = self.operational_unread_count()
+        sources = self.database.one(
+            "SELECT COUNT(*) AS total,SUM(health='healthy') AS healthy,SUM(health='degraded') AS degraded,"
+            "SUM(health='paused') AS paused FROM source_registry WHERE enabled=1"
+        ) or {}
+        queue = self.database.one(
+            "SELECT COUNT(*) AS n,MIN(created_at) AS oldest FROM generation_job WHERE status IN ('queued','running')"
+        ) or {}
+        recent = self.list_articles(page_size=5)["articles"]
+        lag = "Clear"
+        if queue.get("n") and queue.get("oldest"):
+            try:
+                minutes = max(0,int((self._current_time()-datetime.fromisoformat(str(queue["oldest"]).replace("Z","+00:00"))).total_seconds()/60))
+                lag = "<1 min" if minutes == 0 else f"{minutes} min"
+            except ValueError:
+                lag = "Pending"
+        return {"counts": {k:int(v or 0) for k,v in counts.items()},
+                "sources": {k:int(v or 0) for k,v in sources.items()},
+                "recent_articles": recent,"top_stories": recent,"schedule": self.schedule_status(),
+                "queue_count": int(queue.get("n") or 0),"queue_lag": lag,
+                "scans": self.database.query("SELECT * FROM scan_run ORDER BY started_at DESC LIMIT 7")}
+
+    def operational_unread_count(self) -> int:
+        return int((self.database.one(
+            "SELECT COUNT(*) AS n FROM alert WHERE kind IN ('health','correction','catch_up','recovery','generation') AND read_at IS NULL"
+        ) or {})["n"])
+
+    def mark_operational_notices_read(self, notice_id: int | None = None) -> int:
+        sql = "UPDATE alert SET read_at=? WHERE kind IN ('health','correction','catch_up','recovery','generation') AND read_at IS NULL"
+        values: tuple[Any,...] = (utc_now(),)
+        if notice_id is not None:
+            sql += " AND id=?"
+            values += (notice_id,)
+        with self.database.transaction() as connection:
+            return int(connection.execute(sql,values).rowcount)
+
+    def set_article_status(self, article_id: str, status: str) -> str:
+        if status not in {"fetched","archived","withdrawn"}:
+            raise ValueError("Unsupported article status")
+        if not self.database.one("SELECT 1 FROM fetched_article WHERE id=?",(article_id,)):
+            raise LookupError("Article not found")
+        self.database.execute("UPDATE fetched_article SET status=? WHERE id=?",(status,article_id))
+        return status
+
     def _current_time(self) -> datetime:
         value = self.clock()
         return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
@@ -412,7 +521,7 @@ class DashboardService:
         return {"stories": page, "next_cursor": next_cursor, "total": total}
 
     def list_inbox_notices(self, kind: str | None = None) -> list[dict[str, Any]]:
-        operational_kinds = ("health", "correction", "catch_up", "recovery")
+        operational_kinds = ("health", "correction", "catch_up", "recovery", "generation")
         if kind in {"ready", "researching", "content_ready"}:
             return []
         if kind and kind != "all":
@@ -1523,6 +1632,7 @@ class DashboardService:
                 "UPDATE story_cluster SET status = ?, updated_at = ? WHERE id = ?",
                 (new_status, now, story_id),
             )
+            connection.execute("UPDATE fetched_article SET status=? WHERE story_id=?",(new_status,story_id))
         return new_status
 
     def review(
@@ -1532,272 +1642,7 @@ class DashboardService:
         reason: str = "",
         confirmation_version: str = "",
     ) -> str:
-        verified_actions = {"approve_neutral", "approve_lens"}
-        manual_actions = {"manual_approve_neutral", "manual_approve_lens"}
-        allowed = {"archive", "withdraw", *verified_actions, *manual_actions}
-        if action not in allowed:
-            raise ValueError("Unsupported review action")
-        story = self.database.one("SELECT * FROM story_cluster WHERE id = ?", (story_id,))
-        if not story:
-            raise LookupError("Story not found")
-        ranked_story = next(
-            (item for item in self._story_rows() if item["id"] == story_id),
-            None,
-        )
-        if ranked_story:
-            story.update(ranked_story)
-        now = utc_now()
-        mode: str | None = None
-        new_status = story["status"]
-        work_kind: str | None = None
-        work_item_id: int | None = None
-        work_payload: dict[str, Any] = {"reason": reason.strip(), "requested_at": now}
-        if action == "archive":
-            new_status = "archived"
-        elif action == "withdraw":
-            new_status = "withdrawn"
-        elif action in verified_actions | manual_actions:
-            manual_override = action in manual_actions
-            qualification = (
-                qualification_state(self.database, story_id)
-                if manual_override
-                else recalculate_story_qualification(self.database, story_id)
-            )
-            story = self.database.one("SELECT * FROM story_cluster WHERE id = ?", (story_id,)) or story
-            if ranked_story:
-                story.update(ranked_story)
-            if story["status"] in {"archived", "withdrawn"}:
-                raise ValueError("Archived or withdrawn stories cannot be approved for drafting")
-            if manual_override and confirmation_version != MANUAL_CONFIRMATION_VERSION:
-                raise ValueError("Manual approval requires the current confirmation prompt")
-            if not manual_override and not qualification["qualified"]:
-                raise ValueError("Evidence and importance qualification must pass before drafting")
-            if not manual_override and story["status"] not in {"candidate", "draft_ready", "approved"}:
-                raise ValueError("Only verified candidates can be approved for drafting")
-            claims = self.database.query(
-                "SELECT id, text, status, volatility FROM claim WHERE story_id = ? ORDER BY id",
-                (story_id,),
-            )
-            sources = self._draft_sources(
-                story_id, allow_discovery=manual_override
-            )
-            claim_signatures, source_signatures = approval_signature_sets(claims, sources)
-            if manual_override and not claims:
-                raise ValueError("Manual approval requires at least one stored claim")
-            if manual_override and not any(
-                source.get("citation_allowed") for source in sources
-            ):
-                raise ValueError("Manual approval requires at least one safe public source")
-            lens_action = action in {"approve_lens", "manual_approve_lens"}
-            if lens_action:
-                if (
-                    not manual_override
-                    and story["opportunity_strength"] not in {"Strong", "Moderate"}
-                ):
-                    raise ValueError("An open-source lens requires a Strong or Moderate opportunity")
-                mode = "Open-Source Lens Brief"
-            else:
-                mode = "Neutral News Brief"
-            new_status = "approved"
-            work_kind = "draft"
-            approval_basis = "manual_override" if manual_override else "verified"
-            gate_snapshot = {
-                "evidence_gate": bool(qualification["evidence_gate"]),
-                "importance_gate": bool(qualification["effective_importance"]),
-                "automated_importance": bool(qualification["automated_importance"]),
-                "effective_importance": bool(qualification["effective_importance"]),
-                "lens_gate": story.get("opportunity_strength") in {"Strong", "Moderate"},
-                "lens_eligible": story.get("opportunity_strength") in {"Strong", "Moderate"},
-                "candidate_basis": str(qualification["candidate_basis"]),
-            }
-            work_payload = {
-                "schema_version": 3,
-                "story_id": story_id,
-                "mode": mode,
-                "reason": reason.strip(),
-                "approval_basis": approval_basis,
-                "manual_override": manual_override,
-                "confirmation_version": confirmation_version if manual_override else "",
-                "qualification_snapshot": gate_snapshot,
-                "approval_snapshot_at": now,
-                "story_revision": int(story.get("story_revision") or 1),
-                "claim_signatures": claim_signatures,
-                "source_signatures": source_signatures,
-                "story": {
-                    "id": story["id"],
-                    "story_revision": int(story.get("story_revision") or 1),
-                    "material_revision": int(story.get("material_revision") or 1),
-                    "headline": str(story.get("headline") or ""),
-                    "summary": str(story.get("summary") or ""),
-                    "lane": str(story.get("lane") or ""),
-                    "openness_class": str(story.get("openness_class") or ""),
-                    "opportunity_strength": story.get("opportunity_strength"),
-                    "relevance_bridge": str(story.get("relevance_bridge") or ""),
-                    "counterargument": str(story.get("counterargument") or ""),
-                    "updated_at": story["updated_at"],
-                    "first_public_at": story["first_public_at"],
-                    "detected_at": story["detected_at"],
-                    "freshness": story["freshness"],
-                    "material_update": bool(story["material_update"]),
-                },
-                "claims": claims,
-                "sources": sources,
-            }
-        with self.database.transaction() as connection:
-            if work_kind:
-                current_revision = connection.execute(
-                    "SELECT story_revision FROM story_cluster WHERE id = ?",
-                    (story_id,),
-                ).fetchone()
-                if (
-                    not current_revision
-                    or int(current_revision["story_revision"])
-                    != int(work_payload["story_revision"])
-                ):
-                    raise ValueError(
-                        "The story changed during approval; review the latest claims and sources again"
-                    )
-                latest_existing_draft = connection.execute(
-                    """
-                    SELECT status FROM draft
-                    WHERE story_id = ?
-                    ORDER BY version DESC LIMIT 1
-                    """,
-                    (story_id,),
-                ).fetchone()
-                if latest_existing_draft and latest_existing_draft["status"] not in {
-                    "Needs Review",
-                    "Editable Shell",
-                }:
-                    raise ValueError(
-                        "A completed draft already exists; revise it from Drafts & history"
-                    )
-                if (
-                    latest_existing_draft
-                    and latest_existing_draft["status"] == "Needs Review"
-                    and story["status"] != "candidate"
-                ):
-                    raise ValueError(
-                        "A replacement draft requires a candidate whose current draft needs review"
-                    )
-                existing = connection.execute(
-                    """
-                    SELECT id, status FROM work_item
-                    WHERE story_id = ? AND kind = 'draft'
-                    ORDER BY id DESC LIMIT 1
-                    """,
-                    (story_id,),
-                ).fetchone()
-                if existing and existing["status"] not in {"cancelled", "needs_reapproval", "completed"}:
-                    if existing["status"] in {"failed", "deferred", "waiting"}:
-                        raise ValueError("An existing draft request can be retried from this story")
-                    raise ValueError("A draft request is already pending for this story")
-                if existing and existing["status"] == "needs_reapproval":
-                    current_story = connection.execute(
-                        "SELECT status FROM story_cluster WHERE id = ?", (story_id,)
-                    ).fetchone()
-                    if not current_story or current_story["status"] != "candidate":
-                        raise ValueError("Requalify this story before approving a replacement draft")
-                if existing and existing["status"] == "completed":
-                    current_story = connection.execute(
-                        "SELECT status FROM story_cluster WHERE id = ?", (story_id,)
-                    ).fetchone()
-                    latest_draft = connection.execute(
-                        """
-                        SELECT status FROM draft
-                        WHERE story_id = ?
-                        ORDER BY version DESC LIMIT 1
-                        """,
-                        (story_id,),
-                    ).fetchone()
-                    if (
-                        not current_story
-                        or current_story["status"] != "candidate"
-                        or not latest_draft
-                        or latest_draft["status"] != "Needs Review"
-                    ):
-                        raise ValueError(
-                            "A completed draft already exists; revise it from Drafts & history"
-                        )
-            action_cursor = connection.execute(
-                """
-                INSERT INTO review_action(
-                    story_id, action, reason, draft_mode, created_at, approval_snapshot_json,
-                    story_revision, claim_signatures_json, source_signatures_json
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    story_id,
-                    action,
-                    reason.strip(),
-                    mode,
-                    now,
-                    Database.json(work_payload) if work_kind else "{}",
-                    int(story.get("story_revision") or 1),
-                    Database.json(claim_signatures) if work_kind else "[]",
-                    Database.json(source_signatures) if work_kind else "[]",
-                ),
-            )
-            connection.execute(
-                "UPDATE story_cluster SET status = ?, updated_at = ? WHERE id = ?",
-                (new_status, now, story_id),
-            )
-            if work_kind:
-                work_payload["review_action_id"] = int(action_cursor.lastrowid)
-                connection.execute(
-                    "UPDATE review_action SET approval_snapshot_json = ? WHERE id = ?",
-                    (
-                        Database.json(work_payload),
-                        int(action_cursor.lastrowid),
-                    ),
-                )
-                if action in manual_actions:
-                    connection.execute(
-                        """
-                        INSERT INTO candidate(
-                            story_id, evidence_gate, importance_gate, score, score_json,
-                            manual_override, manual_override_at, manual_override_action_id,
-                            manual_override_snapshot_json
-                        ) VALUES(?, ?, ?, ?, '{}', 1, ?, ?, ?)
-                        ON CONFLICT(story_id) DO UPDATE SET
-                            manual_override = 1,
-                            manual_override_at = excluded.manual_override_at,
-                            manual_override_action_id = excluded.manual_override_action_id,
-                            manual_override_snapshot_json = excluded.manual_override_snapshot_json
-                        """,
-                        (
-                            story_id,
-                            int(qualification["evidence_gate"]),
-                            int(qualification["automated_importance"]),
-                            int(story.get("importance_score") or 0),
-                            now,
-                            int(action_cursor.lastrowid),
-                            Database.json(gate_snapshot),
-                        ),
-                    )
-                work_cursor = connection.execute(
-                    """
-                    INSERT INTO work_item(
-                        kind, story_id, status, priority, payload_json, created_at,
-                        updated_at, idempotency_key, available_at
-                    ) VALUES(?, ?, 'queued', ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        work_kind,
-                        story_id,
-                        int(story.get("review_score") or 0),
-                        Database.json(work_payload),
-                        now,
-                        now,
-                        f"draft-approval:{int(action_cursor.lastrowid)}",
-                        now,
-                    ),
-                )
-                work_item_id = int(work_cursor.lastrowid)
-        if work_item_id is not None:
-            self._create_editable_draft_shell(work_item_id, work_payload)
-            self._dispatch_draft(work_item_id)
-        return new_status
+        return self._retired_review_action(story_id, action, reason, confirmation_version)
 
     def relevance_notification_state(self) -> dict[str, Any]:
         return {
@@ -2674,12 +2519,7 @@ class DashboardService:
             return count
 
     def mark_alerts_read(self) -> int:
-        with self.database.transaction() as connection:
-            cursor = connection.execute(
-                "UPDATE alert SET read_at = ? WHERE read_at IS NULL",
-                (utc_now(),),
-            )
-            return int(cursor.rowcount)
+        return self.mark_operational_notices_read()
 
     def evidence_bundle(self, story_id: str) -> dict[str, Any]:
         story = self.get_story(story_id)

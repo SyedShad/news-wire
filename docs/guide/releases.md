@@ -6,31 +6,23 @@ Open Source AI News Wire uses semantic application versions and explicit databas
 
 | Item | Value |
 |---|---|
-| Application | 0.5.2 |
-| Database schema | 10 |
+| Application | 0.6.0 |
+| Database schema | 11 |
 | Release tag | Pending local validation and source release |
 | Validated source commit | Bound by the local validation report at install time |
 | Distribution | Owner source repository; no prebuilt binary attached |
 
-Release 0.5.2 sends all newly fetched relevant items to Telegram, independently
-of publication date. Messages distinguish fetch time from verified original
-publication times. Telegram alerts remain hosted on the owner's Mac. Schema 10
-adds publication-time snapshots and independent delivery records. Telegram stays
-disabled until private-group pairing, a successful test, and deliberate activation.
-See [Telegram alerts](telegram-alerts.md) for setup and operating commands.
+Release 0.6.0 replaces graded story queues with a plain article feed and separates operational notices. It adds durable skill-based text and graphics jobs through the local Codex app-server. Live generation readiness requires local ChatGPT sign-in and successful local and hosted runs. Existing external article-alert policies and notification ledgers are preserved.
 
 Highlights:
 
-- Trusted detections receive an immediate Urgent floor; research-required detections research automatically and receive the same floor at any terminal outcome.
-- Every active story has one Create content action that creates a shell before its own fresh search.
-- Broader AI News is restricted to privacy, security, and regulation.
-- Reddit output follows one source-linked style and remains manually edited and published.
-- The reviewed identity pin is `codex-cli 0.146.0-alpha.9.2`; source discovery permits only web search, and final writing permits no tools.
-- The ChatGPT Sites frontend uses a redacted hosted read projection and expiring
-  relay queues; SQLite and every canonical mutation remain on the laptop.
-- Browser notifications show source-derived context. Start working runs only a
-  fresh source search; it never creates a draft, and Dismiss changes only the
-  notification.
+- All relevant fetched articles are visible without editorial scores, trust floors, or approval prerequisites.
+- Each article has independent content and graphics generation controls using runtime catalogs.
+- Broader AI News remains restricted to privacy, security, and regulation.
+- Selected skills determine output style and research. Publication remains manual.
+- Generation uses local/open-source Sign in with ChatGPT; no paid fallback is enabled.
+- The hosted frontend receives a redacted read projection and expiring relay queues; canonical data remains on the Mac.
+- Browser notifications retain source-derived context. Opening one leads to the news feed; Dismiss changes only the notification.
 
 See the complete [changelog](../../CHANGELOG.md) for the file-level release record.
 

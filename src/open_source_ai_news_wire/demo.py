@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from .storage import Database
+from .storage import Database, backfill_fetched_articles
 
 
 def _iso(moment: datetime) -> str:
@@ -330,4 +330,6 @@ def seed_demo_data(database: Database, *, force: bool = False) -> bool:
             "INSERT INTO diagnostic_event(level, event_type, message, created_at) VALUES(?, ?, ?, ?)",
             ("info", "demo.seeded", "Fictional demo records were initialized for dashboard evaluation.", _iso(now)),
         )
+    with database.transaction() as connection:
+        backfill_fetched_articles(connection)
     return True

@@ -23,9 +23,9 @@ def test_burst_notifications_are_grouped_and_never_duplicated(tmp_path: Path) ->
         database.execute(
             """
             INSERT INTO alert(kind, severity, title, body, created_at)
-            VALUES('candidate', 'high', ?, 'Ready for review', ?)
+            VALUES('health', 'high', ?, 'Source unavailable', ?)
             """,
-            (f"Candidate {index}", now),
+            (f"Source {index}", now),
         )
     database.set_state("notifications_enabled", "true", now)
     database.set_state("shadow_mode", "false", now)
@@ -113,6 +113,7 @@ def test_activation_watermark_and_severity_filter_suppress_old_or_standard_alert
         (old, "candidate", "high", "Historical candidate"),
         (current, "candidate", "standard", "Standard candidate"),
         (current, "candidate", "high", "Current candidate"),
+        (current, "health", "high", "Current outage"),
     ):
         database.execute(
             "INSERT INTO alert(kind,severity,title,body,created_at) VALUES(?,?,?,'Body',?)",
@@ -132,7 +133,7 @@ def test_activation_watermark_and_severity_filter_suppress_old_or_standard_alert
     ).dispatch_pending()
 
     assert delivered == 1
-    assert commands[0][-2:] == ["Current candidate", "Body"]
+    assert commands[0][-2:] == ["Current outage", "Body"]
     assert database.one("SELECT COUNT(*) AS count FROM notification_delivery") == {"count": 1}
 
 

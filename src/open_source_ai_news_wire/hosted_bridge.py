@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import base64
 import hashlib
 import hmac
 import json
@@ -25,14 +26,14 @@ import httpx
 
 from . import __version__
 from .config import RuntimePaths, ensure_runtime_layout
-from .ranking import ranking_sort_key
+from .generation import GenerationService
 from .runner import Worker
 from .scheduler import LaunchAgentManager
 from .services import DashboardService
 from .storage import Database
 
 
-BRIDGE_VERSION = "2.2.0"
+BRIDGE_VERSION = "2.3.0"
 BRIDGE_LABEL = "com.opensourceainewswire.hostedbridge"
 BRIDGE_KEYCHAIN_SERVICE = "com.opensourceainewswire.hostedbridge.secret"
 SITES_ACCESS_KEYCHAIN_SERVICE = "com.opensourceainewswire.hostedbridge.sites-access"
@@ -45,18 +46,18 @@ SYNC_CHUNK_TARGET_BYTES = 1_250_000
 ALLOWED_OPERATIONS = frozenset(
     {
         "story.review",
-        "story.evidence.inspect",
-        "story.evidence.confirm",
-        "story.evidence.exclude",
-        "story.content.create",
-        "story.draft.retry",
+        "generation.create",
+        "generation.cancel",
+        "generation.retry",
+        "generation.input",
+        "generation.save",
+        "operations.mark_read",
         "draft.save",
         "source.toggle",
         "schedule.action",
         "schedule.catch_up",
         "diagnostics.purge",
         "alerts.mark_read",
-        "article_alert.start_research",
         "article_alert.dismiss",
         "bridge.healthcheck",
     }
@@ -283,6 +284,8 @@ def _json_safe(value: Any, *, key: str = "") -> Any:
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     if isinstance(value, str):
+        if key == "data_base64":
+            return value
         return re.sub(
             r"/(?:Users|private|var|tmp)/[^\s\"']+",
             "[local path]",
@@ -293,191 +296,124 @@ def _json_safe(value: Any, *, key: str = "") -> Any:
     return str(value)
 
 
-def _all_story_summaries(
-    service: DashboardService,
-    *,
-    window: str = "all",
-    sort: str = "priority",
-    kind: str | None = None,
-) -> list[dict[str, Any]]:
-    page = service.list_story_page(
-        window=window,
-        sort=sort,
-        kind=kind,
-        page_size=None,
-    )
-    return page["stories"]
+def _all_story_summaries(service: DashboardService, **_kwargs: Any) -> list[dict[str, Any]]:
+    """The hosted story index now contains independent fetched articles."""
+    return service.list_articles(page_size=None)["articles"]
 
 
-def build_dashboard_snapshot(
-    service: DashboardService,
-    *,
-    story_summaries: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    all_stories = (
-        story_summaries
-        if story_summaries is not None
-        else _all_story_summaries(service, window="all")
-    )
-    overview = service.overview(story_rows=all_stories)
-    summaries = [
-        story for story in all_stories
-        if story["is_review_current"]
-        and story["status"] not in {"archived", "withdrawn"}
-    ]
-    summaries.sort(key=ranking_sort_key)
-    stories: list[dict[str, Any]] = []
-    for summary in summaries:
-        detailed = service.get_story(
-            str(summary["id"]),
-            ranked_summary=summary,
-        ) or summary
-        stories.append(_json_safe(detailed))
-    drafts = [_json_safe(item) for item in service.list_drafts()[:100]]
-    sources = [_json_safe(item) for item in service.sources()["rows"]]
+def build_dashboard_snapshot(service: DashboardService, *, story_summaries=None) -> dict[str, Any]:
+    articles = story_summaries if story_summaries is not None else _all_story_summaries(service)
+    overview = service.article_overview()
     settings = service.settings()
-    snapshot: dict[str, Any] = {
-        "schema_version": 1,
-        "generated_at": _utc_now(),
-        "runtime_version": __version__,
+    snapshot = {
+        "schema_version": 1, "generated_at": _utc_now(), "runtime_version": __version__,
         "overview": {
-            "counts": _json_safe(overview["counts"]),
-            "sources": _json_safe(overview["sources"]),
-            "queue_count": int(overview["queue_count"]),
-            "queue_lag": str(overview["queue_lag"]),
-            "top_stories": _json_safe(overview["top_stories"]),
-            "alerts": _json_safe(overview["alerts"]),
-            "scans": _json_safe(overview["scans"]),
+            "counts": _json_safe(overview["counts"]), "sources": _json_safe(overview["sources"]),
+            "queue_count": int(overview["queue_count"]), "queue_lag": str(overview["queue_lag"]),
+            "top_stories": _json_safe(articles[:8]), "alerts": [], "scans": _json_safe(overview.get("scans", [])),
         },
-        "stories": stories,
-        "drafts": drafts,
-        "sources": sources,
-        "schedule": _json_safe(overview["schedule"]),
+        "stories": _json_safe(articles[:25]), "drafts": _json_safe(service.list_drafts()[:100]),
+        "sources": _json_safe(service.sources()["rows"]), "schedule": _json_safe(overview["schedule"]),
         "notices": _json_safe(service.list_inbox_notices()),
-        "settings": _json_safe(
-            {key: value for key, value in settings.items() if key != "diagnostics"}
-        ),
+        "settings": _json_safe({key: value for key,value in settings.items() if key != "diagnostics"}),
         "diagnostics": _json_safe(settings["diagnostics"]),
     }
-    while len(json.dumps(snapshot, separators=(",", ":")).encode("utf-8")) > MAX_SNAPSHOT_BYTES:
+    while len(json.dumps(snapshot, separators=(",", ":")).encode()) > MAX_SNAPSHOT_BYTES:
         if len(snapshot["stories"]) > 5:
             snapshot["stories"].pop()
         elif len(snapshot["drafts"]) > 5:
             snapshot["drafts"].pop()
         elif snapshot["diagnostics"]:
             snapshot["diagnostics"].pop()
+        elif snapshot["notices"]:
+            # The complete notice history travels through chunked resource
+            # projections. A bounded summary must not stop the bridge syncing.
+            snapshot["notices"].pop()
         else:
             raise HostedBridgeError("Dashboard snapshot exceeds the hosted size limit")
     return snapshot
 
 
-def build_story_projection(
-    service: DashboardService,
-    *,
-    story_summaries: list[dict[str, Any]] | None = None,
-) -> tuple[list[dict[str, Any]], str]:
-    """Build a normalized, redacted index with stable local ordering ranks."""
-    priority_rows = list(
-        story_summaries
-        if story_summaries is not None
-        else _all_story_summaries(service, window="all", sort="priority")
-    )
-    priority_rows.sort(key=ranking_sort_key)
-    newest_rows = sorted(
-        priority_rows,
-        key=lambda story: ranking_sort_key(story, newest=True),
-    )
-    correction_ids = {
-        str(row["story_id"])
-        for row in service.database.query(
-            "SELECT DISTINCT story_id FROM alert WHERE kind = 'correction' "
-            "AND story_id IS NOT NULL"
-        )
-    }
-    newest_rank = {str(item["id"]): index for index, item in enumerate(newest_rows)}
-    stories: list[dict[str, Any]] = []
-    for index, item in enumerate(priority_rows):
-        story = _json_safe(item)
-        if not isinstance(story, dict):
-            continue
-        # These values drift on every call even when the corpus has not changed.
-        # Freshness/current-window fields retain the meaningful time boundary.
-        story.pop("age_hours", None)
-        story.pop("ranking_age_hours", None)
-        story["priority_rank"] = index
-        story["newest_rank"] = newest_rank.get(str(item["id"]), index)
-        story["is_correction"] = str(item["id"]) in correction_ids
-        stories.append(story)
-    encoded = json.dumps(stories, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    return stories, hashlib.sha256(encoded).hexdigest()
+def build_story_projection(service: DashboardService, *, story_summaries=None):
+    articles = story_summaries if story_summaries is not None else _all_story_summaries(service)
+    records = []
+    for rank, article in enumerate(articles):
+        value = _json_safe(article)
+        value["newest_rank"] = rank
+        records.append(value)
+    encoded = json.dumps(records, separators=(",", ":"), sort_keys=True).encode()
+    return records, hashlib.sha256(encoded).hexdigest()
 
 
-def build_resource_projection(
-    service: DashboardService,
-    *,
-    story_summaries: list[dict[str, Any]] | None = None,
-) -> tuple[list[dict[str, Any]], str]:
-    """Build normalized projections for every non-index dashboard surface."""
-    resources: list[dict[str, Any]] = []
+def _generation_manager(service: DashboardService) -> GenerationService:
+    manager = getattr(service, "generation_service", None)
+    if manager is None:
+        manager = GenerationService(service.database)
+        service.generation_service = manager
+    return manager
 
-    def append(resource_type: str, resource_id: str, rank: int, payload: Any) -> None:
+
+def _artifact_resources(manager: GenerationService, job: dict[str, Any]):
+    """Bound every transported artifact and chunk; paths stay on the laptop."""
+    resources = []
+    descriptors = []
+    for artifact in job.get("artifacts", []):
+        artifact_id = str(artifact["id"])
+        metadata_id = f"{job['id']}:{artifact_id}"
+        descriptor = {"id": metadata_id, "job_id": str(job["id"]), "artifact_id": artifact_id,
+                      "name": artifact["name"], "mime_type": artifact.get("mime_type", "application/octet-stream")}
+        try:
+            path = manager.artifact_path(str(job["id"]), artifact_id)
+            size = path.stat().st_size
+            if size > 25 * 1024 * 1024:
+                raise ValueError("Artifact exceeds the 25 MiB hosted download limit; download it locally.")
+            chunks = []
+            with path.open("rb") as handle:
+                while chunk := handle.read(500 * 1024):
+                    chunks.append(base64.b64encode(chunk).decode("ascii"))
+            descriptor.update(size_bytes=size, chunk_count=len(chunks), sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+            for index,data in enumerate(chunks):
+                resources.append(("generation_artifact_chunk", f"{metadata_id}:{index}", {"index":index,"data_base64":data}))
+        except (OSError, ValueError, LookupError) as error:
+            descriptor.update(size_bytes=0,chunk_count=0,error=str(error))
+        descriptors.append(descriptor)
+        resources.append(("generation_artifact", metadata_id, descriptor))
+    return descriptors, resources
+
+
+def build_resource_projection(service: DashboardService, *, story_summaries=None):
+    resources = []
+    def append(kind, identifier, rank, payload):
         safe = _json_safe(payload)
         if isinstance(safe, dict):
-            if resource_type == "story_detail":
-                safe.pop("age_hours", None)
-                safe.pop("ranking_age_hours", None)
-            resources.append({
-                "resource_type": resource_type,
-                "resource_id": resource_id,
-                "rank": rank,
-                "payload": safe,
-            })
-
-    all_stories = (
-        story_summaries
-        if story_summaries is not None
-        else _all_story_summaries(service, window="all")
-    )
-    current = [
-        item for item in all_stories
-        if item["is_review_current"]
-        if item.get("status") not in {"archived", "withdrawn"}
-    ]
-    current.sort(key=ranking_sort_key)
-    for rank, summary in enumerate(current):
-        story_id = str(summary["id"])
-        append(
-            "story_detail",
-            story_id,
-            rank,
-            service.get_story(story_id, ranked_summary=summary) or summary,
-        )
-
-    drafts = service.list_drafts()
-    for rank, draft in enumerate(drafts):
+            resources.append({"resource_type":kind,"resource_id":str(identifier),"rank":rank,"payload":safe})
+    articles = story_summaries if story_summaries is not None else _all_story_summaries(service)
+    manager = _generation_manager(service)
+    append("generation_catalog", "runtime", 0, manager.catalog())
+    for rank,article in enumerate(articles):
+        identifier = str(article["id"])
+        append("article_detail", identifier, rank, service.get_article(identifier) or article)
+        for job in manager.list_jobs(identifier):
+            descriptors, artifacts = _artifact_resources(manager, job)
+            public = {**job,"artifacts":descriptors}
+            append("generation_job", job["id"], rank, public)
+            for kind,key,payload in artifacts: append(kind,key,rank,payload)
+    for rank,draft in enumerate(service.list_drafts()):
         kind = str(draft.get("entry_kind") or "draft")
-        draft_id = str(draft.get("id") or rank)
-        append("draft_summary", f"{kind}:{draft_id}", rank, draft)
-        if kind == "draft" and draft_id.isdigit():
-            detail = service.get_draft(int(draft_id))
-            if detail:
-                append("draft_detail", draft_id, rank, detail)
-
-    for rank, source in enumerate(service.sources()["rows"]):
-        append("source", str(source.get("id") or rank), rank, source)
-    for rank, notice in enumerate(service.list_inbox_notices()):
-        append("notice", str(notice.get("id") or rank), rank, notice)
-
-    schedule = service.schedule_status()
+        identifier = str(draft.get("id") or rank)
+        append("draft_summary", f"{kind}:{identifier}", rank, draft)
+        if kind == "draft" and identifier.isdigit():
+            detail = service.get_draft(int(identifier))
+            if detail: append("draft_detail",identifier,rank,detail)
+    for rank,source in enumerate(service.sources()["rows"]): append("source",source["id"],rank,source)
+    for rank,notice in enumerate(service.list_inbox_notices()): append("notice",notice["id"],rank,notice)
+    append("schedule","current",0,service.schedule_status())
     settings = service.settings()
-    append("schedule", "current", 0, schedule)
-    append("settings", "current", 0, {key: value for key, value in settings.items() if key != "diagnostics"})
-    for rank, diagnostic in enumerate(settings["diagnostics"]):
-        append("diagnostic", str(diagnostic.get("id") or rank), rank, diagnostic)
-
-    resources.sort(key=lambda item: (item["resource_type"], item["rank"], item["resource_id"]))
-    encoded = json.dumps(resources, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    return resources, hashlib.sha256(encoded).hexdigest()
+    append("settings","current",0,{key:value for key,value in settings.items() if key != "diagnostics"})
+    for rank,diagnostic in enumerate(settings["diagnostics"]): append("diagnostic",diagnostic.get("id",rank),rank,diagnostic)
+    resources.sort(key=lambda item:(item["resource_type"],item["rank"],item["resource_id"]))
+    encoded = json.dumps(resources,separators=(",", ":"),sort_keys=True).encode()
+    return resources,hashlib.sha256(encoded).hexdigest()
 
 
 def build_notification_projection(
@@ -599,6 +535,7 @@ class CommandHistory:
 class LocalCommandExecutor:
     def __init__(self, service: DashboardService):
         self.service = service
+        self.generation = _generation_manager(service)
 
     @staticmethod
     def _string(payload: dict[str, Any], key: str, *, required: bool = True) -> str:
@@ -634,7 +571,31 @@ class LocalCommandExecutor:
     def execute(self, operation: str, payload: dict[str, Any]) -> tuple[Any, bool]:
         if operation not in ALLOWED_OPERATIONS:
             raise ValueError("Unsupported owner operation")
-        if operation == "story.review":
+        if operation == "generation.create":
+            skills = payload.get("skill_ids")
+            if not isinstance(skills,list) or any(not isinstance(value,str) for value in skills):
+                raise ValueError("skill_ids must be an ordered list")
+            result = self.generation.enqueue(self._string(payload,"article_id"),self._string(payload,"task_type"),
+                self._string(payload,"model"),skills,self._string(payload,"customizations",required=False),self._string(payload,"request_id"))
+            threading.Thread(target=self.generation.run_pending,name="wire-hosted-generation",daemon=True).start()
+        elif operation == "generation.cancel":
+            result = self.generation.cancel(self._string(payload,"job_id"))
+        elif operation == "generation.retry":
+            result = self.generation.retry(self._string(payload,"job_id"), request_id=self._string(payload,"request_id",required=False) or None)
+            threading.Thread(target=self.generation.run_pending,name="wire-hosted-generation",daemon=True).start()
+        elif operation == "generation.input":
+            answers = payload.get("answers")
+            if not isinstance(answers, dict):
+                raise ValueError("answers must contain the requested input fields")
+            result = self.generation.respond(self._string(payload,"job_id"), answers)
+            threading.Thread(target=self.generation.run_pending,name="wire-hosted-generation",daemon=True).start()
+        elif operation == "generation.save":
+            result = self.generation.save_text(self._string(payload,"job_id"),self._string(payload,"output_text",required=False))
+        elif operation == "operations.mark_read":
+            result = {"updated": self.service.mark_operational_notices_read()}
+        elif operation == "story.review":
+            if payload.get("action") not in {"archive","withdraw"}:
+                raise ValueError("Editorial approval is retired. Use generation.create.")
             result = self.service.review(
                 self._string(payload, "story_id"),
                 self._string(payload, "action"),
@@ -706,13 +667,7 @@ class LocalCommandExecutor:
                 )
             }
         elif operation == "alerts.mark_read":
-            result = {"updated": self.service.mark_alerts_read()}
-        elif operation == "article_alert.start_research":
-            result = self.service.start_notification_research(
-                self._positive_identifier(payload, "event_id"),
-                self._string(payload, "article_key"),
-                self._string(payload, "story_id"),
-            )
+            result = {"updated": self.service.mark_operational_notices_read()}
         elif operation == "article_alert.dismiss":
             result = self.service.dismiss_notification_article(
                 self._positive_identifier(payload, "event_id"),
@@ -799,6 +754,7 @@ class HostedBridge:
         self.history = CommandHistory(paths.operations / BRIDGE_HISTORY_NAME)
         self.executor = LocalCommandExecutor(service)
         self.stop_requested = False
+        self._cached_at = 0.0
         self._cached_fingerprint: tuple[tuple[int, int] | None, ...] | None = None
         self._cached_bundle: tuple[
             dict[str, Any],
@@ -838,7 +794,7 @@ class HostedBridge:
         str,
     ]:
         fingerprint = self._database_fingerprint()
-        if self._cached_bundle is not None and fingerprint == self._cached_fingerprint:
+        if self._cached_bundle is not None and fingerprint == self._cached_fingerprint and time.monotonic() - self._cached_at < 60:
             (
                 snapshot, stories, story_digest, cached_resources, _,
                 notification_articles, notification_digest,
@@ -896,6 +852,7 @@ class HostedBridge:
             notification_articles,
             notification_digest,
         )
+        self._cached_at = time.monotonic()
         return (
             snapshot, stories, story_digest, resources, resource_digest,
             notification_articles, notification_digest,
@@ -1158,7 +1115,16 @@ class HostedBridge:
             resource_type = str(request.get("resourceType") or "")
             resource_id = str(request.get("resourceId") or "")
             try:
-                if resource_type == "story":
+                if resource_type == "article":
+                    payload = self.service.get_article(resource_id)
+                elif resource_type == "generation_catalog":
+                    payload = _generation_manager(self.service).catalog(force_reload=True)
+                elif resource_type == "generation_job":
+                    payload = _generation_manager(self.service).get_job(resource_id)
+                    if payload:
+                        descriptors, _ = _artifact_resources(_generation_manager(self.service),payload)
+                        payload = {**payload,"artifacts":descriptors}
+                elif resource_type == "story":
                     payload = self.service.get_story(resource_id)
                 elif resource_type == "draft":
                     payload = self.service.get_draft(int(resource_id))
@@ -1183,6 +1149,7 @@ class HostedBridge:
         }
 
     def run_forever(self) -> None:
+        threading.Thread(target=_generation_manager(self.service).run_pending,name="wire-generation-recovery",daemon=True).start()
         delay = self.interval_seconds
         while not self.stop_requested:
             started_at = time.monotonic()

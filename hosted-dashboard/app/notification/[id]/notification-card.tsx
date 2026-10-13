@@ -56,7 +56,7 @@ export default function NotificationCard({ eventId }: { eventId: string }) {
       await storeCachedPushPayload(completed);
       setMessage(completedAction === "dismiss"
         ? "This notification is dismissed. The item remains available in the News Wire."
-        : "Fresh source research has been queued. No content draft was created.");
+        : "Open the news inbox to decide what to create.");
     } catch (reason) {
       const detail = reason instanceof Error ? reason.message : "The action could not be completed.";
       const failed = { ...payload, actionState: { action, status: "failed" as const, message: detail } };
@@ -98,7 +98,7 @@ export default function NotificationCard({ eventId }: { eventId: string }) {
           </div>
         )}
         <div className="notification-action-row" aria-label="News item actions">
-          <button type="button" className="button button-push-primary" disabled={!payload || busy !== null || completedAction !== null} onClick={() => void act("start_research")}>{busy === "start_research" ? "Starting…" : "Start working"}</button>
+          <a className="button button-push-primary" href="/dashboard/inbox">Open news inbox</a>
           <button type="button" className="button" disabled={!payload || busy !== null || completedAction !== null} onClick={() => void act("dismiss")}>{busy === "dismiss" ? "Dismissing…" : "Dismiss"}</button>
         </div>
         <div className="notification-feedback" aria-live="polite">

@@ -17,6 +17,21 @@ This is a focused **configuration reference** maintained alongside the engine. T
 
 ---
 
+## News Wire generation
+
+Generation runs locally through the installed Codex app-server and this application's Sign in with ChatGPT registration. The hosted dashboard relays commands and bounded artifact results; it receives no credentials or internal output paths.
+
+```bash
+uv run open-source-ai-news-wire generation login
+uv run open-source-ai-news-wire generation status
+uv run open-source-ai-news-wire generation catalog
+uv run open-source-ai-news-wire generation logout
+```
+
+`OPEN_SOURCE_AI_NEWS_WIRE_DATA` selects the local data root, which must remain outside Git. `NEWSWIRE_CODEX_BINARY` optionally selects an installed Codex executable. Model and ordered skill selections are saved separately for content and graphics. Skills initially remain unselected. Catalog membership does not guarantee model access; failed access never switches providers or models silently.
+
+The worker privately injects its short-lived ChatGPT access token into its own app-server process. Do not set, copy, or publish that internal token environment variable. No OpenAI API key or paid fallback is used. The current plan route lacks native image generation and hosted connectors; compatible local renderer skills remain available. Live local and hosted generation must be validated before readiness is declared.
+
 ## Local Telegram alerts
 
 The News Wire has one narrowly scoped destination integration: an explicitly

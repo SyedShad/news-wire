@@ -176,12 +176,14 @@ export const storyProjection = sqliteTable(
     isCorrection: integer("is_correction").notNull(),
     priorityRank: integer("priority_rank").notNull(),
     newestRank: integer("newest_rank").notNull(),
+    firstFetchedAt: text("first_fetched_at").notNull().default(""),
     summaryJson: text("summary_json").notNull(),
     updatedAt: integer("updated_at").notNull(),
   },
   (table) => [
     index("story_projection_priority_idx").on(table.priorityRank),
     index("story_projection_newest_idx").on(table.newestRank),
+    index("story_projection_fetched_idx").on(table.firstFetchedAt, table.id),
     index("story_projection_window_idx").on(table.isReviewCurrent, table.freshness, table.status),
     index("story_projection_sync_idx").on(table.syncId),
   ],
@@ -191,7 +193,7 @@ export const detailCache = sqliteTable(
   "detail_cache",
   {
     resourceKey: text("resource_key").primaryKey(),
-    resourceType: text("resource_type", { enum: ["story", "draft"] }).notNull(),
+    resourceType: text("resource_type", { enum: ["story", "draft", "article", "generation_catalog", "generation_job"] }).notNull(),
     resourceId: text("resource_id").notNull(),
     payloadJson: text("payload_json").notNull(),
     updatedAt: integer("updated_at").notNull(),
@@ -204,7 +206,7 @@ export const readRequests = sqliteTable(
   "read_request",
   {
     id: text("id").primaryKey(),
-    resourceType: text("resource_type", { enum: ["story", "draft"] }).notNull(),
+    resourceType: text("resource_type", { enum: ["story", "draft", "article", "generation_catalog", "generation_job"] }).notNull(),
     resourceId: text("resource_id").notNull(),
     status: text("status", { enum: ["pending", "claimed", "completed", "failed"] }).notNull(),
     requestedBy: text("requested_by").notNull(),
@@ -223,7 +225,7 @@ export const readRequests = sqliteTable(
     ),
     check(
       "read_request_resource_type_check",
-      sql`${table.resourceType} IN ('story', 'draft')`,
+      sql`${table.resourceType} IN ('story', 'draft', 'article', 'generation_catalog', 'generation_job')`,
     ),
   ],
 );

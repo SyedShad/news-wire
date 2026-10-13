@@ -58,7 +58,7 @@ export async function ensureDashboardSchema(db: D1Database): Promise<void> {
       lane TEXT NOT NULL, freshness TEXT NOT NULL, research_status TEXT NOT NULL,
       ingestion_context TEXT NOT NULL, is_review_current INTEGER NOT NULL,
       is_correction INTEGER NOT NULL, priority_rank INTEGER NOT NULL,
-      newest_rank INTEGER NOT NULL, summary_json TEXT NOT NULL, updated_at INTEGER NOT NULL)`),
+      newest_rank INTEGER NOT NULL, summary_json TEXT NOT NULL, updated_at INTEGER NOT NULL, first_fetched_at TEXT NOT NULL DEFAULT '')`),
     db.prepare("CREATE INDEX IF NOT EXISTS story_projection_priority_idx ON story_projection (priority_rank)"),
     db.prepare("CREATE INDEX IF NOT EXISTS story_projection_newest_idx ON story_projection (newest_rank)"),
     db.prepare("CREATE INDEX IF NOT EXISTS story_projection_window_idx ON story_projection (is_review_current, freshness, status)"),
@@ -91,6 +91,10 @@ export async function ensureDashboardSchema(db: D1Database): Promise<void> {
     try {
       await db.prepare("ALTER TABLE projection_state ADD COLUMN notification_total INTEGER NOT NULL DEFAULT 0").run();
     } catch { /* migration already applied */ }
+    try {
+      await db.prepare("ALTER TABLE story_projection ADD COLUMN first_fetched_at TEXT NOT NULL DEFAULT ''").run();
+    } catch { /* migration already applied */ }
+    await db.prepare("CREATE INDEX IF NOT EXISTS story_projection_fetched_idx ON story_projection (first_fetched_at, id)").run();
     await db.prepare("UPDATE command_queue SET expires_at = created_at + ? WHERE expires_at = 0")
       .bind(COMMAND_TTL_MS).run();
   }).catch((error) => {
@@ -251,19 +255,19 @@ export async function saveStoryChunk(
       : []),
     ...stories.map((story, index) => db.prepare(`INSERT INTO story_projection
     (id, sync_id, status, lane, freshness, research_status, ingestion_context,
-     is_review_current, is_correction, priority_rank, newest_rank, summary_json, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     is_review_current, is_correction, priority_rank, newest_rank, summary_json, updated_at, first_fetched_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET sync_id = excluded.sync_id, status = excluded.status,
       lane = excluded.lane, freshness = excluded.freshness,
       research_status = excluded.research_status, ingestion_context = excluded.ingestion_context,
       is_review_current = excluded.is_review_current, is_correction = excluded.is_correction,
       priority_rank = excluded.priority_rank, newest_rank = excluded.newest_rank,
-      summary_json = excluded.summary_json, updated_at = excluded.updated_at`).bind(
+      summary_json = excluded.summary_json, updated_at = excluded.updated_at, first_fetched_at = excluded.first_fetched_at`).bind(
         story.id, syncId, scalarText(story.status), scalarText(story.lane),
         scalarText(story.freshness), scalarText(story.research_status),
         scalarText(story.ingestion_context), scalarBoolean(story.is_review_current),
         scalarBoolean(story.is_correction), scalarNumber(story.priority_rank, index),
-        scalarNumber(story.newest_rank, index), JSON.stringify(story), now,
+        scalarNumber(story.newest_rank, index), JSON.stringify(story), now, scalarText(story.first_fetched_at) || scalarText(story.detected_at),
       )),
   ];
   for (let offset = 0; offset < statements.length; offset += 50) {
@@ -364,7 +368,7 @@ export async function readSnapshot(db: D1Database): Promise<StoredDashboardSnaps
     const snapshot = JSON.parse(row.snapshot_json) as DashboardSnapshot;
     if (projected) {
       const projectedResources = await db.prepare(`SELECT resource_type, payload_json
-        FROM resource_projection ORDER BY resource_type, rank, resource_key`)
+        FROM resource_projection WHERE resource_type NOT IN ('generation_artifact', 'generation_artifact_chunk') ORDER BY resource_type, rank, resource_key`)
         .all<{ resource_type: ResourceProjection["resource_type"]; payload_json: string }>();
       const grouped = new Map<string, Array<Record<string, JsonValue>>>();
       for (const resource of projectedResources.results || []) {
@@ -375,7 +379,10 @@ export async function readSnapshot(db: D1Database): Promise<StoredDashboardSnaps
           grouped.set(resource.resource_type, current);
         } catch { /* skip malformed projection row */ }
       }
-      if (grouped.has("story_detail")) snapshot.stories = grouped.get("story_detail")!;
+      if (grouped.has("article_detail")) snapshot.stories = grouped.get("article_detail")!;
+      else if (grouped.has("story_detail")) snapshot.stories = grouped.get("story_detail")!;
+      if (grouped.has("generation_catalog")) snapshot.generation_catalog = grouped.get("generation_catalog")![0];
+      if (grouped.has("generation_job")) snapshot.generation_jobs = grouped.get("generation_job")!;
       if (grouped.has("draft_summary")) snapshot.drafts = grouped.get("draft_summary")!;
       if (grouped.has("source")) snapshot.sources = grouped.get("source")!;
       if (grouped.has("notice")) snapshot.notices = grouped.get("notice")!;
@@ -436,30 +443,20 @@ export async function listStoryPage(
   },
 ): Promise<StoryPage> {
   await ensureDashboardSchema(db);
-  const window = new Set(["review_now", "older", "all"]).has(input.window || "") ? input.window! : "review_now";
-  const sort = input.sort === "newest" ? "newest" : "priority";
+  const sort = "newest";
   const clauses: string[] = [];
   const values: unknown[] = [];
+  // Machine review windows and ranking never restrict the fetched article feed.
   if (input.status && input.status !== "all") { clauses.push("status = ?"); values.push(input.status); }
   if (input.lane && input.lane !== "all") { clauses.push("lane = ?"); values.push(input.lane); }
-  if (window === "review_now") clauses.push("is_review_current = 1 AND status NOT IN ('archived', 'withdrawn')");
-  if (window === "older") clauses.push("freshness = 'Older' AND status NOT IN ('archived', 'withdrawn')");
-  const kind = input.kind || "all";
-  if (kind === "ready") clauses.push("status NOT IN ('archived', 'withdrawn', 'content_ready', 'draft_ready')");
-  if (kind === "researching") clauses.push("research_status = 'researching'");
-  if (kind === "content_ready") clauses.push("status IN ('content_ready', 'draft_ready')");
-  if (kind === "catch_up") clauses.push("ingestion_context IN ('recovery', 'extended')");
-  if (kind === "correction") clauses.push("is_correction = 1");
-  if (kind === "health") return { stories: [], total: 0, nextCursor: "" };
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const count = await db.prepare(`SELECT COUNT(*) AS count FROM story_projection ${where}`)
     .bind(...values).first<{ count: number }>();
   const total = Number(count?.count || 0);
   const offset = decodeCursor(input.cursor || "", sort);
   const pageSize = Math.max(1, Math.min(100, input.pageSize || 25));
-  const rank = sort === "newest" ? "newest_rank" : "priority_rank";
   const response = await db.prepare(`SELECT summary_json FROM story_projection ${where}
-    ORDER BY ${rank}, id LIMIT ? OFFSET ?`).bind(...values, pageSize, offset).all<{ summary_json: string }>();
+    ORDER BY COALESCE(NULLIF(first_fetched_at, ''), json_extract(summary_json, '$.detected_at'), '') DESC, id DESC LIMIT ? OFFSET ?`).bind(...values, pageSize, offset).all<{ summary_json: string }>();
   const stories = (response.results || []).flatMap((row) => {
     try { return [JSON.parse(row.summary_json) as StoryProjection]; } catch { return []; }
   });
@@ -519,7 +516,7 @@ export async function ensureArticleAlertCommand(
   db: D1Database,
   input: {
     commandId: string;
-    operation: "article_alert.start_research" | "article_alert.dismiss";
+    operation: "article_alert.dismiss";
     payload: Record<string, JsonValue>;
     requestedBy: string;
   },
@@ -556,6 +553,8 @@ export async function listCommands(db: D1Database, limit = 20): Promise<OwnerCom
 
 export async function claimCommands(db: D1Database, limit = 10): Promise<OwnerCommand[]> {
   await ensureDashboardSchema(db);
+  await db.prepare("UPDATE command_queue SET status='failed',completed_at=?,error='Automatic editorial research was retired. Open the news inbox.' WHERE operation='article_alert.start_research' AND status IN ('pending','claimed')")
+    .bind(Date.now()).run();
   await expireCommands(db);
   const now = Date.now();
   const staleBefore = now - 2 * 60_000;
@@ -613,19 +612,20 @@ export async function readDetail(
   resourceId: string,
 ): Promise<Record<string, JsonValue> | null> {
   await ensureDashboardSchema(db);
-  const projectionType = resourceType === "story" ? "story_detail" : "draft_detail";
-  const projected = await db.prepare(`SELECT payload_json FROM resource_projection
+  const projectionType = ({story: "story_detail", draft: "draft_detail", article: "article_detail", generation_catalog: "generation_catalog", generation_job: "generation_job"} as const)[resourceType];
+  const projected = await db.prepare(`SELECT payload_json, updated_at FROM resource_projection
     WHERE resource_type = ? AND resource_id = ? LIMIT 1`).bind(projectionType, resourceId)
-    .first<{ payload_json: string }>();
-  if (projected) {
-    try { return JSON.parse(projected.payload_json) as Record<string, JsonValue>; } catch { /* use cache */ }
-  }
+    .first<{ payload_json: string; updated_at: number }>();
   await db.prepare("DELETE FROM detail_cache WHERE expires_at <= ?").bind(Date.now()).run();
   const key = `${resourceType}:${resourceId}`;
-  const row = await db.prepare("SELECT payload_json FROM detail_cache WHERE resource_key = ? AND expires_at > ?")
-    .bind(key, Date.now()).first<{ payload_json: string }>();
-  if (!row) return null;
-  try { return JSON.parse(row.payload_json) as Record<string, JsonValue>; } catch { return null; }
+  const cached = await db.prepare("SELECT payload_json, updated_at FROM detail_cache WHERE resource_key = ? AND expires_at > ?")
+    .bind(key, Date.now()).first<{ payload_json: string; updated_at: number }>();
+  // Explicit read results can be newer than the regular bridge projection.
+  const candidates = [cached, projected].filter((row) => row !== null).sort((a, b) => b.updated_at - a.updated_at);
+  for (const row of candidates) {
+    try { return JSON.parse(row.payload_json) as Record<string, JsonValue>; } catch { /* try the other saved copy */ }
+  }
+  return null;
 }
 
 export async function requestDetail(
@@ -696,4 +696,30 @@ export async function completeReadRequest(
   }
   const results = await db.batch(statements);
   return results[0]?.meta.changes === 1;
+}
+
+export async function readResource(db: D1Database, resourceType: ResourceProjection["resource_type"], resourceId: string): Promise<Record<string, JsonValue> | null> {
+  await ensureDashboardSchema(db);
+  const row = await db.prepare("SELECT payload_json FROM resource_projection WHERE resource_type = ? AND resource_id = ? LIMIT 1")
+    .bind(resourceType, resourceId).first<{ payload_json: string }>();
+  try { return row ? JSON.parse(row.payload_json) as Record<string, JsonValue> : null; } catch { return null; }
+}
+
+export async function listGenerationJobs(db: D1Database, articleId: string): Promise<Array<Record<string, JsonValue>>> {
+  await ensureDashboardSchema(db);
+  const rows = await db.prepare("SELECT payload_json FROM resource_projection WHERE resource_type = 'generation_job' AND json_extract(payload_json, '$.article_id') = ? ORDER BY rank, resource_key")
+    .bind(articleId).all<{ payload_json: string }>();
+  return (rows.results || []).flatMap((row) => {
+    try { const job = JSON.parse(row.payload_json) as Record<string, JsonValue>; return String(job.article_id) === articleId ? [job] : []; } catch { return []; }
+  }).sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+}
+
+export async function readBridgeConnection(db: D1Database): Promise<boolean> {
+  return (await readBridgeState(db)).connected;
+}
+
+export async function readBridgeState(db: D1Database): Promise<{connected: boolean; version: string | undefined}> {
+  await ensureDashboardSchema(db);
+  const row=await db.prepare("SELECT last_seen_at, bridge_version FROM bridge_status WHERE id=1").first<{last_seen_at:number;bridge_version:string}>();
+  return {connected: Boolean(row && Date.now()-row.last_seen_at < BRIDGE_STALE_MS), version: row?.bridge_version};
 }

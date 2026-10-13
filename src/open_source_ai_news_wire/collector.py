@@ -34,11 +34,11 @@ from .network import (
     UnsafeRequest,
     resolve_known_short_url,
 )
-from .qualification import Qualification, qualify
+from .qualification import Qualification, classify as qualify
 from .evidence import extract_page, normalize_public_https_url, publisher_key
 from .settings import load_settings
 from .source_registry import synchronize_sources
-from .storage import Database
+from .storage import Database, article_id_for_url
 from .revisions import atomic_claim_signature
 
 
@@ -228,7 +228,6 @@ class Collector:
                 self._record_failure(source, transaction_id, error)
                 failures += 1
 
-        self._queue_discovery_enrichment(limit=20)
 
         offline = bool(
             network_failures and successes == 0 and failures == 0 and backlog == 0
@@ -652,13 +651,11 @@ class Collector:
                 cursor_external = str(cursor.get("external_id") or "")
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 cursor_time = None
-        if not start and cursor_time is None:
-            start = (
-                datetime.fromisoformat(self.now().replace("Z", "+00:00")) - timedelta(hours=72)
-            ).isoformat().replace("+00:00", "Z")
-        bounded = self._within_interval(observations, start, end)
         result: list[Observation] = []
-        for item in bounded:
+        # Recovery bounds describe scan coverage. Once an item is fetched,
+        # publication age must not discard an unseen relevant article or its
+        # source updates before persistence.
+        for item in observations:
             published = datetime.fromisoformat(item.published_at.replace("Z", "+00:00"))
             newer = cursor_time is None or (published, item.external_id) > (cursor_time, cursor_external)
             prior = self.database.one(
@@ -684,7 +681,7 @@ class Collector:
                 and str(prior.get("metadata_json") or "{}")
                 != Database.json({"summary": item.summary, **item.metadata})
             )
-            if newer or changed or metadata_changed:
+            if newer or changed or metadata_changed or not prior:
                 result.append(item)
         return result
 
@@ -948,6 +945,10 @@ class Collector:
                             source_revision_number,
                             observed_at,
                         )
+                classification = qualify(observation, source, observed_at=observed_at)
+                if classification.relevant:
+                    self._persist_article(connection, source, observation, classification,
+                                          observed_at, raw_id, story_id)
                 if story_id:
                     self._record_discovery_leads(
                         connection,
@@ -957,9 +958,6 @@ class Collector:
                         observed_at,
                         preliminary_priority=preliminary_priority,
                         new_observation=not prior,
-                    )
-                    self._record_momentum_snapshot(
-                        connection, story_id, source, observation, observed_at
                     )
             connection.execute(
                 """
@@ -1457,32 +1455,6 @@ class Collector:
                 observed_at, observed_at, story_id,
             ),
         )
-        connection.execute(
-            """
-            UPDATE work_item
-            SET status = 'needs_reapproval', last_error_class = 'story_revision_changed',
-                updated_at = ?
-            WHERE story_id = ? AND kind = 'draft'
-              AND status IN ('pending', 'queued', 'running', 'generating', 'waiting')
-            """,
-            (observed_at, story_id),
-        )
-        affected = connection.execute(
-            "UPDATE draft SET status = 'Needs Review', updated_at = ? WHERE story_id = ? AND status = 'Current'",
-            (observed_at, story_id),
-        ).rowcount
-        if affected and not connection.execute(
-            "SELECT 1 FROM alert WHERE story_id = ? AND kind = 'correction' AND read_at IS NULL",
-            (story_id,),
-        ).fetchone():
-            connection.execute(
-                """
-                INSERT INTO alert(story_id, kind, severity, title, body, created_at)
-                VALUES(?, 'correction', 'high', ?,
-                       'Approved claim or source content changed; the draft requires renewed approval.', ?)
-                """,
-                (story_id, headline, observed_at),
-            )
 
     def _find_story(self, connection: Any, observation: Observation) -> dict[str, Any] | None:
         exact = connection.execute(
@@ -1657,336 +1629,127 @@ class Collector:
             )
         return event_id
 
-    def _persist_story(
-        self,
-        connection: Any,
-        source: dict[str, Any],
-        observation: Observation,
-        qualification: Qualification,
-        observed_at: str,
-        source_revision_number: int,
-        ingestion_context: str,
-    ) -> str:
+    @staticmethod
+    def _persist_article(connection: Any, source: dict[str, Any], observation: Observation,
+                         classification: Qualification, observed_at: str,
+                         raw_id: int | None, story_id: str | None) -> str:
+        url = canonical_url(observation.url, observation.url)
+        item = connection.execute(
+            "SELECT id FROM source_item WHERE story_id = ? AND (canonical_url = ? OR url = ?) ORDER BY id LIMIT 1",
+            (story_id, url, observation.url),
+        ).fetchone() if story_id else None
+        # Missing or fallback dates describe retrieval, not original publication.
+        known = not _unknown_original_time(observation.timestamp_status) and "fallback" not in observation.timestamp_status
+        published = observation.effective_published_at if known else None
+        article_id = article_id_for_url(url)
+        connection.execute(
+            """INSERT INTO fetched_article(id,canonical_url,story_id,source_item_id,
+                raw_observation_id,title,summary,publisher,source_id,lane,language,
+                published_at,first_fetched_at,last_fetched_at,status)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'fetched')
+                ON CONFLICT(canonical_url) DO UPDATE SET
+                story_id=COALESCE(fetched_article.story_id,excluded.story_id),
+                source_item_id=COALESCE(fetched_article.source_item_id,excluded.source_item_id),
+                raw_observation_id=COALESCE(fetched_article.raw_observation_id,excluded.raw_observation_id),
+                title=excluded.title,summary=excluded.summary,
+                published_at=COALESCE(excluded.published_at,fetched_article.published_at),
+                lane=excluded.lane,language=excluded.language,last_fetched_at=excluded.last_fetched_at""",
+            (article_id,url,story_id,item["id"] if item else None,raw_id,observation.title,
+             observation.summary,str(source["name"]),source["id"],classification.lane,
+             observation.language,published,observed_at,observed_at),
+        )
+        return article_id
+
+    def _persist_story(self, connection: Any, source: dict[str, Any],
+                       observation: Observation, qualification: Qualification,
+                       observed_at: str, source_revision_number: int,
+                       ingestion_context: str) -> str:
+        """Maintain legacy source/draft links without grading or editorial research."""
         story = self._find_story(connection, observation)
-        created_story = story is None
         role = str(source["monitoring_role"])
-        if story:
-            story_id = str(story["id"])
-            before_claim_signature = self._story_claim_set_signature(connection, story_id)
-            before_source_signature = self._story_source_set_signature(connection, story_id)
-        else:
+        created = story is None
+        if created:
             story_id = "story-" + hashlib.sha256(
                 f"{observation.fingerprint}:{observation.published_at}".encode("utf-8")
             ).hexdigest()[:20]
-            trust_class = str(source.get("trust_class") or "research_required")
-            floor_applied = trust_class == "trusted"
-            review_score = max(qualification.score, 80) if floor_applied else qualification.score
-            status = "ready"
-            priority = "Urgent" if floor_applied else qualification.priority
             slug = re.sub(r"[^a-z0-9]+", "-", observation.title.lower()).strip("-")[:100]
             connection.execute(
-                """
-                INSERT INTO story_cluster(
-                    id, slug, headline, summary, lane, openness_class, status,
-                    priority, priority_score, freshness, first_public_at, detected_at,
-                    opportunity_strength, relevance_bridge, counterargument,
-                    watch_expires_at, watch_status, material_update, created_at, updated_at,
-                    importance_score, importance_json, material_updated_at, ingestion_context,
-                    story_revision, material_revision, organic_score, review_score,
-                    priority_floor_applied, source_trust_state, research_status,
-                    verification_notice
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    story_id, slug or story_id, observation.title,
-                    observation.summary or observation.title, qualification.lane,
-                    qualification.openness_class, status, priority, review_score,
-                    qualification.freshness,
-                    (
-                        observed_at
-                        if _unknown_original_time(observation.timestamp_status)
-                        else observation.effective_published_at
-                    ),
-                    observed_at,
-                    qualification.opportunity_strength, qualification.relevance_bridge,
-                    qualification.counterargument,
-                    None,
-                    None,
-                    0, observed_at, observed_at,
-                    qualification.importance_score,
-                    Database.json({
-                        "material_importance": qualification.impact_score,
-                        "novelty": qualification.novelty_score,
-                        "source_significance": qualification.source_significance,
-                        "total": qualification.importance_score,
-                    }),
-                    None,
-                    ingestion_context,
-                    1,
-                    1,
-                    qualification.score,
-                    review_score,
-                    int(floor_applied),
-                    trust_class,
-                    "not_needed" if floor_applied else "queued",
-                    "" if floor_applied else "Verify this yourself",
-                ),
+                """INSERT INTO story_cluster(id,slug,headline,summary,lane,openness_class,
+                    status,priority,priority_score,freshness,first_public_at,detected_at,
+                    created_at,updated_at,ingestion_context,source_trust_state,research_status)
+                    VALUES(?,?,?,?,?,?,'fetched','',0,?,?,?,?,?,?,'','not_needed')""",
+                (story_id,slug or story_id,observation.title,observation.summary or observation.title,
+                 qualification.lane,qualification.openness_class,qualification.freshness,
+                 observed_at if _unknown_original_time(observation.timestamp_status) else observation.effective_published_at,
+                 observed_at,observed_at,observed_at,ingestion_context),
             )
-            before_claim_signature = atomic_claim_signature([])
-            before_source_signature = _signature([])
-
-        existing_item = connection.execute(
-            """
-            SELECT id, content_hash FROM source_item
-            WHERE story_id = ? AND (
-                url = ? OR (source_registry_id = ? AND fingerprint = ?)
-            ) ORDER BY id LIMIT 1
-            """,
-            (story_id, observation.url, source["id"], observation.fingerprint),
+        else:
+            story_id = str(story["id"])
+        before_claim = self._story_claim_set_signature(connection, story_id)
+        before_source = self._story_source_set_signature(connection, story_id)
+        existing = connection.execute(
+            "SELECT id FROM source_item WHERE story_id = ? AND (url = ? OR (source_registry_id = ? AND fingerprint = ?)) ORDER BY id LIMIT 1",
+            (story_id,observation.url,source["id"],observation.fingerprint),
         ).fetchone()
-        if existing_item:
+        if existing:
+            source_item_id = int(existing["id"])
             connection.execute(
-                """
-                UPDATE source_item SET title = ?, url = ?, canonical_url = ?,
-                    published_at = ?, passage = ?,
-                    content_hash = ?, first_seen_at = COALESCE(first_seen_at, ?),
-                    source_revision = ?, source_reported_at = ?,
-                    aggregator_published_at = ?, effective_published_at = ?,
-                    timestamp_status = ?
-                WHERE id = ?
-                """,
-                (
-                    observation.title, observation.url, observation.url,
-                    observation.effective_published_at,
-                    _editorial_passage(observation), observation.content_hash,
-                    observed_at, max(1, source_revision_number),
-                    observation.source_reported_at,
-                    observation.aggregator_published_at,
-                    observation.effective_published_at,
-                    observation.timestamp_status, existing_item["id"],
-                ),
+                """UPDATE source_item SET title=?,url=?,canonical_url=?,published_at=?,
+                    passage=?,content_hash=?,first_seen_at=COALESCE(first_seen_at,?),
+                    source_revision=?,source_reported_at=?,aggregator_published_at=?,
+                    effective_published_at=?,timestamp_status=? WHERE id=?""",
+                (observation.title,observation.url,observation.url,observation.effective_published_at,
+                 _editorial_passage(observation),observation.content_hash,observed_at,
+                 max(1,source_revision_number),observation.source_reported_at,
+                 observation.aggregator_published_at,observation.effective_published_at,
+                 observation.timestamp_status,source_item_id),
             )
-            linked_claim = connection.execute(
-                """
-                SELECT c.id FROM claim c
-                JOIN evidence_link e ON e.claim_id = c.id
-                WHERE e.source_item_id = ? ORDER BY c.id LIMIT 1
-                """,
-                (existing_item["id"],),
+            linked = connection.execute(
+                "SELECT c.id FROM claim c JOIN evidence_link e ON e.claim_id=c.id WHERE e.source_item_id=? ORDER BY c.id LIMIT 1",
+                (source_item_id,),
             ).fetchone()
-            if linked_claim:
-                connection.execute(
-                    "UPDATE claim SET text = ? WHERE id = ?",
-                    (observation.title, linked_claim["id"]),
-                )
-            self._apply_story_revision_change(
-                connection,
-                story_id,
-                before_claim_signature=before_claim_signature,
-                before_source_signature=before_source_signature,
-                observed_at=observed_at,
-                headline=observation.title,
+            if linked:
+                connection.execute("UPDATE claim SET text=? WHERE id=?",(observation.title,linked["id"]))
+        else:
+            inserted = connection.execute(
+                """INSERT INTO source_item(story_id,source_name,source_role,title,url,
+                    published_at,language,verification_status,passage,canonical_url,
+                    source_registry_id,fingerprint,content_hash,first_seen_at,source_revision,
+                    source_reported_at,aggregator_published_at,effective_published_at,timestamp_status)
+                    VALUES(?,?,?,?,?,?,?,'fetched',?,?,?,?,?,?,?,?,?,?,?)""",
+                (story_id,source["name"],role,observation.title,observation.url,
+                 observation.effective_published_at,observation.language,_editorial_passage(observation),
+                 observation.url,source["id"],observation.fingerprint,observation.content_hash,
+                 observed_at,max(1,source_revision_number),observation.source_reported_at,
+                 observation.aggregator_published_at,observation.effective_published_at,
+                 observation.timestamp_status),
             )
-            return story_id
-
-        cursor = connection.execute(
-            """
-            INSERT INTO source_item(
-                story_id, source_name, source_role, title, url, published_at,
-                language, verification_status, passage, canonical_url,
-                source_registry_id, fingerprint, content_hash, first_seen_at,
-                source_revision, source_reported_at, aggregator_published_at,
-                effective_published_at, timestamp_status
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                story_id, source["name"], role, observation.title, observation.url,
-                observation.effective_published_at, observation.language,
-                "supports" if role in {"Event", "Reporting"} else "trace",
-                _editorial_passage(observation), observation.url, source["id"],
-                observation.fingerprint, observation.content_hash, observed_at,
-                max(1, source_revision_number), observation.source_reported_at,
-                observation.aggregator_published_at,
-                observation.effective_published_at, observation.timestamp_status,
-            ),
-        )
-        source_item_id = int(cursor.lastrowid)
-        claim_status = "verified" if role == "Event" else "attributed" if role == "Reporting" else "unverified"
-        claim_cursor = connection.execute(
-            "INSERT INTO claim(story_id, text, status, volatility) VALUES(?, ?, ?, 'volatile')",
-            (story_id, observation.title, claim_status),
-        )
-        claim_id = int(claim_cursor.lastrowid)
-        connection.execute(
-            "INSERT INTO evidence_link(claim_id, source_item_id, relationship) VALUES(?, ?, ?)",
-            (claim_id, source_item_id, "supports" if role in {"Event", "Reporting"} else "traces"),
-        )
-        connection.execute(
-            "INSERT INTO story_membership(story_id, source_item_id, relationship, language) VALUES(?, ?, 'same-development', ?)",
-            (story_id, source_item_id, observation.language),
-        )
-        self._record_relevance_notification(
-            connection,
-            source_item_id=source_item_id,
-            story_id=story_id,
-            source=source,
-            observation=observation,
-            qualification=qualification,
-            observed_at=observed_at,
-            ingestion_context=ingestion_context,
-        )
-        first_public = connection.execute(
-            """
-            SELECT MIN(effective_published_at) AS value FROM source_item
-            WHERE story_id = ? AND timestamp_status NOT LIKE 'unknown_original%'
-            """,
-            (story_id,),
-        ).fetchone()["value"]
-        if not first_public:
-            first_public = connection.execute(
-                "SELECT first_public_at FROM story_cluster WHERE id = ?", (story_id,)
-            ).fetchone()["first_public_at"]
-        legacy_evidence = connection.execute(
-            "SELECT source_role, canonical_url, url FROM source_item WHERE story_id = ?",
-            (story_id,),
-        ).fetchall()
-        manual_evidence = connection.execute(
-            """
-            SELECT confirmed_role, reporting_origin_key, origin_status FROM evidence_source
-            WHERE story_id = ? AND status = 'confirmed'
-            """,
-            (story_id,),
-        ).fetchall()
-        event_count = sum(row["source_role"] == "Event" for row in legacy_evidence) + sum(
-            row["confirmed_role"] == "Event" for row in manual_evidence
-        )
-        reporting_publishers = {
-            str(row["reporting_origin_key"])
-            for row in manual_evidence
-            if row["confirmed_role"] == "Reporting"
-            and row["origin_status"] == "confirmed"
-            and row["reporting_origin_key"]
-        }
-        evidence_gate = event_count >= 1 or len(reporting_publishers) >= 2
-        trusted_source = connection.execute(
-            """
-            SELECT 1 FROM source_item si
-            JOIN source_registry sr ON sr.id = si.source_registry_id
-            WHERE si.story_id = ? AND sr.trust_class = 'trusted' LIMIT 1
-            """,
-            (story_id,),
-        ).fetchone()
-        current = connection.execute(
-            """
-            SELECT status, priority_score, importance_score, organic_score,
-                   priority_floor_applied, research_status
-            FROM story_cluster WHERE id = ?
-            """,
-            (story_id,),
-        ).fetchone()
-        new_status = current["status"]
-        if new_status in {"signal", "watch", "candidate", "approved"}:
-            new_status = "ready"
-        trust_state = "trusted" if trusted_source else "research_required"
-        research_status = "not_needed" if trusted_source else str(current["research_status"] or "queued")
-        floor_applied = bool(trusted_source) or research_status in {
-            "complete", "partial", "failed", "unavailable",
-        }
-        organic_score = max(int(current["organic_score"] or 0), qualification.score)
-        review_score = max(organic_score, 80) if floor_applied else organic_score
-        priority = "Urgent" if floor_applied else qualification.priority
-        connection.execute(
-            """
-            UPDATE story_cluster SET first_public_at = ?, status = ?, priority = ?,
-                priority_score = ?, organic_score = ?, review_score = ?,
-                priority_floor_applied = ?, source_trust_state = ?, research_status = ?,
-                verification_notice = ?, importance_score = MAX(importance_score, ?),
-                importance_json = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                first_public, new_status, priority, review_score, organic_score,
-                review_score, int(floor_applied), trust_state, research_status,
-                "" if trusted_source else "Verify this yourself",
-                qualification.importance_score,
-                Database.json({
-                    "material_importance": qualification.impact_score,
-                    "novelty": qualification.novelty_score,
-                    "source_significance": qualification.source_significance,
-                    "total": qualification.importance_score,
-                }),
-                observed_at, story_id,
-            ),
-        )
-        connection.execute(
-            """
-            INSERT INTO candidate(story_id, evidence_gate, importance_gate, score, score_json, qualified_at)
-            VALUES(?, ?, ?, ?, ?, ?)
-            ON CONFLICT(story_id) DO UPDATE SET
-                evidence_gate=excluded.evidence_gate,
-                importance_gate=excluded.importance_gate,
-                score=MAX(candidate.score, excluded.score),
-                score_json=excluded.score_json,
-                qualified_at=CASE WHEN excluded.evidence_gate = 1 AND excluded.importance_gate = 1 THEN excluded.qualified_at ELSE candidate.qualified_at END
-            """,
-            (
-                story_id, int(evidence_gate), int(qualification.importance_gate),
-                qualification.importance_score, Database.json({
-                    "reasons": qualification.reasons,
-                    "impact": qualification.impact_score,
-                    "importance": qualification.importance_score,
-                    "ranking_version": 2,
-                }),
-                observed_at if evidence_gate and qualification.importance_gate else None,
-            ),
-        )
-        if qualification.opportunity_strength in {"Strong", "Moderate"}:
+            source_item_id = int(inserted.lastrowid)
+            claim = connection.execute(
+                "INSERT INTO claim(story_id,text,status,volatility) VALUES(?,?,'attributed','volatile')",
+                (story_id,observation.title),
+            )
             connection.execute(
-                """
-                INSERT INTO content_opportunity(
-                    story_id, strength, relevance_bridge, mechanism, counterargument, assessment_json, assessed_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(story_id) DO UPDATE SET
-                    strength=excluded.strength, relevance_bridge=excluded.relevance_bridge,
-                    mechanism=excluded.mechanism, counterargument=excluded.counterargument,
-                    assessment_json=excluded.assessment_json, assessed_at=excluded.assessed_at
-                """,
-                (
-                    story_id, qualification.opportunity_strength, qualification.relevance_bridge,
-                    qualification.mechanism, qualification.counterargument,
-                    Database.json({"deterministic": True}), observed_at,
-                ),
+                "INSERT INTO evidence_link(claim_id,source_item_id,relationship) VALUES(?,?,'traces')",
+                (claim.lastrowid,source_item_id),
             )
-        if new_status == "ready" and priority in {"Urgent", "High"}:
-            kind = "ready"
-            existing_alert = connection.execute(
-                "SELECT 1 FROM alert WHERE story_id = ? AND kind = ? AND read_at IS NULL",
-                (story_id, kind),
-            ).fetchone()
-            if not existing_alert:
-                connection.execute(
-                    """
-                    INSERT INTO alert(story_id, kind, severity, title, body, created_at)
-                    VALUES(?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        story_id, kind, "high",
-                        observation.title,
-                        "Story is ready for content creation.",
-                        observed_at,
-                    ),
-                )
-        if not created_story:
-            self._apply_story_revision_change(
-                connection,
-                story_id,
-                before_claim_signature=before_claim_signature,
-                before_source_signature=before_source_signature,
-                observed_at=observed_at,
-                headline=observation.title,
+            connection.execute(
+                "INSERT INTO story_membership(story_id,source_item_id,relationship,language) VALUES(?,?,'same-development',?)",
+                (story_id,source_item_id,observation.language),
             )
-        if trust_state == "research_required":
-            self._ensure_background_research(connection, story_id, observed_at, review_score)
+            self._record_relevance_notification(connection,source_item_id=source_item_id,
+                story_id=story_id,source=source,observation=observation,qualification=qualification,
+                observed_at=observed_at,ingestion_context=ingestion_context)
+        if not created:
+            self._apply_story_revision_change(connection,story_id,before_claim_signature=before_claim,
+                before_source_signature=before_source,observed_at=observed_at,headline=observation.title)
+        raw = connection.execute(
+            "SELECT id FROM raw_observation WHERE source_id=? AND external_id=?",
+            (source["id"],observation.external_id),
+        ).fetchone()
+        if qualification.relevant:
+            self._persist_article(connection,source,observation,qualification,observed_at,
+                                  int(raw["id"]) if raw else None,story_id)
         return story_id
 
     @staticmethod

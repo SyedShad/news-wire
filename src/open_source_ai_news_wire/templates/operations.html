@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Operational Review · Open Source AI News Wire{% endblock %}
+{% block content %}
+<header class="page-header"><div><p class="kicker">System notices</p><h1>Operational Review</h1><p class="lede">Source health, recovery, catch-up, and source updates.</p></div>
+<form action="{{ url_for('read_alerts') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button button-secondary">Mark notices read</button></form></header>
+<section class="panel"><div class="notice-grid">
+{% for alert in notices %}<article class="notice notice-{{ alert.severity }}"><span class="notice-kind">{{ alert.kind|replace('_', ' ') }}{% if not alert.read_at %} · Unread{% endif %}</span><h3>{{ alert.title }}</h3><p>{{ alert.body }}</p><small>{{ alert.created_at|wire_time }}</small></article>
+{% else %}<div class="empty-state"><strong>No operational notices.</strong></div>{% endfor %}
+</div></section>
+{% endblock %}

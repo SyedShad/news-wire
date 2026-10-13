@@ -1,66 +1,33 @@
 # Features and use cases
 
-Release 0.4.3 expands deterministic recognition of AI security advisories. Every new relevant source item still receives an owner-only review notification while content creation and publication remain deliberate and manual.
-
 ## Coverage
 
 | Lane | What belongs there |
 |---|---|
 | Open Ecosystem News | Open-source, open-weight, source-available, open-governance, model-hub, and open development news |
 | AGI Development | Research, evaluations, capabilities, safety work, and public claims directly related to AGI |
-| Broader AI News | Only AI developments directly concerning privacy, security, or regulation |
+| Broader AI News | AI developments directly concerning privacy, security, or regulation |
 
-Broader AI News excludes generic funding, acquisitions, chips, launches, research, and safety stories unless the specific development directly intersects privacy, security, or regulation.
+Topic relevance determines feed eligibility. The inbox shows each distinct relevant fetched article, including older publications and articles with unknown publication dates. Quality scores, publisher trust, and legacy story grades do not hide articles or block generation.
 
-## Fast trust-and-status workflow
+## Content and graphics
 
-Configured first-party organizations, governments, original research sources, and vetted publications are trusted. Their stories become Ready and Urgent immediately with a review-score floor of 80.
+Open an article to choose **Generate content** or **Generate graphics**. Each task has independent runtime model and ordered skill selectors, with optional customizations. Choose any available skills suited to the desired output. The selected skills determine research and production workflows.
 
-Aggregators, social and discovery feeds, and unknown publishers require research. The worker automatically performs a bounded search without asking the user, records up to three independent safe sources, and applies the same score floor after any terminal result. Search failures are visible but do not suppress the story.
+Graphics do not require a draft. Content results are editable, copyable, and downloadable. Graphic results have image previews and artifact downloads. Each job records its model, selected skills, customizations, and source snapshot. Regeneration and manual revisions preserve older outputs.
 
-The dashboard uses three working states:
+## Questions and recovery
 
-- **Ready:** active and available for content creation;
-- **Researching:** automatic background source search is running;
-- **Content ready:** an editable Reddit draft exists.
+Interactive questions appear in the task that requested them. Jobs support retry and cancellation. A stopped worker leaves a visible recoverable failure instead of silently repeating generation. Offline commands and outputs remain durable. A generation failure never changes article eligibility.
 
-Trust state, research history, the score-floor explanation, and source provenance remain visible for audit. The dashboard warning `Verify this yourself` stays out of content and exports.
+## Operations
 
-## One content action
+Operational Review contains system notices with its own unread count. Source updates do not invalidate articles or generated work. Existing notification ledgers, archive choices, historical drafts, and edits survive migration; backfilling articles does not send historical alerts or start generation.
 
-Every active story has exactly one **Create content** button. There are no qualification, evidence, importance, research, approval, lens, or manual-override gates.
+Source health, enablement, schedule, and recovery controls remain available. The scheduler runs at `:00` and `:30` while the Mac is awake. Automatic recovery covers up to 72 hours; explicit catch-up is available for older intervals.
 
-The action immediately creates an editable shell, then starts a new source-search attempt distinct from background research. It accepts at most three current, relevant, independent public HTTPS pages, deduplicates existing publishers, and records accepted sources with `draft_search` provenance.
+## Local execution and hosted access
 
-Timeouts, account limits, unsafe URLs, stale results, and insufficient matches do not block the shell or drafting from sources already stored.
+The local dashboard is loopback-only and one-time-link protected. The hosted dashboard receives a redacted projection and relays authenticated commands to the Mac. Tokens and internal file paths stay local; artifact transfers are bounded.
 
-## Reddit drafting
-
-There is one generation mode: Reddit Post. The generated content includes:
-
-- a concise factual title;
-- a value-first casual body;
-- natural Reddit Markdown source links;
-- an open-ended engagement prompt;
-- a suggested flair when one can be inferred; and
-- the exact reminder `Verify rules before posting`.
-
-No subreddit is assumed. The user can edit and version the draft, copy it, or export Markdown/HTML. Publishing remains manual and no Reddit credentials are added.
-
-## Freshness and audit history
-
-Breaking, Fresh, Updated, Newly surfaced, and Older continue to describe time, not trust. Only a changed normalized claim set creates a material update; rescans, formatting, engagement, and source metadata do not.
-
-Source evidence, research attempts, revisions, corrections, and decision history remain durable. Archived, withdrawn, completed drafts, and old versions are preserved during migration.
-
-## Sources, schedule, and recovery
-
-Sources show trust class, family, role, health, last check, lag, cursor, failure streak, and local enablement. Safe public-HTTPS validation, DNS and redirect checks, byte limits, and loopback/private-network rejection remain enforced.
-
-The scheduler runs at `:00` and `:30` while the Mac is awake. Automatic recovery covers up to 72 hours; explicit catch-up is available for older intervals. First-Public Time is preserved.
-
-## Local security and data controls
-
-The dashboard is loopback-only and one-time-link protected. Fresh discovery runs in a separately restricted Codex invocation that permits only web search. Final writing receives the stored packet and has all tools disabled.
-
-Settings exposes local counts, redacted diagnostics, and preview-first purge controls. Runtime data stays outside the repository. The product has no built-in backup, hosted canonical corpus, or automatic publishing; Sites stores only the redacted owner projection and relay state described in the hosted dashboard guide.
+Generation uses Sign in with ChatGPT for a local/open-source integration. No paid API fallback or publishing integration is added. The current provider lacks native image generation and hosted connectors; the installed OpenAGI graphics skill uses its local renderer. Validate real local and hosted generation before enabling hosted execution.

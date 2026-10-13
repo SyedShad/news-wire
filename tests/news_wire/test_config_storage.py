@@ -574,7 +574,7 @@ def test_storage_pressure_levels_can_be_forced(tmp_path: Path, monkeypatch: pyte
     assert database.storage_pressure(warning_bytes=0, critical_bytes=0).level == "normal"
 
 
-def test_initialize_repairs_orphaned_evidence_without_deleting_history(tmp_path: Path) -> None:
+def test_initialize_preserves_legacy_evidence_without_restarting_editorial_work(tmp_path: Path) -> None:
     database = Database(resolve_runtime_paths(tmp_path / "wire-data"))
     database.initialize()
     now = "2026-07-23T16:00:00Z"
@@ -627,11 +627,7 @@ def test_initialize_repairs_orphaned_evidence_without_deleting_history(tmp_path:
         "SELECT status, error_class, confirmation_reason FROM evidence_source WHERE id = ?",
         (orphan_id,),
     )
-    assert repaired == {
-        "status": "excluded",
-        "error_class": "superseded_duplicate",
-        "confirmation_reason": f"Superseded by preserved evidence proposal {fetched_id}.",
-    }
+    assert repaired == {"status": "queued", "error_class": None, "confirmation_reason": ""}
     assert database.one(
         "SELECT status FROM evidence_source WHERE id = ?", (fetched_id,)
     ) == {"status": "fetched"}
@@ -641,6 +637,4 @@ def test_initialize_repairs_orphaned_evidence_without_deleting_history(tmp_path:
     diagnostic = database.one(
         "SELECT detail_json FROM diagnostic_event WHERE event_type = 'orphaned_evidence_repair'"
     )
-    assert json.loads(diagnostic["detail_json"])["superseded"] == [
-        {"evidence_source_id": orphan_id, "superseded_by": fetched_id}
-    ]
+    assert diagnostic is None

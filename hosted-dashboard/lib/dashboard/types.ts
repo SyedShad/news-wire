@@ -21,6 +21,8 @@ export type DashboardSnapshot = {
   notices?: Array<Record<string, JsonValue>>;
   settings?: Record<string, JsonValue>;
   diagnostics: Array<Record<string, JsonValue>>;
+  generation_catalog?: Record<string, JsonValue>;
+  generation_jobs?: Array<Record<string, JsonValue>>;
 };
 
 export type StoryProjection = Record<string, JsonValue> & {
@@ -34,7 +36,7 @@ export type StoryProjection = Record<string, JsonValue> & {
 };
 
 export type ResourceProjection = {
-  resource_type: "story_detail" | "draft_summary" | "draft_detail" | "source" | "notice" | "schedule" | "settings" | "diagnostic";
+  resource_type: "story_detail" | "article_detail" | "draft_summary" | "draft_detail" | "source" | "notice" | "schedule" | "settings" | "diagnostic" | "generation_catalog" | "generation_job" | "generation_artifact" | "generation_artifact_chunk";
   resource_id: string;
   rank: number;
   payload: Record<string, JsonValue>;
@@ -136,7 +138,7 @@ export type OwnerCommand = {
 
 export type ReadRequest = {
   id: string;
-  resourceType: "story" | "draft";
+  resourceType: "story" | "draft" | "article" | "generation_catalog" | "generation_job";
   resourceId: string;
   status: "pending" | "claimed" | "completed" | "failed";
   requestedBy: string;

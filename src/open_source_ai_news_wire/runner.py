@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,8 +18,7 @@ from .assistance import (
     run_isolation_canary,
 )
 from .evidence import EvidenceEnricher
-from .notifications import NativeNotifier, RelevanceNativeNotifier
-from .pilot import PilotManager
+from .notifications import RelevanceNativeNotifier
 from .research import SourceResearchService
 from .scheduler import next_scheduled_run
 from .storage import Database
@@ -91,8 +91,7 @@ class Worker:
             return WorkerResult("coalesced", None, True)
         try:
             deadline = datetime.now(UTC) + timedelta(minutes=25)
-            self._renew_assistance_isolation()
-            self._process_assistance(drafts_only=True)
+            self._process_generation(deadline)
             actual_trigger, start, end = self._recovery_interval(
                 trigger, interval_start, interval_end
             )
@@ -115,20 +114,38 @@ class Worker:
                     next_scheduled_run().isoformat().replace("+00:00", "Z"),
                     now_value,
                 )
-            self._process_source_research(deadline)
-            self._maintain_watches()
-            self._process_evidence(deadline)
-            # A draft may need two five-minute Codex attempts plus its retry
-            # delay. Do not start end-of-run assistance unless that full bound
-            # fits inside the worker's 25-minute deadline.
-            if datetime.now(UTC) < deadline - timedelta(minutes=11):
-                self._process_assistance()
-            PilotManager(self.database).try_auto_activate()
-            NativeNotifier(self.database).dispatch_pending()
+            self._process_generation(deadline)
+            # Operational notices belong to the dashboard badge. The separate
+            # article delivery switch and event ledger retain their policy.
             RelevanceNativeNotifier(self.database).dispatch_pending()
             return WorkerResult(summary.result, summary)
         finally:
             self.lock.release()
+
+    def _process_generation(self, deadline: datetime) -> None:
+        """Recover only explicit human generation requests; never triage fetched items."""
+        from .generation import process_generation_queue
+        remaining = max(0.0, (deadline - datetime.now(UTC)).total_seconds())
+        try:
+            process_generation_queue(self.database, limit=2, deadline=time.monotonic() + remaining)
+        except Exception as error:
+            # Queue recovery must not make source collection depend on account
+            # availability or the generation adapter. No credentials/raw error
+            # text enters operational projections or native notifications.
+            timestamp = utc_now()
+            with self.database.transaction() as connection:
+                connection.execute(
+                    "INSERT INTO diagnostic_event(level,event_type,message,created_at,detail_json) VALUES('warning','generation_worker',?,?,?)",
+                    ("Generation recovery failed; source collection continued.", timestamp,
+                     Database.json({"error_class": type(error).__name__})),
+                )
+                if not connection.execute(
+                    "SELECT 1 FROM alert WHERE kind='generation' AND read_at IS NULL LIMIT 1"
+                ).fetchone():
+                    connection.execute(
+                        "INSERT INTO alert(kind,severity,title,body,created_at) VALUES('generation','standard',?,?,?)",
+                        ("Generation worker needs attention", "Source fetching continues. Retry generation after checking its runtime connection.", timestamp),
+                    )
 
     def _process_evidence(self, deadline: datetime) -> None:
         EvidenceEnricher(self.database).process_batch(limit=20, deadline=deadline)

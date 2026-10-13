@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Open Source AI News Wire releases**
 
+## [0.6.0] - 2026-10-13
+
+### Changed
+
+- Replaced the graded review inbox with separate relevant fetched articles ordered by first fetch time.
+- Moved operational notices and their unread badge to Operational Review.
+- Retired active trust scores, priority floors, qualification gates, automatic editorial research, and reapproval on source updates.
+- Preserved historical drafts, manual edits, archive choices, source history, and external article-alert delivery.
+
+### Added
+
+- Independent text and graphics generation with runtime models, ordered skills, and optional customizations.
+- Local Codex app-server execution using Sign in with ChatGPT plan authorization, durable task states, input responses, cancellation, retries, revisions, and artifact downloads.
+- Schema 11 article/job migration and bridge 2.3 projections for jobs, runtime catalogs, and bounded authenticated artifact chunks.
+
+### Availability
+
+- First-party sign-in and successful text/graphics runtime checks are required to validate generation on each installation. No paid API fallback is used.
+
 ## [0.5.2] - 2026-09-28
 
 ### Changed

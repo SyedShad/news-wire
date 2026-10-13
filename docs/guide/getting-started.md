@@ -74,9 +74,9 @@ You can also open the Overview and choose **Queue scout run**. A second trigger 
 After the scan finishes:
 
 1. Open **News inbox**.
-2. Confirm that current stories appear as Ready, Researching, or Content ready.
-3. Check that trust status, research history, score-floor explanation, and source provenance are visible.
-4. Open a story and confirm it has one available **Create content** action.
+2. Confirm relevant articles appear separately as **Fetched**, including old and undated articles.
+3. Check their source links, publication dates when known, and first fetch dates.
+4. Open an article and confirm **Generate content** and **Generate graphics** have separate model, skill, and customization controls.
 
 ## 6. Install the local schedule
 
@@ -101,33 +101,25 @@ uv run open-source-ai-news-wire schedule status
 
 Pausing the schedule does not stop an already running scan and does not remove collected data.
 
-## 7. Enable ChatGPT search and drafting
+## 7. Connect generation to ChatGPT
 
-This step is optional. Collection, automatic terminal-state scoring, and manual shell editing work without it.
-
-Make sure the ChatGPT application is installed, Codex access is available, and the account is signed in. Then run:
+Collection works without generation. For content and graphics, install the Codex desktop runtime, then sign in through this application's local/open-source ChatGPT flow:
 
 ```bash
-uv run open-source-ai-news-wire assistance check-isolation
-uv run open-source-ai-news-wire assistance status
-uv run open-source-ai-news-wire assistance enable
+uv run open-source-ai-news-wire generation login
+uv run open-source-ai-news-wire generation status
+uv run open-source-ai-news-wire generation catalog
 ```
 
-Enablement succeeds only when the current release-bound identity, no-tools writing, and web-search-only discovery checks pass. The check expires after 24 hours.
+Complete **Sign in with ChatGPT** in the browser on the Mac. Credentials stay in protected local storage. No paid API key is used. Refresh models and skills in the article workspace, select a model and ordered skills for each task, and add optional customizations.
 
-If assistance is unavailable, **Create content** still creates an editable local shell immediately. The dashboard shows the specific search or writing condition; the user can complete the shell manually.
+Model catalogs do not guarantee account access. A failed task shows the error and preserves its inputs and previous versions. The current provider lacks native image generation and hosted connectors; local rendering through the installed OpenAGI graphics skill remains possible.
 
-## 8. Keep notifications in shadow mode
+## 8. Validate generation before enabling hosted execution
 
-Native notifications are not required for normal use and should remain disabled until the readiness checks pass.
+Run a real text and graphic task from the local dashboard. Verify interactive input, cancellation, and restart recovery, then verify the authenticated hosted command/result flow. Leave generation marked unready until these checks pass. Publication remains manual.
 
-```bash
-uv run open-source-ai-news-wire pilot start-shadow
-uv run open-source-ai-news-wire pilot status
-uv run open-source-ai-news-wire pilot readiness
-```
-
-Shadow mode keeps notices in the dashboard without delivering native content notifications. Drafting and publishing remain human-controlled in every pilot state.
+External article notifications retain their existing setup and activation policy. Operational Review uses only its dashboard badge and acknowledge controls.
 
 ## Try the interface with fictional data
 
