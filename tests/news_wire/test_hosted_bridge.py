@@ -311,7 +311,8 @@ def test_story_projection_is_normalized_ranked_and_stable(tmp_path: Path) -> Non
     assert first_digest == second_digest
     assert len(first_digest) == 64
     assert all("priority_rank" not in story and "review_score" not in story for story in first)
-    assert sorted(int(story["newest_rank"]) for story in first) == list(range(len(first)))
+    assert [story["newest_rank"] for story in first] == sorted(story["newest_rank"] for story in first)
+    assert all(isinstance(story["newest_rank"], int) and abs(story["newest_rank"]) <= 9_007_199_254_740_991 for story in first)
 
     resources, resource_digest = build_resource_projection(service)
     assert resources
@@ -319,6 +320,127 @@ def test_story_projection_is_normalized_ranked_and_stable(tmp_path: Path) -> Non
     assert {item["resource_type"] for item in resources} >= {
         "article_detail", "generation_catalog", "draft_summary", "draft_detail", "source", "schedule", "settings"
     }
+
+
+def test_article_transport_rank_is_safe_utc_stable_and_handles_legacy_dates() -> None:
+    from open_source_ai_news_wire.hosted_bridge import _article_transport_rank
+
+    assert _article_transport_rank({"first_fetched_at": "1970-01-01T00:00:00Z"}) == 0
+    assert _article_transport_rank({"first_fetched_at": "1970-01-01T00:00:00.001999Z"}) == -1
+    assert _article_transport_rank({"first_fetched_at": "1970-01-01T05:30:00.001+05:30"}) == -1
+    assert _article_transport_rank({"first_fetched_at": "1970-01-01T00:00:00.001"}) == -1
+    for legacy in ({}, {"first_fetched_at": None}, {"first_fetched_at": "unknown"}):
+        assert _article_transport_rank(legacy) == 9_007_199_254_740_991
+    for timestamp in ("0001-01-01T00:00:00Z", "9999-12-31T23:59:59.999Z"):
+        assert abs(_article_transport_rank({"first_fetched_at": timestamp})) <= 9_007_199_254_740_991
+
+
+def test_new_fetch_keeps_existing_article_job_and_large_artifact_manifests_stable(tmp_path: Path, monkeypatch) -> None:
+    import open_source_ai_news_wire.hosted_bridge as bridge
+
+    service = _service(tmp_path)
+    database = service.database
+    original = database.one("SELECT * FROM fetched_article WHERE story_id IS NOT NULL LIMIT 1")
+    assert original
+    manager = GenerationService(database)
+    monkeypatch.setattr(manager, "catalog", lambda: {"models": [], "skills": []})
+    service.generation_service = manager
+    monkeypatch.setattr(service, "schedule_status", lambda: {"state": "active"})
+    job_id = "stable-photo-job"
+    directory = manager.root / job_id
+    directory.mkdir(parents=True)
+    photo = bytes(range(256)) * 4096 + b"large-history-photo"
+    (directory / "photo.png").write_bytes(photo)
+    database.execute("""INSERT INTO generation_job
+        (id,article_id,task_type,model,request_id,source_snapshot_json,status,artifacts_json,created_at,updated_at)
+        VALUES(?,?,'graphics','test-model',?,'{}','completed',?,'2026-10-13','2026-10-13')""",
+        (job_id, original["id"], job_id, json.dumps([{"id": "photo", "name": "photo.png", "relative_path": "photo.png", "mime_type": "image/png"}])))
+
+    def produced():
+        stories, story_digest = build_story_projection(service)
+        resources, resource_digest = build_resource_projection(service)
+        return (stories, resources,
+                bridge._projection_manifest(stories, key=lambda row: row["id"]),
+                bridge._projection_manifest(resources, key=lambda row: f"{row['resource_type']}:{row['resource_id']}"),
+                story_digest, resource_digest)
+
+    def add(identifier, fetched_at, story_id=None):
+        row = {**original, "id": identifier, "canonical_url": f"https://example.test/{identifier}",
+               "story_id": story_id, "first_fetched_at": fetched_at, "last_fetched_at": fetched_at}
+        columns = list(row)
+        database.execute(f"INSERT INTO fetched_article ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+                         tuple(row[key] for key in columns))
+
+    class DeltaClient:
+        def __init__(self):
+            self.digests = {"stories": "", "resources": ""}
+            self.requests = []
+
+        def request(self, method, path, payload=None):
+            self.requests.append((method, path, payload))
+            if method == "GET":
+                return {"ok": True, "commands": [], "read_requests": []}
+            if isinstance(payload, dict) and payload.get("kind") == "state":
+                return {"ok": True, **{f"{projection}_required": payload[f"{name}_digest"] != self.digests[projection]
+                                        for projection, name in (("stories", "story"), ("resources", "resource"))},
+                        "story_digest": self.digests["stories"], "resource_digest": self.digests["resources"]}
+            if isinstance(payload, dict) and payload.get("kind") == "complete":
+                self.digests[payload["projection"]] = payload["digest"]
+            return {"ok": True}
+
+    hosted = DeltaClient()
+    relay = HostedBridge(service, hosted, database.paths)
+    relay.sync_once()
+    request_start = len(hosted.requests)
+
+    def emitted_articles():
+        chunks = [payload for method, _, payload in hosted.requests[request_start:]
+                  if method == "PUT" and isinstance(payload, dict) and payload.get("kind") in {"stories", "resources"}]
+        assert all(chunk["mode"] == "delta" for chunk in chunks)
+        stories = [row["id"] for chunk in chunks for row in chunk.get("stories", [])]
+        resources = [row for chunk in chunks for row in chunk.get("resources", [])
+                     if row["resource_type"] in {"article_detail", "generation_job", "generation_artifact", "generation_artifact_chunk"}]
+        return stories, resources
+
+    before = produced()
+    old_artifact_keys = {key for key in before[3] if key.startswith((f"generation_job:{job_id}", f"generation_artifact:{job_id}:", f"generation_artifact_chunk:{job_id}:"))}
+    assert len([key for key in old_artifact_keys if key.startswith("generation_artifact_chunk:")]) == 3
+    metadata = next(row["payload"] for row in before[1] if row["resource_type"] == "generation_artifact")
+    assert metadata["sha256"] == hashlib.sha256(photo).hexdigest()
+    add("article-prepended", "2099-01-01T00:00:00Z")
+    prepended = produced()
+    assert prepended[0][0]["id"] == "article-prepended"
+    assert {identifier for identifier, checksum in prepended[2].items() if before[2].get(identifier) != checksum} == {"article-prepended"}
+    article_keys = {f"article_detail:{row['id']}" for row in before[0]}
+    assert all(before[3][key] == prepended[3][key] for key in article_keys | old_artifact_keys)
+    assert [row["resource_id"] for row in prepended[1] if row["resource_type"] == "article_detail"] == [row["id"] for row in prepended[0]]
+    assert produced() == prepended
+    result = relay.sync_once()
+    emitted_stories, emitted_resources = emitted_articles()
+    assert result["stories_uploaded"] == 1
+    assert emitted_stories == ["article-prepended"]
+    assert [(row["resource_type"], row["resource_id"]) for row in emitted_resources] == [("article_detail", "article-prepended")]
+    request_start = len(hosted.requests)
+
+    # A related source really changes that story's article details, but must not
+    # retransmit the unchanged generation result and historical photo chunks.
+    add("article-related-a", "2099-01-01T00:00:00Z", original["story_id"])
+    related = produced()
+    assert [row["id"] for row in related[0]][:2] == ["article-prepended", "article-related-a"]
+    changed_article_ids = {row["resource_id"] for row in related[1]
+                           if row["resource_type"] == "article_detail" and prepended[3].get(f"article_detail:{row['resource_id']}") != related[3][f"article_detail:{row['resource_id']}"]}
+    expected = {row["id"] for row in service.list_articles(page_size=None)["articles"] if row.get("story_id") == original["story_id"]}
+    assert changed_article_ids == expected
+    assert all(before[3][key] == related[3][key] for key in old_artifact_keys)
+    assert produced() == related
+    relay.sync_once()
+    emitted_stories, emitted_resources = emitted_articles()
+    assert emitted_stories == ["article-related-a"]
+    assert {row["resource_id"] for row in emitted_resources} == expected
+    assert all(row["resource_type"] == "article_detail" for row in emitted_resources)
+    request_start = len(hosted.requests)
+    repeated = relay.sync_once()
+    assert repeated["stories_uploaded"] == repeated["resources_uploaded"] == 0
 
 
 def test_on_demand_read_request_returns_redacted_detail(tmp_path: Path) -> None:

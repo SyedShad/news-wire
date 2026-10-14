@@ -9,6 +9,7 @@ import {
 } from "../lib/push/crypto.ts";
 import { dispatchPendingNotifications } from "../lib/push/dispatch.ts";
 import { isTrustedPushActionRequest } from "../lib/push/http.ts";
+import { articleProjectionToPayload } from "../lib/push/types.ts";
 import {
   completeNotificationArticleSync,
   ensurePushSchema,
@@ -247,7 +248,7 @@ test("large full notification sync batches writes and preserves history, recover
   const input={syncId:"sync-large",digest:"b".repeat(64),total:3464,mode:"full"};
   await completeNotificationArticleSync(source,input);
   assert.equal(database.directRuns,1); // Subscription credential rotation, not one round trip per article.
-  assert.ok(database.batches<=72);assert.ok(database.largestBatch<=51);assert.ok(database.reads<=4);
+  assert.equal(database.batches,3);assert.ok(database.largestBatch<=51);assert.ok(database.reads<=4);
   assert.equal((await database.prepare("SELECT COUNT(*) n FROM notification_event").first()).n,3464);
   assert.equal((await database.prepare("SELECT COUNT(*) n FROM push_delivery").first()).n,3);
   assert.equal((await database.prepare("SELECT COUNT(*) n FROM push_delivery d JOIN notification_event e ON e.event_id=d.event_id WHERE CAST(e.source_event_id AS INTEGER)<3462").first()).n,0);
@@ -256,6 +257,54 @@ test("large full notification sync batches writes and preserves history, recover
   await completeNotificationArticleSync(source,input);
   assert.equal((await database.prepare("SELECT COUNT(*) n FROM notification_event").first()).n,3464);
   assert.equal((await database.prepare("SELECT COUNT(*) n FROM push_delivery").first()).n,3);
+});
+
+test("set-based notification insert matches the existing payload mapper and isolates each sync", async () => {
+  const database = new SqliteD1();
+  const source = await environment(database);
+  const fixtures = [
+    article(1,{title:'Emoji 🚀, quote " and backslash \\',context:'Line one\nLine two 🧠',published_at:null}),
+    article(2,{title:'Unicode 雪 \u2028 separator',publisher:'Lab "quoted"',published_at:'2026-10-13T01:02:03.123+05:30'}),
+  ];
+  await stageNotificationArticles(database,"unrelated-sync",[article(99)]);
+  await stageNotificationArticles(database,"mapper-sync",fixtures);
+  const before=Date.now();
+  await completeNotificationArticleSync(source,{syncId:"mapper-sync",digest:"a".repeat(64),total:2,mode:"full"});
+  const events=(await database.prepare("SELECT * FROM notification_event ORDER BY source_event_id").all()).results;
+  assert.equal(events.length,2);
+  for(let index=0;index<events.length;index++) {
+    const event=events[index],fixture=fixtures[index],eventId=`article:${fixture.article_key}`;
+    assert.equal(event.event_id,eventId);assert.equal(event.source_event_id,fixture.event_id);
+    assert.equal(event.article_key,fixture.article_key);assert.equal(event.story_id,fixture.story_id);
+    assert.equal(event.kind,"article_alert");assert.equal(event.resolution,"open");assert.ok(event.released_at>=before);
+    assert.deepEqual(JSON.parse(event.payload_json),{...articleProjectionToPayload(fixture),eventId});
+    assert.equal(event.payload_json,JSON.stringify({...articleProjectionToPayload(fixture),eventId}));
+  }
+  await stageNotificationArticles(database,"mapper-sync",[article(1,{title:"Attempted rewrite"})]);
+  await completeNotificationArticleSync(source,{syncId:"mapper-sync",digest:"b".repeat(64),total:2,mode:"full"});
+  assert.equal((await database.prepare("SELECT payload_json FROM notification_event WHERE source_event_id='1'").first()).payload_json,events[0].payload_json);
+});
+
+test("set-based completion retains the independent activation and recovery time filters", async () => {
+  const database=new SqliteD1(),source=await environment(database),client=await keyMaterial();
+  await registerPushSubscription(source,{endpoint:"https://fcm.googleapis.com/fcm/send/filter-proof",expirationTime:null,keys:{p256dh:client.publicKey,auth:base64UrlEncode(crypto.getRandomValues(new Uint8Array(16)))}},"master");
+  await setPushRuntimeMode(source,"active","master");
+  const hour=60*60*1000,timestamp=Date.now();
+  await database.prepare("UPDATE push_runtime_state SET activation_watermark=? WHERE id=1").bind(timestamp-hour).run();
+  await stageNotificationArticles(database,"watermark-proof",[
+    article(31,{detected_at:new Date(timestamp-2*hour).toISOString()}),
+    article(32,{detected_at:new Date(timestamp-hour/2).toISOString()}),
+  ]);
+  await completeNotificationArticleSync(source,{syncId:"watermark-proof",digest:"a".repeat(64),total:2,mode:"full"});
+  await database.prepare("UPDATE push_runtime_state SET activation_watermark=? WHERE id=1").bind(timestamp-96*hour).run();
+  await stageNotificationArticles(database,"recovery-proof",[
+    article(33,{detected_at:new Date(timestamp-73*hour).toISOString()}),
+    article(34,{detected_at:new Date(timestamp-71*hour).toISOString()}),
+  ]);
+  await completeNotificationArticleSync(source,{syncId:"recovery-proof",digest:"b".repeat(64),total:4,mode:"delta"});
+  const delivered=(await database.prepare("SELECT e.source_event_id FROM notification_event e JOIN push_delivery d ON d.event_id=e.event_id ORDER BY e.source_event_id").all()).results;
+  assert.deepEqual(delivered.map((row)=>row.source_event_id),["32","34"]);
+  assert.equal((await database.prepare("SELECT COUNT(*) n FROM notification_event").first()).n,4);
 });
 
 test("capability actions are replay-safe and queue only durable alert commands", async () => {
