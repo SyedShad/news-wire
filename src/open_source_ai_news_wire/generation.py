@@ -386,6 +386,8 @@ class GenerationService:
                     error_info = (turn.get('error') or {}).get('codexErrorInfo', 'Other')
                     code = next(iter(error_info), 'Other') if isinstance(error_info, dict) else str(error_info)
                     messages = {'usagelimitexceeded': 'Your ChatGPT plan usage limit was reached.',
+                                'serveroverloaded': 'The selected model is at capacity. Wait and retry, or explicitly select another model.',
+                                'server_overloaded': 'The selected model is at capacity. Wait and retry, or explicitly select another model.',
                                 'unauthorized': 'ChatGPT authorization expired or access was revoked.',
                                 'badrequest': 'This model or skill capability is not supported by the selected ChatGPT plan provider.',
                                 'sandboxerror': 'The skill requested a capability outside this job’s permissions.',

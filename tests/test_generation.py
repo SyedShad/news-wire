@@ -253,6 +253,44 @@ def test_safe_access_failure_and_rerouting_are_not_success(setup):
     assert 'usage limit' in error and 'test-model' in error and 'secret' not in error
 
 
+@pytest.mark.parametrize("error_info", [
+    "server_overloaded", "serverOverloaded",
+    {"server_overloaded": {"httpStatusCode": 503}},
+    {"serverOverloaded": {"httpStatusCode": 503}},
+])
+def test_capacity_failure_preserves_selected_model_and_partial_output_without_fallback(setup, error_info):
+    service, db, transports, skill_id = setup
+    def factory(**kwargs):
+        item = Transport(transports[0].skill_path, [
+            {"method": "item/agentMessage/delta", "params": {"delta": "Preserved partial draft."}},
+            {"method": "turn/completed", "params": {"turn": {"status": "failed", "error": {
+                "codexErrorInfo": error_info, "message": "Private backend message and secret-token",
+            }}}},
+        ], **kwargs)
+        transports.append(item)
+        return item
+    service.transport_factory = factory
+    job = service.enqueue("article-test", "text", "test-model", [skill_id], "Keep the requested angle.")
+    assert service.run_pending() == 1
+    result = service.get_job(job["id"])
+    assert result["status"] == "failed"
+    assert result["error"] == "Generation with test-model failed. The selected model is at capacity. Wait and retry, or explicitly select another model."
+    assert result["model"] == "test-model"
+    assert result["output_text"] == "Preserved partial draft."
+    assert result["skill_ids"] == [skill_id]
+    assert result["customizations"] == "Keep the requested angle."
+    assert db.one("SELECT COUNT(*) AS n FROM generation_job")["n"] == 1
+    generation_transports = [transport for transport in transports if any(method == "turn/start" for method, _ in transport.requests)]
+    assert len(generation_transports) == 1
+    transport = generation_transports[0]
+    thread = next(params for method, params in transport.requests if method == "thread/start")
+    turn = next(params for method, params in transport.requests if method == "turn/start")
+    assert thread["model"] == turn["model"] == "test-model"
+    assert thread["allowProviderModelFallback"] is False
+    assert transport.closed
+    assert service.run_pending() == 0
+
+
 @pytest.mark.parametrize("allow", [False, True])
 def test_permission_request_shows_exact_scope_and_requires_human_response(setup, allow):
     service, _, transports, skill_id = setup
