@@ -336,12 +336,29 @@ def build_dashboard_snapshot(service: DashboardService, *, story_summaries=None)
     return snapshot
 
 
+def _article_transport_rank(article: dict[str, Any]) -> int:
+    """Stable newest-first rank: negative UTC epoch milliseconds of first fetch.
+
+    Python's supported date range fits JavaScript's finite safe integers. Missing
+    or invalid legacy dates use MAX_SAFE_INTEGER, with article IDs breaking ties;
+    adding another article never changes existing transport metadata.
+    """
+    try:
+        moment = datetime.fromisoformat(str(article.get("first_fetched_at") or "").replace("Z", "+00:00"))
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=UTC)
+        elapsed = moment.astimezone(UTC) - datetime(1970, 1, 1, tzinfo=UTC)
+        return -(elapsed.days * 86_400_000 + elapsed.seconds * 1_000 + elapsed.microseconds // 1_000)
+    except (ValueError, TypeError, OverflowError):
+        return 9_007_199_254_740_991
+
+
 def build_story_projection(service: DashboardService, *, story_summaries=None):
     articles = story_summaries if story_summaries is not None else _all_story_summaries(service)
     records = []
-    for rank, article in enumerate(articles):
+    for article in articles:
         value = _json_safe(article)
-        value["newest_rank"] = rank
+        value["newest_rank"] = _article_transport_rank(article)
         records.append(value)
     encoded = json.dumps(records, separators=(",", ":"), sort_keys=True).encode()
     return records, hashlib.sha256(encoded).hexdigest()
@@ -435,7 +452,8 @@ def build_resource_projection(service: DashboardService, *, story_summaries=None
     manager = _generation_manager(service)
     append("generation_catalog", "runtime", 0, manager.catalog())
     details, jobs_by_article = _bulk_article_resources(service, manager, articles)
-    for rank,article in enumerate(articles):
+    for article in articles:
+        rank = _article_transport_rank(article)
         identifier = str(article["id"])
         append("article_detail", identifier, rank, details.get(identifier) or article)
         for job in jobs_by_article.get(identifier, []):
