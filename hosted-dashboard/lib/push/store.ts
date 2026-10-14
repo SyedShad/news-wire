@@ -11,7 +11,6 @@ import {
   type PushConfiguration,
 } from "./crypto.ts";
 import {
-  articleProjectionToPayload,
   type PushAction,
   type PushPayload,
   type PushRuntimeMode,
@@ -259,17 +258,10 @@ export async function completeNotificationArticleSync(
   const runtime = await runtimeRow(source.DB);
   const subscriptions = runtime.mode === "active" ? await activeSubscriptionIds(source) : [];
   const now = Date.now();
-  const events: D1PreparedStatement[] = [];
   const deliveries: D1PreparedStatement[] = [];
   for (const row of staged.results || []) {
     const article = JSON.parse(row.payload_json) as NotificationArticleProjection;
     const eventId = `article:${article.article_key}`;
-    const payload = articleProjectionToPayload(article);
-    events.push(source.DB.prepare(`INSERT OR IGNORE INTO notification_event
-        (event_id, source_event_id, article_key, story_id, kind, payload_json, resolution, released_at)
-      VALUES (?, ?, ?, ?, 'article_alert', ?, 'open', ?)`)
-      .bind(eventId, article.event_id, article.article_key, article.story_id,
-        JSON.stringify({ ...payload, eventId }), now));
     const detectedAt = Date.parse(article.detected_at);
     if (
       runtime.mode === "active" &&
@@ -284,7 +276,29 @@ export async function completeNotificationArticleSync(
       }
     }
   }
-  await writeNotificationSyncBatches(source.DB, events);
+  // Mirror articleProjectionToPayload, replacing its local event ID with the
+  // durable hosted ID. One set-based insert avoids a round trip per write batch.
+  await source.DB.batch([
+    source.DB.prepare(`INSERT OR IGNORE INTO notification_event
+      (event_id, source_event_id, article_key, story_id, kind, payload_json, resolution, released_at)
+      SELECT 'article:' || article_key, json_extract(payload_json, '$.event_id'), article_key,
+        json_extract(payload_json, '$.story_id'), 'article_alert',
+        json_object(
+          'schemaVersion', 1, 'kind', 'article_alert', 'eventId', 'article:' || article_key,
+          'storyId', json_extract(payload_json, '$.story_id'),
+          'title', json_extract(payload_json, '$.title'),
+          'publisher', json_extract(payload_json, '$.publisher'),
+          'category', json_extract(payload_json, '$.category'),
+          'context', json_extract(payload_json, '$.context'),
+          'sourceType', json_extract(payload_json, '$.source_type'),
+          'publishedAt', json_extract(payload_json, '$.published_at'),
+          'detectedAt', json_extract(payload_json, '$.detected_at'),
+          'provenance', json_extract(payload_json, '$.provenance')
+        ), 'open', ?
+      FROM notification_projection_stage WHERE sync_id = ? ORDER BY staged_at, article_key`)
+      .bind(now, input.syncId),
+    source.DB.prepare("UPDATE bridge_status SET last_seen_at = ?, last_error = NULL WHERE id = 1").bind(Date.now()),
+  ]);
   await writeNotificationSyncBatches(source.DB, deliveries);
   await source.DB.batch([
     source.DB.prepare(`UPDATE projection_state SET notification_digest = ?, notification_total = ?
