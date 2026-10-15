@@ -150,11 +150,13 @@ def test_migration_recovers_raw_items_without_notifications_or_generation(databa
             (origin['id'],name,f'https://example.com/{name}',title,NOW,NOW,name,json.dumps({'summary':'Fetched source text'}),'valid'))
     before_events = database.query('SELECT * FROM relevance_notification_event')
     with database.transaction() as connection:
+        connection.execute('DROP TABLE relevance_telegram_topic_delivery')
+        connection.execute('DROP TABLE telegram_topic_route')
         connection.execute('DROP TABLE generation_job')
         connection.execute('DROP TABLE fetched_article')
         connection.execute('DROP INDEX idx_source_revision_raw_observed')
         connection.execute("UPDATE meta SET value='10' WHERE key='schema_version'")
-    assert database.migrate() == 11
+    assert database.migrate() == 12
     rows = DashboardService(database).list_articles(page_size=None)['articles']
     assert {row['canonical_url'] for row in rows} == {legacy.url,'https://example.com/relevant'}
     assert next(row for row in rows if row['canonical_url']==legacy.url)['status'] == 'withdrawn'

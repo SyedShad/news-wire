@@ -153,8 +153,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     telegram.add_argument(
         "action",
-        choices=("pair", "send-test", "enable", "disable", "status", "dispatch", "unpair"),
+        choices=("pair", "topics", "send-test", "enable", "disable", "status", "dispatch", "unpair"),
     )
+    telegram.add_argument("--topic", action="append", default=[], metavar="KEY=LINK",
+        help="Existing private topic link; supply open_source_ai, ai_policy_law, ai_models_products")
     telegram.add_argument("--launcher", help="Stable launcher path used by the Telegram LaunchAgent")
     telegram.add_argument("--pair-timeout", type=int, default=120, help=argparse.SUPPRESS)
     telegram.add_argument("--max-seconds", type=int, default=50, help=argparse.SUPPRESS)
@@ -249,8 +251,47 @@ def _telegram_main(arguments, parser: argparse.ArgumentParser, data_root: str | 
             data_root, arguments.launcher, action not in {"status", "disable", "unpair"}
         )
         service = TelegramService(database)
-        if action in {"pair", "send-test", "enable", "disable", "unpair"}:
+        if action in {"pair", "topics", "send-test", "enable", "disable", "unpair"}:
             lifecycle.enter_context(_telegram_setup_lock(scheduler))
+        if action == "topics":
+            from .telegram_topics import TOPICS, parse_topic_link
+
+            state = service.status()
+            if not state.get("paired"):
+                raise RuntimeError("Pair the Telegram bot before configuring topics")
+            routes = {}
+            chat_ids = set()
+            for value in arguments.topic:
+                key, separator, link = value.partition("=")
+                if not separator or key not in TOPICS or key in routes:
+                    raise ValueError("Supply each of open_source_ai, ai_policy_law, ai_models_products exactly once")
+                chat_id, thread_id = parse_topic_link(link)
+                routes[key] = thread_id
+                chat_ids.add(chat_id)
+            if set(routes) != set(TOPICS) or len(chat_ids) != 1 or len(set(routes.values())) != 3:
+                raise ValueError("Supply three distinct topic links from the same private Telegram group")
+            token = keychain.get_token() or ""
+            client = TelegramClient(token)
+            bot = client.call("getMe", {}, timeout=10)
+            if str(bot.get("id")) != str(state.get("bot_id")):
+                raise RuntimeError("Telegram bot identity does not match the paired bot")
+            chat_id = chat_ids.pop()
+            chat = client.call("getChat", {"chat_id": chat_id}, timeout=10)
+            if (chat.get("id") != chat_id or chat.get("type") != "supergroup"
+                    or chat.get("is_forum") is not True or chat.get("username")):
+                raise RuntimeError("Topic links must identify one private group with Topics enabled")
+            member = client.call("getChatMember", {"chat_id": chat_id, "user_id": state["bot_id"]}, timeout=10)
+            member_status = member.get("status")
+            can_send = member_status in {"member", "administrator", "creator"} or (
+                member_status == "restricted" and member.get("is_member") is True
+                and member.get("can_send_messages") is True)
+            if not can_send:
+                raise RuntimeError("Add the paired bot to the topic group with permission to send messages")
+            # Existing topics require send permission, not topic-administration rights.
+            result = service.configure_topics(chat_id, str(chat.get("title") or ""), routes)
+            scheduler.disable()
+            print(json.dumps(result, indent=2))
+            return 0
         if action == "pair":
             # Invalidate the old test before any credential write. A cancelled
             # or interrupted re-pair must not authorize the replaced token.
@@ -343,19 +384,27 @@ def _telegram_main(arguments, parser: argparse.ArgumentParser, data_root: str | 
             bot = client.call("getMe", {}, timeout=10)
             if not isinstance(bot, dict) or str(bot.get("id")) != str(state.get("bot_id")):
                 raise RuntimeError("Telegram bot identity does not match the paired bot")
-            result = client.call(
-                "sendMessage",
-                {
-                    "chat_id": state["chat_id"],
-                    "text": "Open Source AI News Wire pairing test. Please confirm receipt in the private team group.",
+            targets = state.get("topics") if state.get("routing_mode") == "topics" else [{"chat_id": state["chat_id"]}]
+            if not targets:
+                raise RuntimeError("Configure the Telegram topic links first")
+            if state.get("routing_mode") == "topics":
+                service.disable(require_test=True)
+            receipts = []
+            for index, target in enumerate(targets):
+                if index:
+                    time.sleep(4)
+                result = client.call("sendMessage", {
+                    "chat_id": target["chat_id"],
+                    **({"message_thread_id": target["message_thread_id"]} if target.get("message_thread_id") else {}),
+                    "text": "Open Source AI News Wire pairing test. Please confirm receipt" + (
+                        f" in {target['title']}." if target.get("title") else " in the private team group."),
                     "disable_web_page_preview": True,
-                },
-                timeout=10,
-            )
-            if not isinstance(result, dict) or not result.get("message_id"):
-                raise RuntimeError("Telegram test message was not acknowledged")
+                }, timeout=10)
+                if not isinstance(result, dict) or not result.get("message_id"):
+                    raise RuntimeError("Telegram test message was not acknowledged")
+                receipts.append(result["message_id"])
             service.mark_tested()
-            print(json.dumps({"status": "test_sent", "message_id": result["message_id"]}, indent=2))
+            print(json.dumps({"status": "test_sent", "message_id": receipts[0], "message_ids": receipts}, indent=2))
             return 0
 
         if action == "enable":

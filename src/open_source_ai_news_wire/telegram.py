@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .storage import Database
+from .telegram_topics import TOPICS
 
 
 TELEGRAM_METHODS = {
@@ -193,6 +194,11 @@ class TelegramClient:
             message_id = result.get("message_id")
             if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id <= 0:
                 raise TelegramAPIError("telegram_missing_acknowledgement")
+            if request_payload.get("message_thread_id") and (
+                    result.get("message_thread_id") != request_payload["message_thread_id"]
+                    or not isinstance(result.get("chat"), dict)
+                    or result["chat"].get("id") != request_payload.get("chat_id")):
+                raise TelegramAPIError("telegram_topic_acknowledgement_mismatch")
         return result
 
     async def _request(self, method: str, payload: dict[str, object], timeout: float) -> tuple[int, bytes]:
@@ -304,6 +310,17 @@ class TelegramService:
                 (activation_id, _now_value()),
             )
             counts["pending"] = int((pending or {}).get("count") or 0)
+        routing_mode = self._value("telegram_routing_mode", "single")
+        if routing_mode == "topics":
+            counts = {str(row["status"]): int(row["count"]) for row in self.database.query(
+                "SELECT status,COUNT(*) AS count FROM relevance_telegram_topic_delivery GROUP BY status")}
+            pending = self.database.one(
+                """SELECT COUNT(*) AS count FROM relevance_telegram_topic_delivery
+                   WHERE event_id > ? AND (status='pending' OR
+                     (status='failed' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)))""",
+                (activation_id, _now_value()),
+            )
+            counts["pending"] = int((pending or {}).get("count") or 0)
         return {
             "enabled": self._value("telegram_enabled", "false") == "true",
             "paired": paired,
@@ -318,6 +335,9 @@ class TelegramService:
             "cooldown_until": self._value("telegram_cooldown_until", "") or None,
             "last_error": self._value("telegram_last_error", "") or None,
             "counts": counts,
+            "routing_mode": routing_mode,
+            "topics": self.database.query(
+                "SELECT topic_key,title,chat_id,message_thread_id FROM telegram_topic_route ORDER BY topic_key"),
         }
 
     def status(self) -> dict[str, object]:
@@ -345,6 +365,43 @@ class TelegramService:
                 self._set(connection, "telegram_blocked_reason", "", now)
                 self._set(connection, "telegram_last_error", "", now)
                 self._set(connection, "telegram_cooldown_until", "", now)
+                self._set(connection, "telegram_routing_mode", "single", now)
+                connection.execute("DELETE FROM telegram_topic_route")
+        return self.status()
+
+    def configure_topics(self, chat_id: int, title: str, routes: dict[str, int]) -> dict[str, object]:
+        """Bind three explicit destinations. Testing/enablement follow separately.
+
+        The caller verifies the private forum and bot membership with Telegram.
+        Reconfiguration never replays events or retargets queued deliveries.
+        """
+        if (isinstance(chat_id, bool) or not isinstance(chat_id, int) or chat_id >= 0
+                or not title.strip() or len(title) > 200 or set(routes) != set(TOPICS)
+                or any(isinstance(v, bool) or not isinstance(v, int) or v <= 0 for v in routes.values())
+                or len(set(routes.values())) != len(TOPICS)):
+            raise TelegramError("telegram_topics_invalid")
+        now = _now_value()
+        with self._lock():
+            with self.database.transaction() as connection:
+                if not self._value("telegram_bot_id"):
+                    raise TelegramError("telegram_not_paired")
+                # Do not discard or send remaining work into a replacement group.
+                if connection.execute("""SELECT 1 FROM relevance_telegram_topic_delivery
+                    WHERE status IN ('pending','failed') AND event_id > ? LIMIT 1""",
+                    (int(self._value("telegram_activation_event_id", "0")),)).fetchone():
+                    raise TelegramError("telegram_topics_pending_deliveries")
+                connection.execute("DELETE FROM telegram_topic_route")
+                for key, thread_id in routes.items():
+                    connection.execute("""INSERT INTO telegram_topic_route(
+                        topic_key,chat_id,message_thread_id,title,configured_at) VALUES(?,?,?,?,?)""",
+                        (key, chat_id, thread_id, TOPICS[key], now))
+                for key, value in (("telegram_enabled", "false"), ("telegram_test_passed", "false"),
+                        ("telegram_chat_id", str(chat_id)), ("telegram_chat_title", title.strip()),
+                        ("telegram_routing_mode", "topics"), ("telegram_blocked_reason", ""),
+                        ("telegram_last_error", ""), ("telegram_cooldown_until", "")):
+                    self._set(connection, key, value, now)
+                current = connection.execute("SELECT COALESCE(MAX(id),0) AS id FROM relevance_notification_event").fetchone()
+                self._set(connection, "telegram_activation_event_id", str(current["id"]), now)
         return self.status()
 
     def mark_tested(self) -> dict[str, object]:
@@ -370,6 +427,10 @@ class TelegramService:
                     "SELECT COALESCE(MAX(id), 0) AS value FROM relevance_notification_event"
                 ).fetchone()
                 activation_id = int(current["value"] or 0)
+                if self._value("telegram_routing_mode", "single") == "topics":
+                    connection.execute("""UPDATE relevance_telegram_topic_delivery
+                        SET status='skipped',error_class='before_activation',updated_at=?
+                        WHERE event_id <= ? AND status IN ('pending','failed')""", (now, activation_id))
                 self._set(connection, "telegram_enabled", "true", now)
                 self._set(connection, "telegram_activation_event_id", str(activation_id), now)
                 self._set(connection, "telegram_activation_at", now, now)
@@ -403,8 +464,10 @@ class TelegramService:
                     ("telegram_blocked_reason", ""),
                     ("telegram_last_error", ""),
                     ("telegram_cooldown_until", ""),
+                    ("telegram_routing_mode", "single"),
                 ):
                     self._set(connection, key, value, now)
+                connection.execute("DELETE FROM telegram_topic_route")
         return self.status()
 
     def block(self, reason: str) -> None:
@@ -418,12 +481,27 @@ class TelegramService:
         self._set(connection, "telegram_blocked_reason", reason[:120], now)
 
     def pending(
-        self, *, limit: int = MAX_PENDING_ROWS, after_event_id: int = 0, now: str | None = None
+        self, *, limit: int = MAX_PENDING_ROWS, after_event_id: int = 0,
+        after_delivery_id: int = 0, now: str | None = None
     ) -> list[dict[str, object]]:
         state = self._status_unlocked()
         if not state["enabled"] or not state["paired"] or state["blocked_reason"]:
             return []
         now = now or _now_value()
+        if state["routing_mode"] == "topics":
+            return self.database.query(
+                """SELECT e.id AS event_id,e.article_key,e.canonical_url,e.title,
+                    e.publisher,e.context,e.source_type,e.provenance,e.published_at,
+                    e.source_reported_at,e.timestamp_status,e.detected_at,
+                    d.id AS delivery_id,d.topic_key,d.chat_id,d.message_thread_id,d.attempt_count
+                    FROM relevance_telegram_topic_delivery d
+                    JOIN relevance_notification_event e ON e.id=d.event_id
+                    WHERE e.id > ? AND d.id > ? AND
+                      (d.status='pending' OR (d.status='failed' AND
+                        (d.next_attempt_at IS NULL OR d.next_attempt_at <= ?)))
+                    ORDER BY d.id LIMIT ?""",
+                (int(state["activation_event_id"]), after_delivery_id, now, max(1,min(1000,int(limit)))),
+            )
         return self.database.query(
             """
             SELECT e.id AS event_id, e.article_key, e.canonical_url, e.title,
@@ -515,6 +593,25 @@ class TelegramService:
                 ).fetchone()
         return dict(row) if row else {}
 
+    def record_topic(self, delivery_id: int, *, status: str, error_class: str = "",
+                     retry_at: str | None = None, provider_message_id: int | None = None,
+                     attempted: bool = False) -> None:
+        if status not in {"delivered", "failed", "skipped", "dead_lettered"}:
+            raise TelegramError("telegram_delivery_status_invalid")
+        now = _now_value()
+        with self.database.transaction() as connection:
+            changed = connection.execute(
+                """UPDATE relevance_telegram_topic_delivery SET status=?,
+                    attempt_count=attempt_count+?,delivered_at=?,next_attempt_at=?,
+                    error_class=?,provider_message_id=COALESCE(?,provider_message_id),updated_at=?
+                    WHERE id=? AND status IN ('pending','failed')""",
+                (status, int(attempted or status in {"delivered", "failed"}),
+                 now if status == "delivered" else None, retry_at if status == "failed" else None,
+                 error_class[:120], provider_message_id, now, delivery_id),
+            ).rowcount
+            if changed and status == "delivered":
+                self._set(connection, "telegram_last_success", now, now)
+
 
 class TelegramDispatcher:
     def __init__(
@@ -539,15 +636,24 @@ class TelegramDispatcher:
         # Read committed eligible events in stable order across pages.
         # The per-run send limit bounds how quickly the queue drains.
         after_event_id = 0
+        after_delivery_id = 0
         while True:
-            rows = self.service.pending(after_event_id=after_event_id, now=_format_time(self.now()))
+            rows = self.service.pending(after_event_id=after_event_id,
+                after_delivery_id=after_delivery_id, now=_format_time(self.now()))
             if not rows:
                 return
             for event in rows:
                 after_event_id = int(event["event_id"])
+                after_delivery_id = int(event.get("delivery_id") or 0)
                 yield event
             if len(rows) < MAX_PENDING_ROWS:
                 return
+
+    def _record(self, event: dict[str, object], **values) -> None:
+        if event.get("delivery_id"):
+            self.service.record_topic(int(event["delivery_id"]), **values)
+        else:
+            self.service.record(int(event["event_id"]), **values)
 
     def dispatch(self) -> dict[str, object]:
         deadline = self.monotonic() + DISPATCH_DEADLINE_SECONDS
@@ -591,8 +697,8 @@ class TelegramDispatcher:
                     message = self._message(event)
                 except TelegramError as error:
                     failed += 1
-                    self.service.record(
-                        int(event["event_id"]), status="dead_lettered", error_class=str(error)
+                    self._record(
+                        event, status="dead_lettered", error_class=str(error)
                     )
                     continue
                 if client is None:
@@ -617,7 +723,9 @@ class TelegramDispatcher:
                     result = client.call(
                         "sendMessage",
                         {
-                            "chat_id": int(self.service._value("telegram_chat_id")),
+                            "chat_id": int(event.get("chat_id") or self.service._value("telegram_chat_id")),
+                            **({"message_thread_id": int(event["message_thread_id"])}
+                               if event.get("message_thread_id") else {}),
                             "text": message,
                             "link_preview_options": {"is_disabled": True},
                             "allow_paid_broadcast": False,
@@ -628,17 +736,17 @@ class TelegramDispatcher:
                     failed += 1
                     attempts = int(event.get("attempt_count") or 0) + 1
                     if error.channel_blocked:
-                        self.service.record(int(event["event_id"]), status="dead_lettered", error_class=error.error_class, attempted=True)
+                        self._record(event, status="dead_lettered", error_class=error.error_class, attempted=True)
                         with self.database.transaction() as connection:
                             self.service._block_unlocked(connection, error.error_class, _now_value())
                         break
                     if error.permanent:
-                        self.service.record(int(event["event_id"]), status="dead_lettered", error_class=error.error_class, attempted=True)
+                        self._record(event, status="dead_lettered", error_class=error.error_class, attempted=True)
                         continue
                     delay = error.retry_after if error.retry_after is not None else min(30 * 60, 30 * (2 ** max(0, attempts - 1)))
                     retry_at = _format_time(self.now() + timedelta(seconds=delay))
-                    self.service.record(
-                        int(event["event_id"]),
+                    self._record(
+                        event,
                         status="failed",
                         error_class=error.error_class,
                         retry_at=retry_at,
@@ -657,8 +765,8 @@ class TelegramDispatcher:
                     failed += 1
                     attempts = int(event.get("attempt_count") or 0) + 1
                     delay = min(30 * 60, 30 * (2 ** max(0, attempts - 1)))
-                    self.service.record(
-                        int(event["event_id"]),
+                    self._record(
+                        event,
                         status="failed",
                         error_class=str(error),
                         retry_at=_format_time(self.now() + timedelta(seconds=delay)),
@@ -669,8 +777,8 @@ class TelegramDispatcher:
                     provider_message_id = int(message_id) if message_id is not None else None
                 except (TypeError, ValueError):
                     provider_message_id = None
-                self.service.record(
-                    int(event["event_id"]),
+                self._record(
+                    event,
                     status="delivered",
                     provider_message_id=provider_message_id,
                 )

@@ -54,7 +54,7 @@ def test_schema9_is_additive_off_by_default_and_does_not_backfill(tmp_path: Path
     database = _database(tmp_path)
     seed_demo_data(database)
 
-    assert database.schema_version() == SCHEMA_VERSION == 11
+    assert database.schema_version() == SCHEMA_VERSION == 12
     assert database.one("SELECT COUNT(*) AS count FROM relevance_notification_event") == {"count": 0}
     state = DashboardService(database).relevance_notification_state()
     assert state["capture_enabled"] is True

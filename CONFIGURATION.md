@@ -55,16 +55,36 @@ open-source-ai-news-wire telegram disable
 open-source-ai-news-wire telegram unpair
 ```
 
+To route informational alerts into existing topics in one private forum group,
+configure all three destination links, then test and enable:
+
+```bash
+open-source-ai-news-wire telegram topics \
+  --topic open_source_ai=https://t.me/c/GROUP/OPEN_TOPIC \
+  --topic ai_policy_law=https://t.me/c/GROUP/POLICY_TOPIC \
+  --topic ai_models_products=https://t.me/c/GROUP/MODEL_TOPIC
+open-source-ai-news-wire telegram send-test
+open-source-ai-news-wire telegram enable
+```
+
+Replace placeholders with numeric topic links. Topics are **Open-Source AI**,
+**AI Policy & Law**, and **AI Models & Products**. An item can match multiple
+topics; delivery and retry state is tracked separately for each. Unmatched
+stories stay on the dashboard without Telegram delivery. Configuration stops
+the old single-destination mode and requires successful tests in all three
+topics. The existing bot must belong to the target private forum and be allowed
+to send messages. See [Telegram alerts](docs/guide/telegram-alerts.md).
+
 Open BotFather and use `/newbot`, add the bot to the private group with group
 privacy enabled, then run the pairing command. Enter the token hidden at the
 terminal; never paste it into Codex. A short-lived pairing code binds the
 command to the local pairing attempt. The test command must verify a receipt
 before `enable` can activate delivery.
 
-Only relevant articles with a reliable source publication time no older than
-24 hours at send time are eligible. Unknown or future publication times,
-aggregator or discovery timestamps used as fallbacks, and detection-time
-fallbacks are skipped.
+Every newly fetched relevant item is eligible, including discovery items and
+older or unknown publication dates. Fetch time is shown separately; unreliable
+original publication dates are marked as not verified. Topic mode additionally
+requires a match to at least one configured content topic.
 Enabling or resuming does not backfill older events. The existing scanner still
 runs every 30 minutes; the Telegram LaunchAgent dispatch loop runs at load and
 every 60 seconds while the Mac is awake, with a 50-second dispatch budget and a
