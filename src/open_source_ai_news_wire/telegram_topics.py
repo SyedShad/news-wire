@@ -19,7 +19,9 @@ def content_topics(title: str, summary: str = "") -> tuple[str, ...]:
     Open weights/source-available releases share the open ecosystem destination;
     this routing label does not assert that their licenses are OSI-approved.
     """
-    text = f"{title} {summary}".casefold()
+    # Discovery excerpts often contain only article/comment URLs. URL slugs
+    # are metadata, not a claim about the subject of the fetched story.
+    text = re.sub(r"https?://\S+", " ", f"{title} {summary}").casefold()
     ai = bool(re.search(
         r"\b(?:ai|agi|llms?|artificial intelligence|machine learning|"
         r"language models?|models?|agents?|neural|inference|transformers?|pytorch|vllm|llama\.cpp|chatgpt|openai|"
@@ -45,7 +47,8 @@ def content_topics(title: str, summary: str = "") -> tuple[str, ...]:
         r"\b(?:releas\w*|launch\w*|introduc\w*|unveil\w*|improv\w*|"
         r"upgrad\w*|updat\w*|new|adds?|added|faster|better|"
         r"outperform\w*|benchmark\w*|capabilit\w*|performance|"
-        r"context window|fine[ -]tun\w*|reasoning)\b", text
+        r"context window|fine[ -]tun\w*|reasoning|built|builds?|"
+        r"develop(?:s|ed)|train(?:s|ed)|capable)\b", text
     ))
     # Legal updates about models must not become model-improvement news merely
     # because they contain "new", "updated", or "models". Require a concrete
@@ -60,7 +63,10 @@ def content_topics(title: str, summary: str = "") -> tuple[str, ...]:
             r"(?:models?|llms?|gpt[ -]?\d[\w.-]*|claude|gemini|qwen[\w.-]*|deepseek[\w.-]*|llama[\w.-]*|mistral)\b",
             text,
         ))
-    flags = (opened, policy, ai and model and improvement)
+    # A question/opinion about whether models could be better is not itself
+    # an announced model improvement.
+    opinion_question = bool(re.match(r"\s*(?:why|should|could|would|will)\b", title.casefold())) and "?" in title
+    flags = (opened, policy, ai and model and improvement and not opinion_question)
     return tuple(key for key, matched in zip(TOPICS, flags) if matched)
 
 
