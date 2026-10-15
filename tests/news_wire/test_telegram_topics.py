@@ -34,6 +34,10 @@ ROUTES = {"open_source_ai": 11, "ai_policy_law": 22, "ai_models_products": 33}
     ("AI policy consultation", "An open-source AI licensing proposal.", ("open_source_ai", "ai_policy_law")),
     ("New office opening", "The company updated its website.", ()),
     ("Open-weight Qwen3 model released", "", ("open_source_ai", "ai_models_products")),
+    ("Meta built an open-weight AI model for Macs", "The company says it is its most capable model.", ("open_source_ai", "ai_models_products")),
+    ("Why Aren't AI Labs' Apps Better?", "Article URL: https://example.com/the-best-models-with Comments URL: https://news.ycombinator.com/item?id=1", ()),
+    ("AI startup raises funding", "Article URL: https://example.com/new-model-release", ()),
+    ("Why aren't AI models better?", "An opinion about AI models.", ()),
 ])
 def test_topics_overlap_without_publisher_or_category_precedence(title, summary, expected):
     assert content_topics(title, summary) == expected
