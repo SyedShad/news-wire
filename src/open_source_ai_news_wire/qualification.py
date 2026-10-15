@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from .adapters import Observation
+from .telegram_topics import content_topics
 
 
 AI_TERMS = {
@@ -147,6 +148,11 @@ def classify(
         # this lane unless the item directly names privacy, security, or a
         # regulatory/legal enforcement issue.
         relevant = relevant and bool(broader_matches)
+
+    # Include model/product improvements even when a proprietary release has
+    # no open ecosystem, AGI, security, or legal keyword. Telegram topics are
+    # independent of the legacy single dashboard lane.
+    relevant = relevant or bool(content_topics(observation.title, observation.summary))
 
     if "open source" in text or "open-source" in text:
         openness = "open source"

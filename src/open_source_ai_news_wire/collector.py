@@ -40,6 +40,7 @@ from .settings import load_settings
 from .source_registry import synchronize_sources
 from .storage import Database, article_id_for_url
 from .revisions import atomic_claim_signature
+from .telegram_topics import content_topics, enqueue_topic_deliveries
 
 
 def utc_now() -> str:
@@ -1619,6 +1620,8 @@ class Collector:
         if cursor.rowcount != 1:
             return None
         event_id = int(cursor.lastrowid)
+        enqueue_topic_deliveries(connection, event_id,
+            content_topics(observation.title, observation.summary), observed_at)
         if not telegram_only_recovery:
             connection.execute(
                 """

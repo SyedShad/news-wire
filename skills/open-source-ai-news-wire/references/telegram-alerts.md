@@ -4,6 +4,22 @@ Telegram alerts are informational notifications for one private team group.
 They are separate from Reddit drafting and publication, and separate from the
 hosted dashboard.
 
+## Existing forum topics
+
+The sender can route to three existing topics in one private forum group:
+**Open-Source AI**, **AI Policy & Law**, and **AI Models & Products**.
+Use `telegram topics` with one `--topic KEY=LINK` per destination; keys are
+`open_source_ai`, `ai_policy_law`, and `ai_models_products`. All three links
+must identify distinct topics in the same private group. The existing paired
+bot must have send permission there. No topic creation or admin rights are needed.
+
+Configuration stops delivery until `telegram send-test` succeeds in all three
+topics and `telegram enable` is run. Matching is independent and allows copies
+in multiple topics. Each destination has its own durable receipt/retry state;
+there is no General-topic fallback, historical replay, or change to Reddit
+publication. See the [topic setup guide](../../../docs/guide/telegram-alerts.md#route-to-existing-topics)
+for commands and classification details.
+
 ## Pair and enable
 
 Open BotFather and use `/newbot` to create a bot through the normal flow. Add it to the private group with

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Open Source AI News Wire releases**
 
+## [0.6.1] - 2026-10-15
+
+### Added
+
+- Route Telegram alerts to existing Open-Source AI, AI Policy & Law, and AI Models & Products forum topics, including every applicable topic for overlapping stories.
+- Track delivery, retries and provider acknowledgements independently per event and topic, retaining the existing single-group delivery history without replay.
+- Configure and test three private topic links with `telegram topics --topic KEY=LINK`.
+
+### Changed
+
+- Include model and product improvements in relevance collection even without an open-source, AGI, security or legal angle. Topic mode keeps unmatched stories on the dashboard without sending them to Telegram.
+- Add schema 12 for topic routes and per-topic delivery state; existing deployments retain their current delivery mode until explicitly configured.
+
 ## [0.6.0] - 2026-10-13
 
 ### Changed

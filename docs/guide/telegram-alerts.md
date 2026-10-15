@@ -27,6 +27,56 @@ packets, or Git. The configured destination is exactly one paired private group.
 
 ## What gets sent
 
+### Route to existing topics
+
+To separate the feed, enable Topics in a private Telegram supergroup and add
+the paired bot with permission to send messages. Create these three topics:
+
+- **Open-Source AI** — open-source AI models, tools and ecosystem developments;
+  open-weight and source-available releases share this destination without
+  implying that their licenses meet the open-source definition.
+- **AI Policy & Law** — AI regulation, legislation, copyright, lawsuits,
+  licensing, compliance and export controls.
+- **AI Models & Products** — model/product launches, updates, capability and
+  performance improvements, including proprietary models.
+
+Copy a topic link (or a message link that includes its topic) for each destination:
+
+```bash
+open-source-ai-news-wire telegram topics \
+  --topic open_source_ai=https://t.me/c/GROUP/OPEN_TOPIC \
+  --topic ai_policy_law=https://t.me/c/GROUP/POLICY_TOPIC \
+  --topic ai_models_products=https://t.me/c/GROUP/MODEL_TOPIC
+open-source-ai-news-wire telegram send-test
+open-source-ai-news-wire telegram enable
+```
+
+Replace the placeholders with actual numeric private-topic links from the same
+group. The configuration command verifies that the target is a private forum
+and the existing bot is a member; it does not create topics or send content.
+It also supports moving the paired bot from its original group to the explicitly
+specified forum group. Topic-administration rights are unnecessary for posting
+to existing topics. Testing sends one message to each topic; all three must
+succeed before enabling. Configuring topics stops the old delivery mode.
+
+Routing uses independent keyword rules over the title and fetched summary,
+never the publisher or the old single category. A new open-source model can
+go to both Open-Source AI and AI Models & Products. An open-source AI legal
+story can go to Open-Source AI and AI Policy & Law. Each matched topic gets
+one copy of the same message. Stories matching none of the three remain on the
+dashboard without a Telegram post or General-topic fallback. Model/product
+improvements are now included in collection even without an AGI or legal angle.
+These deterministic rules may miss stories whose titles and excerpts do not
+state the relevant topic explicitly.
+
+Each event's destinations are saved when it is collected. Per-topic delivery
+receipts and retries prevent one failed topic from replaying successful sends
+to another topic. The shared pacing limit applies across all copies. Existing
+history is retained without reposting it. Reconfiguration requires the existing
+topic queue to be drained; it cannot silently retarget queued messages.
+
+### Message contents
+
 Each message contains:
 
 - the relevant article headline;

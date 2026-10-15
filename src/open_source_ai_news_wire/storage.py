@@ -16,7 +16,7 @@ from typing import Any
 from .config import RuntimePaths, ensure_runtime_layout
 
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 def _exact_signature_records(value: object, *, source: bool) -> bool:
@@ -824,6 +824,33 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "CREATE INDEX idx_generation_pending ON generation_job(status,created_at)",
     ),
 
+    12: (
+        """CREATE TABLE telegram_topic_route (
+            topic_key TEXT PRIMARY KEY,
+            chat_id INTEGER NOT NULL,
+            message_thread_id INTEGER NOT NULL CHECK(message_thread_id > 0),
+            title TEXT NOT NULL,
+            configured_at TEXT NOT NULL,
+            UNIQUE(chat_id,message_thread_id)
+        )""",
+        """CREATE TABLE relevance_telegram_topic_delivery (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL REFERENCES relevance_notification_event(id) ON DELETE CASCADE,
+            topic_key TEXT NOT NULL,
+            chat_id INTEGER NOT NULL,
+            message_thread_id INTEGER NOT NULL CHECK(message_thread_id > 0),
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending','delivered','failed','skipped','expired','dead_lettered')),
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+            delivered_at TEXT,
+            next_attempt_at TEXT,
+            error_class TEXT,
+            provider_message_id INTEGER,
+            updated_at TEXT NOT NULL,
+            UNIQUE(event_id,chat_id,message_thread_id)
+        )""",
+        "CREATE INDEX idx_telegram_topic_pending ON relevance_telegram_topic_delivery(status,next_attempt_at,id)",
+    ),
 }
 
 
