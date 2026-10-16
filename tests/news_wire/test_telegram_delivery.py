@@ -152,8 +152,9 @@ def test_dispatch_delivers_missing_malformed_old_and_future_publication_times(
         "SELECT status FROM relevance_telegram_delivery WHERE event_id = ?", (event_id,)
     ) == {"status": "delivered"}
     text = str(client.calls[0][1]["text"])
-    assert "Fetched:" in text
-    assert expected_publication in text
+    assert "Fetched:" not in text
+    assert "Published:" not in text
+    assert "not verified" not in text
 
 
 def test_dispatch_delivers_discovery_date_without_mislabeling_it_as_publication(tmp_path: Path) -> None:
@@ -183,8 +184,8 @@ def test_dispatch_delivers_discovery_date_without_mislabeling_it_as_publication(
         (discovery_id,),
     ) == {"status": "delivered"}
     text = str(client.calls[0][1]["text"])
-    assert "Fetched:" in text
-    assert "Original publication date: not verified" in text
+    assert "Fetched:" not in text
+    assert "Original publication date:" not in text
     assert "Published:" not in text
 
 

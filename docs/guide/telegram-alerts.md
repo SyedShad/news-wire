@@ -77,21 +77,34 @@ topic queue to be drained; it cannot silently retarget queued messages.
 
 ### Message contents
 
-Each message contains:
+Each message contains a bold headline, a clean source-provided excerpt when
+available, and one linked publisher label. The same format applies to all three
+topics. Fetch/publication timestamps, discovery tags, points, comments and
+provenance boilerplate are omitted.
 
-- the relevant article headline;
-- publisher/source context;
-- the time News Wire first fetched the item, plus its publication time when verified; and
-- the public source link.
+Every message has **Copy link**, **Copy AI prompt**, and **Share** actions.
+Copying does not run AI. The prompt asks the viewer's chosen chatbot to read the
+source, summarize, flag uncertainty and suggest three post angles. Share opens
+Telegram's recipient picker; the viewer reviews and sends the item.
 
-Messages do not include scores, priority, research instructions, drafts,
-editorial controls, or hosted-dashboard actions. The existing relevance event
-identity prevents tracking variants and rescans from producing a second alert.
+Excerpts use deterministic selection of up to three complete source sentences,
+capped at 650 characters. Collection prefers usable feed excerpts, then safely
+retrieves page metadata when needed. Site slogans, tag-only summaries and
+incomplete trailing sentences are discarded. If retrieval fails or no useful
+excerpt exists, the headline and source still appear. No automatic AI summary or
+"Why it matters" text is generated.
+
+Explicit underlying article/repository links are preferred to discovery links;
+otherwise the actual discovery source remains accurately labelled. The source
+link is shared consistently across the body and buttons. Telegram clipboard
+buttons accept at most 256 characters: instructions are shortened first, while
+URLs remain complete. Unusually long URLs use **Open source** and **Copy
+instructions** instead. Formatting applies to pending and future deliveries;
+previously sent messages are not edited or replayed.
 
 Every newly fetched relevant item is eligible, including discovery items and
 items with unknown, invalid, future, or older publication dates. Publication
-dates do not block sending or retries. Messages label fetch time separately;
-unreliable original publication dates are marked as not verified. A social-post
+dates do not block sending or retries. Publication dates remain internal metadata and are not displayed. A social-post
 or aggregator date is never presented as the original article's publication date.
 New relevant items collected during recovery or an explicit catch-up also qualify.
 Enabling or re-enabling starts with new events and does not backfill older events.
@@ -132,7 +145,7 @@ delivery can resume.
   send a new test, then enable again.
 - `cooldown`: Telegram requested a pause; the sender waits until the reported time.
 - A failed request retries with increasing delays up to 30 minutes. Publication
-  age does not expire a queued item; its fetched time remains visible in the message.
+  age does not expire a queued item; its original delivery identity remains unchanged.
 
 Group members control Telegram notification sounds and banners themselves.
 The Mac must be awake, logged in, and connected for collection and delivery.
