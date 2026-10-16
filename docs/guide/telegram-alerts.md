@@ -82,10 +82,8 @@ available, and one linked publisher label. The same format applies to all three
 topics. Fetch/publication timestamps, discovery tags, points, comments and
 provenance boilerplate are omitted.
 
-Every message has **Copy link**, **Copy AI prompt**, and **Share** actions.
-Copying does not run AI. The prompt asks the viewer's chosen chatbot to read the
-source, summarize, flag uncertainty and suggest three post angles. Share opens
-Telegram's recipient picker; the viewer reviews and sends the item.
+Every message has a single **Copy link** button. There are no AI-prompt or
+sharing buttons. Copying the source URL does not run AI.
 
 Excerpts use deterministic selection of up to three complete source sentences,
 capped at 650 characters. Collection prefers usable feed excerpts, then safely
@@ -96,11 +94,10 @@ excerpt exists, the headline and source still appear. No automatic AI summary or
 
 Explicit underlying article/repository links are preferred to discovery links;
 otherwise the actual discovery source remains accurately labelled. The source
-link is shared consistently across the body and buttons. Telegram clipboard
-buttons accept at most 256 characters: instructions are shortened first, while
-URLs remain complete. Unusually long URLs use **Open source** and **Copy
-instructions** instead. Formatting applies to pending and future deliveries;
-previously sent messages are not edited or replayed.
+link is shared consistently across the body and button. Telegram clipboard
+buttons accept at most 256 characters. URLs remain complete; unusually long URLs
+use a single **Open source** button instead. Formatting applies to pending and
+future deliveries; previously sent messages are not edited or replayed.
 
 Every newly fetched relevant item is eligible, including discovery items and
 items with unknown, invalid, future, or older publication dates. Publication

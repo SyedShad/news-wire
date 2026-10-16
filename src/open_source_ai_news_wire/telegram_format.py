@@ -8,7 +8,7 @@ import json
 import re
 import unicodedata
 from html.parser import HTMLParser
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlsplit
 
 
 def literal(value: object) -> str:
@@ -143,16 +143,7 @@ def message_content(event: dict[str, object]) -> tuple[str, str, str, str]:
     return title, publisher, source, excerpt
 
 
-def buttons(source: str, title: str) -> dict[str, object]:
-    instruction = "Summarize, flag uncertainty, suggest 3 post angles. Say if inaccessible."
-    prompt = f"Read {source}\n{instruction}"
-    if len(prompt) > 256:
-        prompt = f"Read {source}\nSummarize; flag uncertainty."
-    if len(prompt) > 256:
-        prompt = f"Read {source}"
+def buttons(source: str) -> dict[str, object]:
     link_button = ({"text": "Copy link", "copy_text": {"text": source}} if len(source) <= 256
                    else {"text": "Open source", "url": source})
-    prompt_button = ({"text": "Copy AI prompt", "copy_text": {"text": prompt}} if len(prompt) <= 256
-                     else {"text": "Copy instructions", "copy_text": {"text": "Read the source linked in this message. " + instruction}})
-    return {"inline_keyboard": [[link_button, prompt_button,
-            {"text": "Share", "url": "https://t.me/share/url?" + urlencode({"url": source, "text": title})}]]}
+    return {"inline_keyboard": [[link_button]]}

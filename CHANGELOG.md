@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Open Source AI News Wire releases**
 
+## [0.6.3] - 2026-10-16
+
+### Changed
+
+- Keep only the Copy link button on automatic Telegram alerts across all three topics; remove AI-prompt and sharing actions. Preserve the existing single Open source fallback for URLs exceeding Telegram's clipboard limit.
+
 ## [0.6.2] - 2026-10-16
 
 ### Changed

@@ -120,7 +120,7 @@ def test_one_event_cross_posts_and_rescan_does_not_duplicate(db):
     assert len({p["text"] for p in client.calls}) == 1
     for payload in client.calls:
         assert payload["parse_mode"] == "HTML"
-        assert [b["text"] for b in payload["reply_markup"]["inline_keyboard"][0]] == ["Copy link", "Copy AI prompt", "Share"]
+        assert [b["text"] for b in payload["reply_markup"]["inline_keyboard"][0]] == ["Copy link"]
     assert dispatcher(db, client).dispatch()["delivered"] == 0
     assert db.one("SELECT COUNT(*) AS n FROM relevance_notification_event")["n"] == 1
 
