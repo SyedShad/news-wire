@@ -121,7 +121,7 @@ def test_one_event_cross_posts_and_rescan_does_not_duplicate(db):
     for payload in client.calls:
         assert payload["parse_mode"] == "HTML"
         assert [[b["text"] for b in row] for row in payload["reply_markup"]["inline_keyboard"]] == [
-            ["Copy link", "Copy prompt"], ["Open in Codex", "Open in Claude"], ["Search on Google"]]
+            ["Copy link", "Copy prompt", "Search on Google"]]
     assert dispatcher(db, client).dispatch()["delivered"] == 0
     assert db.one("SELECT COUNT(*) AS n FROM relevance_notification_event")["n"] == 1
 

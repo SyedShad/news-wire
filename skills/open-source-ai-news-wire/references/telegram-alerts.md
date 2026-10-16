@@ -41,17 +41,18 @@ delivery can be enabled.
 ## Message and eligibility contract
 
 Each alert contains a bold headline, a clean source excerpt when available, one
-linked publisher label, and five buttons: Copy link / Copy prompt, Open in Codex /
-Open in Claude, and Search on Google. All three
+linked publisher label, and three buttons in one row: Copy link, Copy prompt,
+and Search on Google. All three
 topics use this format. Fetch/publication dates, discovery tags, engagement and
 provenance boilerplate are omitted. Excerpts come from feed text or safely fetched
 page metadata; formatting and buttons require no AI inference. Missing useful
 text leaves a headline-and-source message. Clipboard payloads are bounded to
 256 characters without truncating URLs; long links use one Open source button.
 A shared full prompt populates title, optional description and source. Longer
-prompts and native app buttons use a public HTTPS handoff requiring an explicit
-copy/open action, without dashboard access or automatic submission. The skill
-placeholder stays editable. Google uses only the normalized unquoted headline
+prompts use a public HTTPS copy-only page with complete editable text and an
+explicit Copy full prompt action, without dashboard access. App-opening buttons
+are removed from Telegram and the page. Historical handoff URLs remain readable.
+The shortened prompt ends with the editable skill placeholder. Google uses only the normalized unquoted headline
 and opens according to the clicking viewer's browser settings.
 Pending and future deliveries use the format; previous messages are not replayed.
 
