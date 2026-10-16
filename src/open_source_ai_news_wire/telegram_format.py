@@ -8,7 +8,10 @@ import json
 import re
 import unicodedata
 from html.parser import HTMLParser
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlencode, urlsplit
+
+
+HANDOFF_BASE_URL = "https://newswire-prompt-handoff.shadmanulhaque.chatgpt.site/"
 
 
 def literal(value: object) -> str:
@@ -143,7 +146,38 @@ def message_content(event: dict[str, object]) -> tuple[str, str, str, str]:
     return title, publisher, source, excerpt
 
 
-def buttons(source: str) -> dict[str, object]:
+def build_prompt(title: str, description: str, source: str) -> str:
+    """Build once from the exact visible message fields, without inference."""
+    lines = ["Use the skill selected below to create a draft about this news item.",
+             "", f"Title: {title}"]
+    if description:
+        lines.append(f"Description: {description}")
+    lines.extend([f"Source: {source}", "", "Skill: [CHOOSE AN INSTALLED SKILL]", "",
+                  "If no skill is selected, ask me which skill to use before drafting.",
+                  "If the requested skill is unavailable, tell me before drafting.",
+                  "Do not publish or send the result."])
+    return "\n".join(lines)
+
+
+def handoff_url(prompt: str, action: str) -> str:
+    return HANDOFF_BASE_URL + "#" + urlencode(
+        {"v": "1", "action": action, "prompt": prompt}, quote_via=quote, safe="")
+
+
+def copy_prompt_button(prompt: str) -> dict[str, object]:
+    if len(prompt) <= 256:
+        return {"text": "Copy prompt", "copy_text": {"text": prompt}}
+    return {"text": "Copy prompt", "url": handoff_url(prompt, "copy")}
+
+
+def buttons(source: str, title: str, description: str = "") -> dict[str, object]:
+    prompt = build_prompt(title, description, source)
     link_button = ({"text": "Copy link", "copy_text": {"text": source}} if len(source) <= 256
                    else {"text": "Open source", "url": source})
-    return {"inline_keyboard": [[link_button]]}
+    return {"inline_keyboard": [
+        [link_button, copy_prompt_button(prompt)],
+        [{"text": "Open in Codex", "url": handoff_url(prompt, "codex")},
+         {"text": "Open in Claude", "url": handoff_url(prompt, "claude")}],
+        [{"text": "Search on Google", "url": "https://www.google.com/search?" +
+          urlencode({"q": plain(title)}, quote_via=quote, safe="")}],
+    ]}
