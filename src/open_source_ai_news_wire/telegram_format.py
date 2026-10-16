@@ -152,10 +152,7 @@ def build_prompt(title: str, description: str, source: str) -> str:
              "", f"Title: {title}"]
     if description:
         lines.append(f"Description: {description}")
-    lines.extend([f"Source: {source}", "", "Skill: [CHOOSE AN INSTALLED SKILL]", "",
-                  "If no skill is selected, ask me which skill to use before drafting.",
-                  "If the requested skill is unavailable, tell me before drafting.",
-                  "Do not publish or send the result."])
+    lines.extend([f"Source: {source}", "", "Skill: [CHOOSE AN INSTALLED SKILL]"])
     return "\n".join(lines)
 
 
@@ -174,10 +171,8 @@ def buttons(source: str, title: str, description: str = "") -> dict[str, object]
     prompt = build_prompt(title, description, source)
     link_button = ({"text": "Copy link", "copy_text": {"text": source}} if len(source) <= 256
                    else {"text": "Open source", "url": source})
-    return {"inline_keyboard": [
-        [link_button, copy_prompt_button(prompt)],
-        [{"text": "Open in Codex", "url": handoff_url(prompt, "codex")},
-         {"text": "Open in Claude", "url": handoff_url(prompt, "claude")}],
-        [{"text": "Search on Google", "url": "https://www.google.com/search?" +
-          urlencode({"q": plain(title)}, quote_via=quote, safe="")}],
-    ]}
+    return {"inline_keyboard": [[
+        link_button, copy_prompt_button(prompt),
+        {"text": "Search on Google", "url": "https://www.google.com/search?" +
+         urlencode({"q": plain(title)}, quote_via=quote, safe="")},
+    ]]}

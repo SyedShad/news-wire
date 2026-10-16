@@ -6,13 +6,13 @@ Open Source AI News Wire uses semantic application versions and explicit databas
 
 | Item | Value |
 |---|---|
-| Application | 0.6.4 |
+| Application | 0.6.5 |
 | Database schema | 12 |
 | Release tag | Pending local validation and source release |
 | Validated source commit | Bound by the local validation report at install time |
 | Distribution | Owner source repository; no prebuilt binary attached |
 
-Release 0.6.4 retains the approved Telegram message body and adds five actions: Copy link, Copy prompt, native Codex/Claude handoff, and headline-only Google search. No action submits a prompt or runs AI automatically. It retains schema 12 and existing delivery ledgers.
+Release 0.6.5 retains the approved Telegram message body and uses one row of three actions: Copy link, Copy prompt, and headline-only Google search. The shorter copied prompt ends with the editable skill placeholder. Long prompts use a copy-only public page, and historical handoff links remain readable. It retains schema 12 and existing delivery ledgers, with no automatic inference.
 
 Release 0.6.0 introduced the current feed: it replaces graded story queues with a plain article feed and separates operational notices. It adds durable skill-based text and graphics jobs through the local Codex app-server. Live generation readiness requires local ChatGPT sign-in and successful local and hosted runs. Existing external article-alert policies and notification ledgers are preserved.
 

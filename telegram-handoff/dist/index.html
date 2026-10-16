@@ -6,28 +6,24 @@
   <meta name="referrer" content="no-referrer">
   <meta name="robots" content="noindex,nofollow">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
-  <title>NewsWire · Open a draft prompt</title>
+  <title>NewsWire · Copy a draft prompt</title>
   <link rel="stylesheet" href="./style.css">
   <script type="module" src="./app.mjs"></script>
 </head>
 <body>
   <main>
     <header><span class="brand">NEWSWIRE</span><span class="tag">Draft handoff</span></header>
-    <h1 id="heading">Your news, ready to draft.</h1>
-    <p class="intro">Choose an installed skill in the prompt, then open it in your desktop app or copy it. Nothing is submitted automatically.</p>
+    <h1 id="heading">Copy your complete prompt.</h1>
+    <p class="intro">Review or edit the complete prompt, then copy it into your preferred app.</p>
     <label for="prompt">Complete prompt <span>Editable · keeps every line</span></label>
     <textarea id="prompt" rows="13" spellcheck="false" disabled></textarea>
     <div class="actions">
       <button id="copy" type="button" disabled>Copy full prompt</button>
-      <a id="codex" class="app" aria-disabled="true">Open in Codex</a>
-      <a id="claude" class="app" aria-disabled="true">Open in Claude</a>
     </div>
-    <p id="app-limit" role="status" hidden></p>
     <p id="status" role="status" aria-live="polite">Open this page using a NewsWire alert button.</p>
     <details>
-      <summary>App didn’t open?</summary>
-      <p>The desktop app must be installed on this device. Your browser or operating system may ask you to confirm opening it. In Telegram’s in-app browser, you may need to open this page in your external browser first.</p>
-      <p>You can always select the full prompt above and copy it manually, then paste it into your app. Opening a link cannot confirm whether the app is available.</p>
+      <summary>Copy didn’t work?</summary>
+      <p>Select the complete prompt above and press Copy, ⌘C or Ctrl+C. If clipboard access is blocked in Telegram’s in-app browser, open this page in your external browser and try again.</p>
     </details>
     <footer>No sign-in required. No AI runs on this page.</footer>
   </main>

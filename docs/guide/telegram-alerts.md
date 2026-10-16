@@ -86,11 +86,9 @@ Each message uses this keyboard across all three topics:
 
 | Row | Buttons |
 |---|---|
-| 1 | Copy link · Copy prompt |
-| 2 | Open in Codex · Open in Claude |
-| 3 | Search on Google |
+| 1 | Copy link · Copy prompt · Search on Google |
 
-Copy prompt and both app buttons share one deterministic prompt builder using
+Copy prompt uses one deterministic prompt builder with
 the exact displayed headline, useful description when available, and source URL:
 
 ```text
@@ -101,31 +99,20 @@ Description: {actual description}
 Source: {actual source URL}
 
 Skill: [CHOOSE AN INSTALLED SKILL]
-
-If no skill is selected, ask me which skill to use before drafting.
-If the requested skill is unavailable, tell me before drafting.
-Do not publish or send the result.
 ```
 
 The Description line is omitted when unavailable. Skill selection remains
 editable; no host skill, model or workspace is silently chosen for the viewer.
 
-Native desktop deep links follow the current official documentation:
-[Codex](https://learn.chatgpt.com/docs/reference/commands#deep-links) uses
-`codex://new?prompt=...`; [Claude](https://support.claude.com/en/articles/14729294-open-claude-desktop-with-a-link)
-uses `claude://claude.ai/new?q=...`. Values are encoded as complete URI components.
-Telegram URL buttons lead first to the public
-[NewsWire handoff](https://newswire-prompt-handoff.shadmanulhaque.chatgpt.site/),
-which works without dashboard access. Opening a native app requires one more
-explicit action there, possibly followed by a browser/OS confirmation. Telegram's
-in-app browser may require opening the page in the viewer's external browser.
-App availability cannot be reliably detected; the complete editable prompt and
-copy fallback remain visible. Claude's documented approximately 14,000-character
-link limit is enforced without truncation; larger prompts must be copied.
+Prompts up to 256 characters copy directly through Telegram. Longer prompts open
+the public [NewsWire copy page](https://newswire-prompt-handoff.shadmanulhaque.chatgpt.site/)
+without dashboard access. That page contains the complete editable text and one
+**Copy full prompt** button. It has no app-opening actions. Historical handoff
+URLs still display their complete prompts for copying.
 
 The public handoff is a separate static Site. The prompt stays in the URL fragment
 and is processed locally; no news database, credential, connector or AI endpoint
-is accessed. It does not automatically copy, navigate to an app or submit anything.
+is accessed. It does not automatically copy, navigate or submit anything.
 Copy success is reported only after `navigator.clipboard.writeText` resolves;
 denial or missing clipboard support selects the complete text for manual copying.
 

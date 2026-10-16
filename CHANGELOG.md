@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Open Source AI News Wire releases**
 
+## [0.6.5] - 2026-10-16
+
+### Changed
+
+- Simplify all Telegram topics to one row: Copy link, Copy prompt and Search on Google. Remove the closing instruction paragraph from the shared prompt while retaining optional descriptions and the editable skill placeholder.
+- Make the public fallback page copy-only, remove native app-opening buttons and launch code, and keep historical handoff links readable with their full prompts intact.
+- Preserve complete-text copying, clipboard failure guidance, long-source fallback, message bodies, topic delivery history and retries without automatic inference.
+
 ## [0.6.4] - 2026-10-16
 
 ### Added

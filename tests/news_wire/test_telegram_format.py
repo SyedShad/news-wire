@@ -61,7 +61,7 @@ def test_unsafe_source_links_are_rejected(url):
 def test_single_copy_link_button_preserves_complete_urls(length):
     url = 'https://example.com/' + 'a' * length + '?x=1&y=2'
     row = buttons(url, 'Headline')['inline_keyboard'][0]
-    assert len(row) == 2
+    assert len(row) == 3
     for button in row:
         if 'copy_text' in button:
             assert 1 <= len(button['copy_text']['text']) <= 256
@@ -78,15 +78,22 @@ Title: 模型 🤖 café & agents
 Description: Source-provided description.
 Source: https://example.com/?x=1&y=2
 
-Skill: [CHOOSE AN INSTALLED SKILL]
-
-If no skill is selected, ask me which skill to use before drafting.
-If the requested skill is unavailable, tell me before drafting.
-Do not publish or send the result.'''
+Skill: [CHOOSE AN INSTALLED SKILL]'''
     assert build_prompt('模型 🤖 café & agents','Source-provided description.','https://example.com/?x=1&y=2') == expected
     missing = build_prompt('Title','','https://example.com/')
     assert 'Description:' not in missing
     assert 'Skill: [CHOOSE AN INSTALLED SKILL]' in missing
+    assert missing.endswith('Skill: [CHOOSE AN INSTALLED SKILL]')
+    assert 'If no skill' not in missing and 'Do not publish' not in missing
+
+
+def test_approved_wordpress_example_copies_directly_without_browser():
+    title = 'Show HN: WP Replai – AI chatbot built right into WordPress'
+    source = 'https://wpreplai.com/'
+    expected = ('Use the skill selected below to create a draft about this news item.\n\n'
+                f'Title: {title}\nSource: {source}\n\nSkill: [CHOOSE AN INSTALLED SKILL]')
+    assert buttons(source,title)['inline_keyboard'][0][1] == {
+        'text':'Copy prompt','copy_text':{'text':expected}}
 
 
 @pytest.mark.parametrize('length',[1,255,256,257,30000])
@@ -100,28 +107,30 @@ def test_copy_prompt_boundaries_never_truncate_or_normalize(length):
         assert parse_qs(urlsplit(button['url']).fragment)['prompt']==[prompt]
 
 
-def test_five_actions_use_one_complete_prompt_and_normal_google_search():
+@pytest.mark.parametrize('repeat',[1,4])
+def test_three_actions_share_one_row_and_preserve_full_prompt_and_google_search(repeat):
     title = '模型 🤖 "Café" & agents + tools'
-    description = 'Source text with Unicode: नमस्ते.\nAnother line.'
+    description = 'Source text with Unicode: नमस्ते.\nAnother line.' * repeat
     source = 'https://example.com/article?one=1&two=é'
     keyboard=buttons(source,title,description)['inline_keyboard']
     assert [[button['text'] for button in row] for row in keyboard] == [
-        ['Copy link','Copy prompt'],['Open in Codex','Open in Claude'],['Search on Google']]
+        ['Copy link','Copy prompt','Search on Google']]
     assert keyboard[0][0]['copy_text']['text']==source
     expected=build_prompt(title,description,source)
-    for button,action in [(keyboard[0][1],'copy'),(keyboard[1][0],'codex'),(keyboard[1][1],'claude')]:
-        url=urlsplit(button['url'])
+    if len(expected)<=256:
+        assert keyboard[0][1]['copy_text']['text']==expected
+    else:
+        url=urlsplit(keyboard[0][1]['url'])
         assert url.scheme=='https' and not url.query
-        params=parse_qs(url.fragment)
-        assert params=={'v':['1'],'action':[action],'prompt':[expected]}
-    search=urlsplit(keyboard[2][0]['url'])
+        assert parse_qs(url.fragment)=={'v':['1'],'action':['copy'],'prompt':[expected]}
+    search=urlsplit(keyboard[0][2]['url'])
     assert search.scheme=='https' and search.netloc=='www.google.com' and search.path=='/search'
     assert parse_qs(search.query)=={'q':[title]}
-    assert 'Source text' not in keyboard[2][0]['url']
+    assert 'Source text' not in keyboard[0][2]['url']
 
 
 def test_google_search_removes_display_markup_and_only_normalizes_whitespace():
-    url=buttons('https://example.com/',' <b>New model</b>\n\tadds reasoning & tools ')['inline_keyboard'][2][0]['url']
+    url=buttons('https://example.com/',' <b>New model</b>\n\tadds reasoning & tools ')['inline_keyboard'][0][2]['url']
     assert parse_qs(urlsplit(url).query)=={'q':['New model adds reasoning & tools']}
 
 

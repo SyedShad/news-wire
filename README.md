@@ -94,7 +94,7 @@ See the [release guide](docs/guide/releases.md) and [changelog](CHANGELOG.md) fo
 - Sources must be public and usable without accounts, cookies, payment, or access bypasses.
 - Scheduled work runs while the Mac is awake. A locked screen is fine; sleep pauses work.
 - Notifications can arrive after local ingestion, but they cannot detect or send new items while the Mac is asleep, logged out, or offline.
-- Telegram alerts are optional, Mac-only, and independent of the hosted dashboard. They include a bold headline, source excerpt when available, linked publisher, and Copy link, Copy prompt, Open in Codex, Open in Claude and Search on Google buttons. No automatic AI inference is used.
+- Telegram alerts are optional, Mac-only, and independent of the hosted dashboard. They include a bold headline, source excerpt when available, linked publisher, and Copy link, Copy prompt and Search on Google buttons in one row. No automatic AI inference is used.
 - Broader AI News is limited to privacy, security, and regulation; Open Ecosystem and AGI coverage remain separate.
 - ChatGPT assistance is optional and can remain unavailable if its local checks fail.
 - A human chooses the model and skills for each task, reviews the output, and publishes manually.
