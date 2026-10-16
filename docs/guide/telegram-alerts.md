@@ -106,9 +106,18 @@ editable; no host skill, model or workspace is silently chosen for the viewer.
 
 Prompts up to 256 characters copy directly through Telegram. Longer prompts open
 the public [NewsWire copy page](https://newswire-prompt-handoff.shadmanulhaque.chatgpt.site/)
-without dashboard access. That page contains the complete editable text and one
-**Copy full prompt** button. It has no app-opening actions. Historical handoff
-URLs still display their complete prompts for copying.
+without dashboard access. That page contains the complete editable text and three
+buttons: **Copy full prompt**, **Open with Codex**, and **Open with Claude**.
+App buttons use the field's current text, including edits, and prefill a new
+native desktop chat without submitting it. They follow the documented
+[Codex](https://learn.chatgpt.com/docs/reference/commands#deep-links) and
+[Claude Desktop](https://support.claude.com/en/articles/14729294-open-claude-desktop-with-a-link)
+URL forms. An explicit click is required, and the browser or OS may ask for
+confirmation. If the app is unavailable, full copying remains available.
+Claude opening is disabled above 14,000 UTF-16 code units, conservatively
+respecting its approximately 14,000-character link limit without truncation.
+Historical URLs remain readable and never open an app automatically.
+The Telegram keyboard itself remains the same three-button row.
 
 The public handoff is a separate static Site. The prompt stays in the URL fragment
 and is processed locally; no news database, credential, connector or AI endpoint

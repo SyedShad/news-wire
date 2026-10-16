@@ -14,12 +14,16 @@
   <main>
     <header><span class="brand">NEWSWIRE</span><span class="tag">Draft handoff</span></header>
     <h1 id="heading">Copy your complete prompt.</h1>
-    <p class="intro">Review or edit the complete prompt, then copy it into your preferred app.</p>
+    <p class="intro">Review or edit the complete prompt, then copy it or open it in your desktop app. Nothing is submitted automatically.</p>
     <label for="prompt">Complete prompt <span>Editable · keeps every line</span></label>
     <textarea id="prompt" rows="13" spellcheck="false" disabled></textarea>
     <div class="actions">
       <button id="copy" type="button" disabled>Copy full prompt</button>
+      <button id="codex" type="button" disabled>Open with Codex</button>
+      <button id="claude" type="button" disabled>Open with Claude</button>
     </div>
+    <p id="app-limit" role="status" hidden></p>
+    <p class="intro">The desktop app must be installed on this device. Your browser or operating system may ask you to confirm opening it. If it does not open, copy the complete prompt and paste it into your app.</p>
     <p id="status" role="status" aria-live="polite">Open this page using a NewsWire alert button.</p>
     <details>
       <summary>Copy didn’t work?</summary>

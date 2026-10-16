@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Add Open with Codex and Open with Claude beside Copy full prompt on the public handoff page. The actions prefill new desktop chats using the complete current field text, while preserving the Telegram three-button row and direct-copy behavior. This is a separately hosted page update; no NewsWire runtime upgrade is required.
+
 **Open Source AI News Wire releases**
 
 ## [0.6.5] - 2026-10-16
