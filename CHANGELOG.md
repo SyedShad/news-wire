@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Open Source AI News Wire releases**
 
+## [0.6.2] - 2026-10-16
+
+### Changed
+
+- Use bold headlines, complete source excerpts and one linked publisher label for Telegram alerts across all three topics; omit timestamps, discovery tags, engagement and provenance boilerplate.
+- Add Copy link, Copy AI prompt and Share buttons without automatic AI inference. Clipboard payloads preserve full URLs and use explicit fallbacks for links over Telegram's limit.
+- Prefer source feed excerpts and safely retrieved page description metadata, omitting site slogans and incomplete descriptions. Preserve delivery history, routing and pending retries without replay.
+
 ## [0.6.1] - 2026-10-15
 
 ### Added

@@ -41,6 +41,7 @@ from .source_registry import synchronize_sources
 from .storage import Database, article_id_for_url
 from .revisions import atomic_claim_signature
 from .telegram_topics import content_topics, enqueue_topic_deliveries
+from .telegram_format import page_excerpt, source_excerpt
 
 
 def utc_now() -> str:
@@ -321,7 +322,7 @@ class Collector:
                 observed_at=self.now(),
                 novelty=0,
             ).relevant
-            if not relevant or len(" ".join(item.summary.split())) >= 160:
+            if not relevant or source_excerpt(item.summary, title=item.title):
                 hydrated.append(item)
                 continue
             metadata = dict(item.metadata)
@@ -340,7 +341,8 @@ class Collector:
                 fetched = client.fetch(item.url, deadline=deadline)
                 content_type = fetched.headers.get("content-type", "text/html").split(";", 1)[0]
                 page = extract_page(fetched.body, content_type)
-                passage = " ".join(page.passage.split())
+                passage = page_excerpt(fetched.body, title=item.title) if "html" in content_type else ""
+                passage = passage or source_excerpt(page.passage, title=item.title)
                 if passage:
                     metadata["notification_context"] = passage[:4000]
                     metadata["notification_publisher"] = (

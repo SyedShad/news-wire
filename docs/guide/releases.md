@@ -6,13 +6,15 @@ Open Source AI News Wire uses semantic application versions and explicit databas
 
 | Item | Value |
 |---|---|
-| Application | 0.6.0 |
-| Database schema | 11 |
+| Application | 0.6.2 |
+| Database schema | 12 |
 | Release tag | Pending local validation and source release |
 | Validated source commit | Bound by the local validation report at install time |
 | Distribution | Owner source repository; no prebuilt binary attached |
 
-Release 0.6.0 replaces graded story queues with a plain article feed and separates operational notices. It adds durable skill-based text and graphics jobs through the local Codex app-server. Live generation readiness requires local ChatGPT sign-in and successful local and hosted runs. Existing external article-alert policies and notification ledgers are preserved.
+Release 0.6.2 updates all Telegram topics with source excerpts, linked publisher labels and copy/share buttons without automatic AI inference. It retains schema 12 and existing delivery ledgers.
+
+Release 0.6.0 introduced the current feed: it replaces graded story queues with a plain article feed and separates operational notices. It adds durable skill-based text and graphics jobs through the local Codex app-server. Live generation readiness requires local ChatGPT sign-in and successful local and hosted runs. Existing external article-alert policies and notification ledgers are preserved.
 
 Highlights:
 

@@ -4,22 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import html
 import json
 import logging
 import os
 import re
 import time
-import unicodedata
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
-from urllib.parse import urlsplit
 
 import httpx
 
 from .storage import Database
 from .telegram_topics import TOPICS
+from .telegram_format import buttons, message_content, valid_source
 
 
 TELEGRAM_METHODS = {
@@ -493,6 +493,7 @@ class TelegramService:
                 """SELECT e.id AS event_id,e.article_key,e.canonical_url,e.title,
                     e.publisher,e.context,e.source_type,e.provenance,e.published_at,
                     e.source_reported_at,e.timestamp_status,e.detected_at,
+                    (SELECT a.summary FROM fetched_article a WHERE a.canonical_url=e.canonical_url LIMIT 1) AS source_summary,
                     d.id AS delivery_id,d.topic_key,d.chat_id,d.message_thread_id,d.attempt_count
                     FROM relevance_telegram_topic_delivery d
                     JOIN relevance_notification_event e ON e.id=d.event_id
@@ -508,6 +509,7 @@ class TelegramService:
                    e.publisher, e.context, e.source_type, e.provenance,
                    e.published_at, e.source_reported_at, e.timestamp_status,
                    e.detected_at,
+                   (SELECT a.summary FROM fetched_article a WHERE a.canonical_url=e.canonical_url LIMIT 1) AS source_summary,
                    COALESCE(d.attempt_count, 0) AS attempt_count
             FROM relevance_notification_event e
             LEFT JOIN relevance_telegram_delivery d ON d.event_id = e.id
@@ -695,6 +697,8 @@ class TelegramDispatcher:
                     break
                 try:
                     message = self._message(event)
+                    headline, _publisher, source, _excerpt = message_content(event)
+                    keyboard = buttons(source, headline)
                 except TelegramError as error:
                     failed += 1
                     self._record(
@@ -727,6 +731,8 @@ class TelegramDispatcher:
                             **({"message_thread_id": int(event["message_thread_id"])}
                                if event.get("message_thread_id") else {}),
                             "text": message,
+                            "parse_mode": "HTML",
+                            "reply_markup": keyboard,
                             "link_preview_options": {"is_disabled": True},
                             "allow_paid_broadcast": False,
                         },
@@ -807,69 +813,21 @@ class TelegramDispatcher:
             return False
         return self.now().astimezone(UTC) < cooldown.astimezone(UTC)
 
-    def _verified_publication(self, event: dict[str, object]) -> str | None:
-        """Return the original-source publication time only when it is verified."""
-        if str(event.get("source_type") or "") == "discovery":
-            return None
-        if str(event.get("timestamp_status") or "") not in {
-            "valid",
-            "future_aggregator_ignored",
-            "malformed_aggregator_ignored",
-        }:
-            return None
-        source_time = str(event.get("source_reported_at") or "")
-        published = str(event.get("published_at") or "")
-        if not source_time or not published:
-            return None
-        try:
-            source_moment = datetime.fromisoformat(source_time.replace("Z", "+00:00"))
-            published_moment = datetime.fromisoformat(published.replace("Z", "+00:00"))
-            if source_moment.tzinfo is None or published_moment.tzinfo is None:
-                return None
-            source_moment = source_moment.astimezone(UTC)
-            published_moment = published_moment.astimezone(UTC)
-            if source_moment != published_moment:
-                return None
-            if source_moment > self.now().astimezone(UTC):
-                return None
-        except (ValueError, OverflowError):
-            return None
-        return published
-
-    @staticmethod
-    def _clean(value: object, maximum: int | None) -> str:
-        text = " ".join(str(value or "").split())
-        text = "".join(
-            character
-            for character in text
-            if unicodedata.category(character) not in {"Cc", "Cf"}
-        )
-        return text[:maximum].strip() if maximum is not None else text.strip()
-
     def _message(self, event: dict[str, object]) -> str:
-        title = self._clean(event.get("title"), 500)
-        publisher = self._clean(event.get("publisher"), 120)
-        context = self._clean(event.get("context"), 900)
-        publication = self._clean(self._verified_publication(event), 64)
-        fetched = self._clean(event.get("detected_at"), 64) or "time unavailable"
-        source = self._clean(event.get("canonical_url"), None)
+        title, publisher, source, context = message_content(event)
         if not title:
             raise TelegramError("headline_missing")
         if not publisher:
             raise TelegramError("publisher_missing")
-        parsed = urlsplit(source)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        if not valid_source(source):
             raise TelegramError("source_link_invalid")
-        publication_line = (
-            f"Published: {publication}" if publication else "Original publication date: not verified"
-        )
-        prefix = f"{title}\n\n{publisher}\nFetched: {fetched}\n{publication_line}\n"
-        suffix = f"\n\nSource: {source}"
-        available = MAX_MESSAGE_LENGTH - len((prefix + suffix).encode("utf-16-le")) // 2
-        if available < 0:
+        message = f"<b>{html.escape(title)}</b>"
+        if context:
+            message += "\n\n" + html.escape(context)
+        message += f'\n\nSource: <a href="{html.escape(source, quote=True)}">{html.escape(publisher)}</a>'
+        if len(message.encode("utf-16-le")) // 2 > MAX_MESSAGE_LENGTH:
             raise TelegramError("telegram_message_too_large")
-        context = context.encode("utf-16-le")[:available * 2].decode("utf-16-le", errors="ignore").rstrip()
-        return prefix + context + suffix
+        return message
 
 
 def _format_time(value: datetime) -> str:

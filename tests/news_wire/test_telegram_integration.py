@@ -169,13 +169,13 @@ def test_rss_collector_event_reaches_telegram_fixture_without_backfill(tmp_path:
     undated_payload, dated_payload = [call[1] for call in fixture.calls]
     assert undated_payload["chat_id"] == -100123
     assert "Open-source AI model release adds a security benchmark" in str(undated_payload["text"])
-    assert "Fetched:" in str(undated_payload["text"])
-    assert "Original publication date: not verified" in str(undated_payload["text"])
+    assert "Fetched:" not in str(undated_payload["text"])
+    assert "Original publication date: not verified" not in str(undated_payload["text"])
     assert "Published:" not in str(undated_payload["text"])
     assert "Open-source AI model release publishes a safer runtime" in str(dated_payload["text"])
-    assert "Fetched:" in str(dated_payload["text"])
-    assert "Published: 2026-09-15T09:06:00Z" in str(dated_payload["text"])
-    assert "Source: https://openai.com/news/three" in str(dated_payload["text"])
+    assert "Fetched:" not in str(dated_payload["text"])
+    assert "Published:" not in str(dated_payload["text"])
+    assert 'href="https://openai.com/news/three"' in str(dated_payload["text"])
     assert dated_payload["allow_paid_broadcast"] is False
     assert database.one(
         "SELECT status FROM relevance_telegram_delivery WHERE event_id = ?", (undated["id"],)
@@ -242,7 +242,7 @@ def test_old_recovery_items_reach_telegram_without_browser_notification(
         sleep=lambda _seconds: None,
     ).dispatch()
     assert result["delivered"] == 1
-    assert "Published: 2026-09-10T12:00:00Z" in str(fixture.calls[0][1]["text"])
+    assert "Published:" not in str(fixture.calls[0][1]["text"])
 
 
 @pytest.mark.parametrize("ingestion_context", ["recovery", "extended"])

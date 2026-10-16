@@ -40,14 +40,19 @@ delivery can be enabled.
 
 ## Message and eligibility contract
 
-Each alert contains a relevant headline, publisher/source context, fetched time,
-publication time when verified, and public source link. It contains no draft, editorial
-control, hosted-dashboard action, priority, score, or research instruction.
+Each alert contains a bold headline, a clean source excerpt when available, one
+linked publisher label, and Copy link / Copy AI prompt / Share buttons. All three
+topics use this format. Fetch/publication dates, discovery tags, engagement and
+provenance boilerplate are omitted. Excerpts come from feed text or safely fetched
+page metadata; formatting and buttons require no AI inference. Missing useful
+text leaves a headline-and-source message. Clipboard payloads are bounded to
+256 characters without truncating URLs; long links use Open source / Copy
+instructions fallbacks. Share requires the viewer to choose and send to a recipient.
+Pending and future deliveries use the format; previous messages are not replayed.
 
 Every newly fetched relevant event qualifies regardless of its publication date.
 Unknown, invalid, future, discovery, and older publication dates do not prevent
-delivery or retries. Fetch time is labelled separately; unreliable original
-publication dates are marked as not verified. Enabling or re-enabling starts at
+delivery or retries. Publication dates are retained internally and not displayed. Enabling or re-enabling starts at
 the current event-ID cursor and never backfills older events.
 
 The Bot API is used for ordinary free delivery only. Paid broadcast options,
