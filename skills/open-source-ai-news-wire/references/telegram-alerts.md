@@ -49,9 +49,12 @@ page metadata; formatting and buttons require no AI inference. Missing useful
 text leaves a headline-and-source message. Clipboard payloads are bounded to
 256 characters without truncating URLs; long links use one Open source button.
 A shared full prompt populates title, optional description and source. Longer
-prompts use a public HTTPS copy-only page with complete editable text and an
-explicit Copy full prompt action, without dashboard access. App-opening buttons
-are removed from Telegram and the page. Historical handoff URLs remain readable.
+prompts use a public HTTPS page with complete editable text and Copy full prompt,
+Open with Codex and Open with Claude actions, without dashboard access. App
+opening uses the current field text only after an explicit click; it does not
+submit a prompt. Claude's link limit retains copying as a complete-text fallback.
+Historical handoff URLs remain readable and inert on load. App-opening buttons
+appear only on the handoff page; the Telegram keyboard remains unchanged.
 The shortened prompt ends with the editable skill placeholder. Google uses only the normalized unquoted headline
 and opens according to the clicking viewer's browser settings.
 Pending and future deliveries use the format; previous messages are not replayed.
