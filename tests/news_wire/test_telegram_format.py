@@ -1,6 +1,5 @@
 import html
 from datetime import UTC, datetime, timedelta
-from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -58,21 +57,17 @@ def test_unsafe_source_links_are_rejected(url):
 
 
 @pytest.mark.parametrize('length', [20, 160, 210, 236, 260, 900])
-def test_copy_buttons_never_truncate_urls_and_share_round_trips(length):
+def test_single_copy_link_button_preserves_complete_urls(length):
     url = 'https://example.com/' + 'a' * length + '?x=1&y=2'
-    row = buttons(url, 'Model & "agents" 🤖')['inline_keyboard'][0]
-    assert len(row) == 3
+    row = buttons(url)['inline_keyboard'][0]
+    assert len(row) == 1
     for button in row:
         if 'copy_text' in button:
             assert 1 <= len(button['copy_text']['text']) <= 256
     if len(url) <= 256:
         assert row[0]['copy_text']['text'] == url
-        assert url in row[1]['copy_text']['text']
     else:
         assert row[0] == {'text':'Open source','url':url}
-        assert row[1]['text'] == 'Copy instructions'
-    shared = parse_qs(urlsplit(row[2]['url']).query)
-    assert shared == {'url':[url], 'text':['Model & "agents" 🤖']}
 
 
 def test_formatter_escapes_untrusted_html_and_uses_one_source(tmp_path):
