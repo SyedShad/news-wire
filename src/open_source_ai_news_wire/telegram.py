@@ -697,8 +697,8 @@ class TelegramDispatcher:
                     break
                 try:
                     message = self._message(event)
-                    _headline, _publisher, source, _excerpt = message_content(event)
-                    keyboard = buttons(source)
+                    headline, _publisher, source, excerpt = message_content(event)
+                    keyboard = buttons(source, headline, excerpt)
                 except TelegramError as error:
                     failed += 1
                     self._record(

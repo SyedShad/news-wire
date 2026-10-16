@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Open Source AI News Wire releases**
 
+## [0.6.4] - 2026-10-16
+
+### Added
+
+- Add the approved five-button layout across all Telegram topics: Copy link / Copy prompt, Open in Codex / Open in Claude, and Search on Google.
+- Build one complete source-populated skill prompt for copying and native desktop handoff. The public, browser-local HTTPS handoff preserves Unicode and line breaks, supports editing and full-text copying, and requires an explicit app-opening action without submission.
+- Use ordinary headline-only Google search URLs. Keep the existing source-link fallback, body formatting, pending deliveries and delivery history; no new AI inference or paid API is introduced.
+
 ## [0.6.3] - 2026-10-16
 
 ### Changed

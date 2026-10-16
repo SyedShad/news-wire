@@ -82,8 +82,58 @@ available, and one linked publisher label. The same format applies to all three
 topics. Fetch/publication timestamps, discovery tags, points, comments and
 provenance boilerplate are omitted.
 
-Every message has a single **Copy link** button. There are no AI-prompt or
-sharing buttons. Copying the source URL does not run AI.
+Each message uses this keyboard across all three topics:
+
+| Row | Buttons |
+|---|---|
+| 1 | Copy link · Copy prompt |
+| 2 | Open in Codex · Open in Claude |
+| 3 | Search on Google |
+
+Copy prompt and both app buttons share one deterministic prompt builder using
+the exact displayed headline, useful description when available, and source URL:
+
+```text
+Use the skill selected below to create a draft about this news item.
+
+Title: {actual headline}
+Description: {actual description}
+Source: {actual source URL}
+
+Skill: [CHOOSE AN INSTALLED SKILL]
+
+If no skill is selected, ask me which skill to use before drafting.
+If the requested skill is unavailable, tell me before drafting.
+Do not publish or send the result.
+```
+
+The Description line is omitted when unavailable. Skill selection remains
+editable; no host skill, model or workspace is silently chosen for the viewer.
+
+Native desktop deep links follow the current official documentation:
+[Codex](https://learn.chatgpt.com/docs/reference/commands#deep-links) uses
+`codex://new?prompt=...`; [Claude](https://support.claude.com/en/articles/14729294-open-claude-desktop-with-a-link)
+uses `claude://claude.ai/new?q=...`. Values are encoded as complete URI components.
+Telegram URL buttons lead first to the public
+[NewsWire handoff](https://newswire-prompt-handoff.shadmanulhaque.chatgpt.site/),
+which works without dashboard access. Opening a native app requires one more
+explicit action there, possibly followed by a browser/OS confirmation. Telegram's
+in-app browser may require opening the page in the viewer's external browser.
+App availability cannot be reliably detected; the complete editable prompt and
+copy fallback remain visible. Claude's documented approximately 14,000-character
+link limit is enforced without truncation; larger prompts must be copied.
+
+The public handoff is a separate static Site. The prompt stays in the URL fragment
+and is processed locally; no news database, credential, connector or AI endpoint
+is accessed. It does not automatically copy, navigate to an app or submit anything.
+Copy success is reported only after `navigator.clipboard.writeText` resolves;
+denial or missing clipboard support selects the complete text for manual copying.
+
+Search on Google opens `https://www.google.com/search?q=...` with the unquoted,
+whitespace-normalized headline, with display markup removed. It does not include
+the description or prompt, generate search terms, scrape Google or use an API.
+The standard HTTPS link opens on the clicking viewer's device according to their
+Telegram/browser settings. The bot cannot force Chrome or override an in-app browser.
 
 Excerpts use deterministic selection of up to three complete source sentences,
 capped at 650 characters. Collection prefers usable feed excerpts, then safely
@@ -94,9 +144,10 @@ excerpt exists, the headline and source still appear. No automatic AI summary or
 
 Explicit underlying article/repository links are preferred to discovery links;
 otherwise the actual discovery source remains accurately labelled. The source
-link is shared consistently across the body and button. Telegram clipboard
-buttons accept at most 256 characters. URLs remain complete; unusually long URLs
-use a single **Open source** button instead. Formatting applies to pending and
+link is shared consistently across the body and actions. Telegram clipboard
+buttons accept at most 256 characters: a longer prompt opens the handoff with a
+Copy full prompt action, never truncated. URLs remain complete; unusually long
+source URLs retain the **Open source** fallback. Formatting applies to pending and
 future deliveries; previously sent messages are not edited or replayed.
 
 Every newly fetched relevant item is eligible, including discovery items and

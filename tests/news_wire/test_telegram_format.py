@@ -1,12 +1,13 @@
 import html
 from datetime import UTC, datetime, timedelta
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from open_source_ai_news_wire.adapters import Observation
 from open_source_ai_news_wire.collector import Collector
 from open_source_ai_news_wire.network import FetchResult
-from open_source_ai_news_wire.telegram_format import buttons, message_content, page_excerpt, source_excerpt, valid_source
+from open_source_ai_news_wire.telegram_format import build_prompt, buttons, copy_prompt_button, message_content, page_excerpt, source_excerpt, valid_source
 
 
 @pytest.mark.parametrize('text', [
@@ -59,8 +60,8 @@ def test_unsafe_source_links_are_rejected(url):
 @pytest.mark.parametrize('length', [20, 160, 210, 236, 260, 900])
 def test_single_copy_link_button_preserves_complete_urls(length):
     url = 'https://example.com/' + 'a' * length + '?x=1&y=2'
-    row = buttons(url)['inline_keyboard'][0]
-    assert len(row) == 1
+    row = buttons(url, 'Headline')['inline_keyboard'][0]
+    assert len(row) == 2
     for button in row:
         if 'copy_text' in button:
             assert 1 <= len(button['copy_text']['text']) <= 256
@@ -68,6 +69,60 @@ def test_single_copy_link_button_preserves_complete_urls(length):
         assert row[0]['copy_text']['text'] == url
     else:
         assert row[0] == {'text':'Open source','url':url}
+
+
+def test_shared_prompt_exact_template_and_missing_description():
+    expected = '''Use the skill selected below to create a draft about this news item.
+
+Title: 模型 🤖 café & agents
+Description: Source-provided description.
+Source: https://example.com/?x=1&y=2
+
+Skill: [CHOOSE AN INSTALLED SKILL]
+
+If no skill is selected, ask me which skill to use before drafting.
+If the requested skill is unavailable, tell me before drafting.
+Do not publish or send the result.'''
+    assert build_prompt('模型 🤖 café & agents','Source-provided description.','https://example.com/?x=1&y=2') == expected
+    missing = build_prompt('Title','','https://example.com/')
+    assert 'Description:' not in missing
+    assert 'Skill: [CHOOSE AN INSTALLED SKILL]' in missing
+
+
+@pytest.mark.parametrize('length',[1,255,256,257,30000])
+def test_copy_prompt_boundaries_never_truncate_or_normalize(length):
+    prompt = ('é\n🤖'*10000)[:length]
+    button = copy_prompt_button(prompt)
+    assert button['text']=='Copy prompt'
+    if length<=256:
+        assert button['copy_text']['text']==prompt
+    else:
+        assert parse_qs(urlsplit(button['url']).fragment)['prompt']==[prompt]
+
+
+def test_five_actions_use_one_complete_prompt_and_normal_google_search():
+    title = '模型 🤖 "Café" & agents + tools'
+    description = 'Source text with Unicode: नमस्ते.\nAnother line.'
+    source = 'https://example.com/article?one=1&two=é'
+    keyboard=buttons(source,title,description)['inline_keyboard']
+    assert [[button['text'] for button in row] for row in keyboard] == [
+        ['Copy link','Copy prompt'],['Open in Codex','Open in Claude'],['Search on Google']]
+    assert keyboard[0][0]['copy_text']['text']==source
+    expected=build_prompt(title,description,source)
+    for button,action in [(keyboard[0][1],'copy'),(keyboard[1][0],'codex'),(keyboard[1][1],'claude')]:
+        url=urlsplit(button['url'])
+        assert url.scheme=='https' and not url.query
+        params=parse_qs(url.fragment)
+        assert params=={'v':['1'],'action':[action],'prompt':[expected]}
+    search=urlsplit(keyboard[2][0]['url'])
+    assert search.scheme=='https' and search.netloc=='www.google.com' and search.path=='/search'
+    assert parse_qs(search.query)=={'q':[title]}
+    assert 'Source text' not in keyboard[2][0]['url']
+
+
+def test_google_search_removes_display_markup_and_only_normalizes_whitespace():
+    url=buttons('https://example.com/',' <b>New model</b>\n\tadds reasoning & tools ')['inline_keyboard'][2][0]['url']
+    assert parse_qs(urlsplit(url).query)=={'q':['New model adds reasoning & tools']}
 
 
 def test_formatter_escapes_untrusted_html_and_uses_one_source(tmp_path):
